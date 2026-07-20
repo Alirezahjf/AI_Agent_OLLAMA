@@ -95,8 +95,7 @@ class TelegramBot:
         await update.effective_message.reply_text(
             "سلام. من عامل کدنویسی محلی شما هستم. درخواستت را طبیعی و فارسی بنویس؛ "
             "فایل‌ها را بررسی می‌کنم، برای تغییر/اجرای دستور از تو تأیید می‌گیرم و خروجی ترمینال را تصویر می‌فرستم.\n\n"
-            f"شناسهٔ تلگرام شما: `{update.effective_user.id}`\nWorkspace: `{self.settings.workspace_root}`{warning}",
-            parse_mode="Markdown",
+            f"شناسهٔ تلگرام شما: {update.effective_user.id}\nWorkspace: {self.settings.workspace_root}{warning}",
             reply_markup=menu(),
         )
 
@@ -179,10 +178,11 @@ class TelegramBot:
             return
         if data == "status":
             await query.message.reply_text(
-                f"مدل: `{self.settings.ollama_model}`\nWorkspace: `{self.settings.workspace_root}`\nتأیید خودکار تغییرات: `{self.settings.auto_approve_mutations}`",
-                parse_mode="Markdown",
+                f"مدل: {self.settings.ollama_model}\n"
+                f"Workspace: {self.settings.workspace_root}\n"
+                f"تأیید خودکار تغییرات: {self.settings.auto_approve_mutations}",
                 reply_markup=menu(),
-            )
+)
             return
         verb, action_id = data.split(":", 1)
         pending = self.storage.pop_pending(action_id, chat_id)
