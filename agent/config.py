@@ -1,4 +1,4 @@
-"""Explicit, security-conscious configuration for the local Telegram agent."""
+"""Explicit, security-conscious configuration for the local chat agents."""
 
 from __future__ import annotations
 
@@ -10,10 +10,19 @@ from dotenv import load_dotenv
 
 
 PROVIDERS = frozenset({"ollama", "gapgpt", "avalai"})
+MESSENGERS = frozenset({"telegram", "bale", "any", "both"})
 
 
 def _bool(name: str, default: bool = False) -> bool:
     return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _id_set(name: str) -> frozenset[int]:
+    raw_ids = os.getenv(name, "")
+    try:
+        return frozenset(int(part.strip()) for part in raw_ids.split(",") if part.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must contain comma-separated numeric IDs.") from exc
 
 
 @dataclass(frozen=True)
@@ -35,19 +44,34 @@ class Settings:
     max_agent_turns: int
     model_timeout: int
     auto_approve_mutations: bool
+    bale_token: str = ""
+    bale_base_url: str = "https://tapi.bale.ai"
+    bale_base_file_url: str = "https://tapi.bale.ai/file"
+    allowed_bale_user_ids: frozenset[int] = frozenset()
+    avalai_service_tier: str = "default"
+    provider_max_retries: int = 4
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls, require_messenger: str = "telegram") -> "Settings":
         load_dotenv()
-        token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-        if not token:
-            raise RuntimeError("TELEGRAM_BOT_TOKEN is required; copy .env.example to .env.")
+        if require_messenger not in MESSENGERS:
+            choices = ", ".join(sorted(MESSENGERS))
+            raise RuntimeError(f"require_messenger must be one of: {choices}")
 
-        raw_ids = os.getenv("ALLOWED_TELEGRAM_USER_IDS", "")
-        try:
-            ids = frozenset(int(part.strip()) for part in raw_ids.split(",") if part.strip())
-        except ValueError as exc:
-            raise RuntimeError("ALLOWED_TELEGRAM_USER_IDS must contain comma-separated numeric IDs.") from exc
+        token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        bale_token = os.getenv("BALE_BOT_TOKEN", "").strip()
+        if require_messenger in {"telegram", "both"} and not token:
+            raise RuntimeError("TELEGRAM_BOT_TOKEN is required; copy .env.example to .env.")
+        if require_messenger in {"bale", "both"} and not bale_token:
+            raise RuntimeError(
+                "BALE_BOT_TOKEN is required; create a Bale bot with @botfather in Bale "
+                "and set it in .env."
+            )
+        if require_messenger == "any" and not token and not bale_token:
+            raise RuntimeError("At least one of TELEGRAM_BOT_TOKEN or BALE_BOT_TOKEN is required.")
+
+        ids = _id_set("ALLOWED_TELEGRAM_USER_IDS")
+        bale_ids = _id_set("ALLOWED_BALE_USER_IDS")
 
         root = Path(os.getenv("WORKSPACE_ROOT", str(Path.cwd()))).expanduser().resolve()
         if not root.is_dir():
@@ -83,4 +107,12 @@ class Settings:
             max_agent_turns=max(1, min(32, int(os.getenv("MAX_AGENT_TURNS", "16")))),
             model_timeout=max(10, int(os.getenv("MODEL_TIMEOUT_SECONDS", "180"))),
             auto_approve_mutations=_bool("AUTO_APPROVE_MUTATIONS"),
+            bale_token=bale_token,
+            bale_base_url=os.getenv("BALE_API_BASE_URL", "https://tapi.bale.ai").rstrip("/"),
+            bale_base_file_url=os.getenv(
+                "BALE_FILE_BASE_URL", "https://tapi.bale.ai/file"
+            ).rstrip("/"),
+            allowed_bale_user_ids=bale_ids,
+            avalai_service_tier=os.getenv("AVALAI_SERVICE_TIER", "default").strip().lower(),
+            provider_max_retries=max(0, min(8, int(os.getenv("PROVIDER_MAX_RETRIES", "4")))),
         )

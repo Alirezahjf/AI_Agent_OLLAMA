@@ -8,7 +8,11 @@ never writes runtime API keys to SQLite or the audit log.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import html
 import json
+import random
+import re
+import time
 from typing import Any, Iterable
 
 import requests
@@ -38,6 +42,31 @@ class ProviderProfile:
     title: str
     description: str
     recommended_models: tuple[tuple[str, str], ...]
+
+
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\[\]]{1,500})\]\((https?://[^\s()\[\]]{1,800})\)")
+_TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+def clean_base_url(value: str) -> str:
+    """Return a safe HTTPS-ish base URL even if a chat client mangled it.
+
+    Users often copy rendered Markdown such as
+    ``https://[api.avalai.ir](http://api.avalai.ir)/v1`` into .env.  Without this
+    cleanup requests sees the literal host ``[api.avalai.ir](http://...)`` and TLS
+    fails before the provider can answer.  We keep the visible link text so an
+    existing ``https://`` prefix remains intact.
+    """
+    text = html.unescape(str(value or "").strip())
+    for _ in range(4):
+        replaced = _MARKDOWN_LINK_RE.sub(lambda match: match.group(1), text)
+        if replaced == text:
+            break
+        text = replaced
+    text = text.strip().rstrip("/")
+    if text and not re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://", text):
+        text = "https://" + text
+    return text.rstrip("/")
 
 
 PROFILES: dict[str, ProviderProfile] = {
@@ -133,14 +162,104 @@ class OpenAICompatibleClient(ModelClient):
     """
 
     def __init__(
-        self, provider_id: str, base_url: str, api_key: str, model: str, timeout: int
+        self,
+        provider_id: str,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: int,
+        service_tier: str = "",
+        max_retries: int = 4,
     ) -> None:
         self.provider_id = provider_id
-        self.base_url, self.api_key, self.model, self.timeout = base_url, api_key, model, timeout
+        self.base_url = clean_base_url(base_url)
+        self.api_key, self.model, self.timeout = api_key, model, timeout
+        self.service_tier = service_tier.strip().lower()
+        self.max_retries = max(0, min(int(max_retries), 8))
 
     @property
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+
+    @staticmethod
+    def _retry_after_seconds(response: requests.Response | Any | None) -> float:
+        headers = getattr(response, "headers", {}) or {}
+        value = headers.get("Retry-After") or headers.get("retry-after")
+        if value is None:
+            return 0.0
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _rate_limit_hint(response: requests.Response | Any | None) -> str:
+        headers = getattr(response, "headers", {}) or {}
+        interesting = {
+            key: headers.get(key)
+            for key in (
+                "Retry-After",
+                "x-ratelimit-remaining-requests",
+                "x-ratelimit-reset-requests",
+                "x-ratelimit-remaining-tokens",
+                "x-ratelimit-reset-tokens",
+            )
+            if headers.get(key) is not None
+        }
+        if not interesting:
+            return ""
+        return " | " + "، ".join(f"{key}: {value}" for key, value in interesting.items())
+
+    @staticmethod
+    def _transient_exception(exc: requests.RequestException) -> bool:
+        return isinstance(
+            exc,
+            (
+                requests.Timeout,
+                requests.ConnectionError,
+                requests.exceptions.SSLError,
+            ),
+        )
+
+    def _sleep_before_retry(self, attempt: int, response: requests.Response | Any | None = None) -> None:
+        retry_after = self._retry_after_seconds(response)
+        base_delay = min(30.0, 1.5 * (2**attempt))
+        delay = max(retry_after, base_delay)
+        time.sleep(delay + random.uniform(0, min(delay * 0.25, 3.0)))
+
+    def _post_chat(self, body: dict[str, Any]) -> requests.Response:
+        last_error: requests.RequestException | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = requests.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=self._headers,
+                    json=body,
+                    timeout=self.timeout,
+                )
+                if response.status_code in _TRANSIENT_STATUS_CODES and attempt < self.max_retries:
+                    self._sleep_before_retry(attempt, response)
+                    continue
+                return response
+            except requests.RequestException as exc:
+                last_error = exc
+                if not self._transient_exception(exc) or attempt >= self.max_retries:
+                    raise
+                self._sleep_before_retry(attempt)
+        assert last_error is not None
+        raise last_error
+
+    def _complete_once(self, body: dict[str, Any], tools: list[dict[str, Any]]) -> dict[str, Any]:
+        response = self._post_chat(body)
+        # A provider may expose a text-only model. Retry once with the strict JSON
+        # fallback protocol from the system prompt rather than failing the workflow.
+        if response.status_code in {400, 422} and tools and "tools" in body:
+            body = dict(body)
+            body.pop("tools", None)
+            body.pop("tool_choice", None)
+            response = self._post_chat(body)
+        response.raise_for_status()
+        return response.json()
 
     def complete(self, messages: list[dict[str, str]], tools: list[dict[str, Any]]) -> ModelReply:
         body: dict[str, Any] = {
@@ -150,37 +269,48 @@ class OpenAICompatibleClient(ModelClient):
             "tool_choice": "auto",
             "temperature": 0.1,
         }
+        if self.provider_id == "avalai" and self.service_tier:
+            body["service_tier"] = self.service_tier
         try:
-            response = requests.post(
-                f"{self.base_url}/chat/completions",
-                headers=self._headers,
-                json=body,
-                timeout=self.timeout,
-            )
-            # A provider may expose a text-only model. Retry once with the strict
-            # JSON fallback protocol from the system prompt rather than failing a
-            # whole workflow solely because native tool calling is unavailable.
-            if response.status_code in {400, 422} and tools:
-                body.pop("tools")
-                body.pop("tool_choice")
-                response = requests.post(
-                    f"{self.base_url}/chat/completions",
-                    headers=self._headers,
-                    json=body,
-                    timeout=self.timeout,
-                )
-            response.raise_for_status()
-            payload = response.json()
+            try:
+                payload = self._complete_once(body, tools)
+            except (requests.HTTPError, requests.RequestException):
+                # AvalAI recommends falling back from flex to default for production
+                # interactive workflows when flex is unavailable or too slow.
+                if self.provider_id != "avalai" or body.get("service_tier") != "flex":
+                    raise
+                fallback = dict(body)
+                fallback["service_tier"] = "default"
+                payload = self._complete_once(fallback, tools)
             message = payload["choices"][0]["message"]
         except requests.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else "?"
+            response = exc.response
+            status = response.status_code if response is not None else "?"
+            if status == 429:
+                raise ProviderError(
+                    f"محدودیت نرخ {PROFILES[self.provider_id].title} فعال شد (HTTP 429). "
+                    "ربات چند بار با backoff تلاش کرد اما هنوز ظرفیت آزاد نشده است؛ "
+                    "چند لحظه بعد دوباره امتحان کنید."
+                    f"{self._rate_limit_hint(response)}"
+                ) from exc
+            if status in {500, 502, 503, 504}:
+                raise ProviderError(
+                    f"{PROFILES[self.provider_id].title} موقتاً در دسترس نیست (HTTP {status}). "
+                    "ربات با backoff تلاش مجدد انجام داد؛ کمی بعد دوباره امتحان کنید."
+                ) from exc
             raise ProviderError(
                 f"پاسخ ناموفق از {PROFILES[self.provider_id].title} (HTTP {status}). "
-                "کلید، مدل و اعتبار حساب را بررسی کنید."
+                "کلید، مدل، base URL و اعتبار حساب را بررسی کنید."
+            ) from exc
+        except requests.exceptions.SSLError as exc:
+            raise ProviderError(
+                f"ارتباط TLS با {PROFILES[self.provider_id].title} بعد از چند تلاش ناموفق بود. "
+                "اگر base URL را از چت کپی کرده‌اید مطمئن شوید دقیقاً این باشد: "
+                f"{self.base_url} . خطای SSL: {exc}"
             ) from exc
         except (requests.RequestException, KeyError, IndexError, ValueError) as exc:
             raise ProviderError(
-                f"ارتباط با {PROFILES[self.provider_id].title} ناموفق بود: {exc}"
+                f"ارتباط با {PROFILES[self.provider_id].title} بعد از چند تلاش ناموفق بود: {exc}"
             ) from exc
         return ModelReply(
             content=_content_to_text(message.get("content")),
@@ -189,15 +319,33 @@ class OpenAICompatibleClient(ModelClient):
 
     def list_models(self) -> list[str]:
         try:
-            response = requests.get(
-                f"{self.base_url}/models", headers=self._headers, timeout=min(30, self.timeout)
-            )
+            response = None
+            for attempt in range(min(self.max_retries, 3) + 1):
+                response = requests.get(
+                    f"{self.base_url}/models", headers=self._headers, timeout=min(30, self.timeout)
+                )
+                if response.status_code in _TRANSIENT_STATUS_CODES and attempt < min(self.max_retries, 3):
+                    self._sleep_before_retry(attempt, response)
+                    continue
+                break
+            assert response is not None
             response.raise_for_status()
             payload = response.json()
             return [str(item["id"]) for item in payload.get("data", []) if item.get("id")]
         except requests.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else "?"
+            response = exc.response
+            status = response.status_code if response is not None else "?"
+            if status == 429:
+                raise ProviderError(
+                    "دریافت مدل‌ها به محدودیت نرخ خورد (HTTP 429). "
+                    f"کمی بعد دوباره امتحان کنید.{self._rate_limit_hint(response)}"
+                ) from exc
             raise ProviderError(f"دریافت مدل‌ها ناموفق بود (HTTP {status}).") from exc
+        except requests.exceptions.SSLError as exc:
+            raise ProviderError(
+                "دریافت مدل‌ها به خطای TLS خورد. base URL را دقیق و بدون Markdown وارد کنید: "
+                f"{self.base_url}. خطا: {exc}"
+            ) from exc
         except (requests.RequestException, ValueError) as exc:
             raise ProviderError(f"دریافت مدل‌ها ناموفق بود: {exc}") from exc
 
@@ -287,15 +435,31 @@ class ProviderRouter:
                 f"کلید API برای {title} تنظیم نشده است. از دکمهٔ «مدل و API» یا متغیر محیطی استفاده کنید."
             )
         base_url = self.settings.gapgpt_base_url if provider == "gapgpt" else self.settings.avalai_base_url
-        return OpenAICompatibleClient(provider, base_url, key, selected_model, self.settings.model_timeout)
+        service_tier = self.settings.avalai_service_tier if provider == "avalai" else ""
+        return OpenAICompatibleClient(
+            provider,
+            base_url,
+            key,
+            selected_model,
+            self.settings.model_timeout,
+            service_tier=service_tier,
+            max_retries=self.settings.provider_max_retries,
+        )
 
     def validate_key(self, provider: str, api_key: str) -> list[str]:
         """Validate a key with GET /models; the key is never persisted by this call."""
         if provider not in {"gapgpt", "avalai"}:
             raise ProviderError("فقط کلید API ابری قابل اعتبارسنجی است.")
         base_url = self.settings.gapgpt_base_url if provider == "gapgpt" else self.settings.avalai_base_url
+        service_tier = self.settings.avalai_service_tier if provider == "avalai" else ""
         client = OpenAICompatibleClient(
-            provider, base_url, api_key.strip(), self.default_model(provider), self.settings.model_timeout
+            provider,
+            base_url,
+            api_key.strip(),
+            self.default_model(provider),
+            self.settings.model_timeout,
+            service_tier=service_tier,
+            max_retries=self.settings.provider_max_retries,
         )
         return client.list_models()
 

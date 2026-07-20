@@ -35,6 +35,32 @@ def test_patch_requires_one_exact_match(tools: LocalTools) -> None:
         tools.patch_file("src/app.py", "missing", "anything")
 
 
+def test_read_many_files_and_search_files(tools: LocalTools) -> None:
+    tools.write_file("src/app.py", "def add(a, b):\n    return a + b\n")
+    tools.write_file("tests/test_app.py", "from src.app import add\nassert add(1, 2) == 3\n")
+
+    bundle = tools.read_many_files(["src/app.py", "tests/test_app.py"])
+    assert "===== src/app.py =====" in bundle.text
+    assert "return a + b" in bundle.text
+    assert "===== tests/test_app.py =====" in bundle.text
+
+    found = tools.search_files("add", file_glob="*.py")
+    assert "src/app.py:1" in found.text
+    assert "tests/test_app.py:1" in found.text
+
+
+def test_search_files_respects_sensitive_and_binary_boundaries(tools: LocalTools) -> None:
+    tools.write_file("visible.txt", "needle here\n")
+    (tools.root / ".env").write_text("needle secret", encoding="utf-8")
+    (tools.root / "binary.bin").write_bytes(b"\xff\xfe needle")
+
+    result = tools.search_files("needle")
+
+    assert "visible.txt:1" in result.text
+    assert ".env" not in result.text
+    assert "binary.bin" not in result.text
+
+
 def test_command_output_and_exit_code(tools: LocalTools) -> None:
     result = tools.run_command("printf hello")
     assert "hello" in result.text

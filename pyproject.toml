@@ -1,7 +1,7 @@
 [project]
 name = "persian-ollama-coding-agent"
 version = "2.0.0"
-description = "A secure, provider-flexible Persian Telegram coding and workspace agent"
+description = "A secure, provider-flexible Persian Telegram/Bale coding and workspace agent"
 requires-python = ">=3.11"
 dependencies = [
   "python-telegram-bot[rate-limiter]>=21.0,<22",
@@ -13,6 +13,10 @@ dependencies = [
 [project.optional-dependencies]
 browser = ["playwright>=1.45,<2"]
 dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[project.scripts]
+persian-agent-telegram = "agent.bot:main"
+persian-agent-bale = "agent.bale_bot:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
