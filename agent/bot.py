@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 import re
 import textwrap
 import uuid
@@ -25,7 +26,7 @@ from .brain import OllamaAgent, Pending
 from .config import Settings
 from .providers import PROFILES, ProviderError, ProviderRouter
 from .storage import Storage
-from .tools import LocalTools
+from .tools import LocalTools, ToolResult
 
 
 @dataclass
@@ -239,9 +240,42 @@ class TelegramBot:
             await update.effective_message.reply_photo(
                 terminal_image(output.text), caption="🖥️ اسکرین‌شات خروجی آخرین دستور"
             )
+        if output:
+            await self._send_artifacts(update.effective_message, output)
         if final:
             for chunk in [final[index : index + 4000] for index in range(0, len(final), 4000)]:
                 await update.effective_message.reply_text(chunk, reply_markup=menu())
+
+    def _validated_image_artifact(self, artifact: object) -> Path | None:
+        """Only an existing PNG below WORKSPACE_ROOT may be sent to Telegram."""
+        try:
+            path = Path(artifact).resolve()  # type: ignore[arg-type]
+            if path.suffix.lower() != ".png" or not path.is_file():
+                return None
+            path.relative_to(self.settings.workspace_root.resolve())
+        except (OSError, TypeError, ValueError):
+            return None
+        return path
+
+    async def _send_artifacts(self, message, output: ToolResult) -> None:
+        """Send real files produced by the workflow (e.g. web screenshots).
+
+        A Telegram failure here must never crash the workflow; the user still gets
+        the text report and the file stays in the workspace.
+        """
+        for artifact in output.artifacts:
+            path = self._validated_image_artifact(artifact)
+            if path is None:
+                await message.reply_text("⚠️ یکی از فایل‌های خروجی عامل معتبر نبود و ارسال نشد.")
+                continue
+            try:
+                with path.open("rb") as handle:
+                    await message.reply_photo(handle, caption="📸 اسکرین‌شات ساخته‌شده توسط عامل")
+            except Exception as exc:  # network/API failures are operational, not fatal
+                await message.reply_text(
+                    f"⚠️ ارسال تصویر به تلگرام ناموفق بود ({type(exc).__name__}). "
+                    f"فایل در workspace ذخیره شده است: {path.name}"
+                )
 
     @staticmethod
     def _preview(pending: Pending) -> str:

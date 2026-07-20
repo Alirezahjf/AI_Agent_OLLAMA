@@ -30,10 +30,28 @@
 | اجرا و تست | `run_command` با timeout، خروجی محدود، exit code و تصویر ترمینال |
 | دسته‌بندی فایل | ابتدا `analyze_directory` (پسوندها و duplicateهای تا 5MB)، سپس preview؛ جابه‌جایی فقط با `apply=true` و تأیید، بدون overwrite |
 | وب | `search_web` متادیتای نتایج عمومی را می‌گیرد و آن را صریحاً **دادهٔ غیرقابل‌اعتماد** می‌داند |
-| screenshot وب | `capture_screenshot` برای URLهای HTTP(S)، با Playwright اختیاری و خروجی PNG در workspace |
+| تشخیص مرورگر | `diagnose_browser_runtime` وضع Python/Playwright/Chromiumِ **همان interpreter ربات** را فقط‌خواندنی گزارش می‌کند و در صورت نقص، دستور نصب دقیق با همان interpreter را می‌دهد |
+| screenshot وب | `capture_screenshot` برای URLهای HTTP(S)، با Playwright اختیاری و خروجی PNG در workspace؛ فایل واقعی PNG بلافاصله با `reply_photo` به تلگرام ارسال می‌شود |
 | screenshot خروجی command | خود ربات، تصویر آخرین خروجی ترمینال را بدون نیاز به desktop session می‌فرستد |
 
-تمام pathها با `resolve()` زیر `WORKSPACE_ROOT` کنترل می‌شوند. خواندن/نوشتن `.env`، credentialها، کلید SSH و مسیرهای حساس مسدود است. دستورهای واضحاً مخرب (`rm`، `mkfs`، shutdown، `git clean`، `git reset --hard` و …) hard-block هستند. تشخیص «read-only» عمداً کوچک و بدون shell chaining است؛ هر فرمان دیگر برای تأیید می‌آید.
+تمام pathها با `resolve()` زیر `WORKSPACE_ROOT` کنترل می‌شوند. `run_command` نیز دستورهایی را که به مسیر مطلق خارج از workspace (مثل `AppData` کاربر دیگر) یا به `..` خارج‌شونده اشاره دارند مسدود می‌کند. خواندن/نوشتن `.env`، credentialها، کلید SSH و مسیرهای حساس مسدود است. دستورهای واضحاً مخرب (`rm`، `mkfs`، shutdown، `git clean`، `git reset --hard` و …) و دستورهای مخرب Windows (`del`، `erase`، `rmdir`، `rd`، `format`، `diskpart`، `Remove-Item`) hard-block هستند. تشخیص «read-only» عمداً کوچک و بدون shell chaining است (`dir`، `tree`، `type`، `where`، `findstr` و همتاهای لینوکسی)؛ هر فرمان دیگر — از جمله chain مثل `cd /d folder && dir` — برای تأیید می‌آید.
+
+### اجرای command در Windows
+
+اگر ربات روی Windows اجرا شود، `run_command` دستورها را با `cmd.exe /d /s /c` (از `COMSPEC` با fallback به `SystemRoot\System32\cmd.exe`) اجرا می‌کند و به Git Bash یا WSL وابستگی ندارد. در Linux/macOS همان `bash -lc` استفاده می‌شود. اگر پوستهٔ سیستم پیدا نشود، workflow با پیام فارسی خوانا و `exit code: unavailable` تمام می‌شود، نه crash.
+
+مدل گاهی در چت نام فایل را به Markdown link تبدیل می‌کند (`check_[pw.py](http://pw.py)`) یا `&&` را به‌صورت `&amp;&amp;` می‌فرستد؛ یک normalizer داخل ابزارها متن visible را نگه می‌دارد، URL مخفی داخل link هرگز اجرا نمی‌شود و ورودی نامعتبر با ToolError رد می‌شود.
+
+### اسکرین‌شات وب و Playwright
+
+نکتهٔ مهم: Playwright باید در **همان Pythonی** نصب شود که ربات با آن اجرا می‌شود، نه لزوماً `py -3`. اگر `capture_screenshot` گفت Playwright/Chromium نصب نیست، خود پیام خطا دستور دقیق را با همان interpreter می‌دهد؛ مثلاً:
+
+```bat
+"C:\path\to\project\.venv\Scripts\python.exe" -m pip install playwright
+"C:\path\to\project\.venv\Scripts\python.exe" -m playwright install chromium
+```
+
+این دستورها را می‌توانید مستقیم با run_command اجرا و تأیید کنید (داخل workspace اجرا می‌شوند و نیازی به cd خارج از workspace نیست). ابزار `diagnose_browser_runtime` نیز هر زمان این وضعیت را گزارش می‌دهد.
 
 ---
 
@@ -96,12 +114,14 @@ pip install -e '.[dev]'
 cp .env.example .env
 ```
 
-برای screenshot واقعی صفحهٔ وب، browser اختیاری را هم نصب کنید:
+برای screenshot واقعی صفحهٔ وب، browser اختیاری را هم نصب کنید — حتماً با **همان interpreterی** که ربات را اجرا می‌کنید (اگر venv فعال است، همان `python`):
 
 ```bash
 pip install -e '.[browser,dev]'
-playwright install chromium
+python -m playwright install chromium
 ```
+
+در Windows اگر ربات را از `.venv` اجرا می‌کنید، `py -3 -m playwright install chromium` کافی نیست چون ممکن است به interpreter دیگری نصب کند؛ از ابزار `diagnose_browser_runtime` دستور دقیق را بگیرید.
 
 ### 3) پیکربندی `.env`
 
@@ -188,10 +208,10 @@ python -m agent.bot
 agent/config.py     تنظیمات محیطی و حدها
 agent/providers.py  adapterهای Ollama و OpenAI-compatible (GapGPT/AvalAI)
 agent/brain.py      workflow bounded: inspect → plan → change → test → verify
-agent/tools.py      ابزارهای محلی، sandbox مسیر، policy و schemaهای function calling
+agent/tools.py      ابزارهای محلی، sandbox مسیر، policy، normalizer خروجی مدل و schemaهای function calling
 agent/storage.py    SQLite: history، preference غیرمحرمانه، pending action، audit
-agent/bot.py        Telegram UI، تأیید، provider picker، history و تصویر ترمینال
-tests/              تست‌های policy، ابزار و provider
+agent/bot.py        Telegram UI، تأیید، provider picker، history، تصویر ترمینال و ارسال artifact
+tests/              تست‌های policy، ابزار، Windows، screenshot، ارسال artifact و provider
 ```
 
 ### مدل داده و privacy
@@ -221,4 +241,4 @@ pytest -q
 ruff check agent tests
 ```
 
-تست‌ها policy مهم را پوشش می‌دهند: sandbox مسیر، فایل حساس، write/patch اتمیک، hard block دستورات، تشخیص صحیح read-only، پیش‌نمایش و جابه‌جایی بدون overwrite، provider routing و عدم ذخیرهٔ key.
+تست‌ها policy مهم را پوشش می‌دهند: sandbox مسیر، فایل حساس، write/patch اتمیک، hard block دستورات (POSIX و Windows)، مسدودسازی مسیر خارج از workspace در command، تشخیص صحیح read-only، انتخاب cmd.exe/bash بر اساس سیستم‌عامل و مدیریت نبود پوسته، normalizer لینک‌های Markdown، تشخیص Playwright با `sys.executable`، screenshot با artifact، ارسال واقعی PNG با reply_photo، پیش‌نمایش و جابه‌جایی بدون overwrite، provider routing و عدم ذخیرهٔ key.

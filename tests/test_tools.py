@@ -1,8 +1,9 @@
+import os
 from pathlib import Path
 
 import pytest
 
-from agent.tools import LocalTools, ToolError
+from agent.tools import LocalTools, ToolError, normalize_tool_args, normalize_tool_text
 
 
 @pytest.fixture
@@ -70,3 +71,154 @@ def test_directory_organisation_previews_then_moves_without_overwriting(tools: L
     # Existing destination is protected; the source remains untouched.
     assert tools._path("downloads/notes.txt").is_file()
     assert tools._path("downloads/Documents/notes.txt").read_text() == "keep this"
+
+
+# --------------------------------------------------------------------------
+# Markdown-link / HTML-entity normalisation of model arguments
+# --------------------------------------------------------------------------
+
+
+def test_normalizer_strips_simple_markdown_links() -> None:
+    assert normalize_tool_text("py -3 check_[pw.py](http://pw.py)") == "py -3 check_pw.py"
+    assert normalize_tool_text("python [calculator.py](http://calculator.py)") == "python calculator.py"
+
+
+def test_normalizer_unwraps_nested_chat_mangled_links() -> None:
+    mangled = "check_[[pw.py](http://pw.py)]([http://pw.py](http://pw.py))"
+    assert normalize_tool_text(mangled) == "check_pw.py"
+
+
+def test_normalizer_decodes_html_entities_repeatedly() -> None:
+    assert normalize_tool_text("dir &amp;&amp; tree") == "dir && tree"
+    assert normalize_tool_text("&amp;amp;&amp;amp;") == "&&"
+
+
+def test_normalizer_never_keeps_hidden_link_urls() -> None:
+    # Only the visible text survives; the URL inside the link must not execute.
+    cleaned = normalize_tool_text("python [app.py](https://evil.example/app.py)")
+    assert cleaned == "python app.py"
+    assert "evil.example" not in cleaned
+
+
+def test_normalizer_rejects_truncated_markdown_link() -> None:
+    with pytest.raises(ToolError, match="Markdown link"):
+        normalize_tool_text("py -3 check_[pw.py](http://pw.py")
+
+
+def test_normalizer_leaves_plain_parentheses_and_brackets_alone() -> None:
+    assert normalize_tool_text("pytest tests/test_x.py::test_a[param]") == "pytest tests/test_x.py::test_a[param]"
+    assert normalize_tool_text("C:\\Users\\me\\Desktop project (1)\\file.py") == "C:\\Users\\me\\Desktop project (1)\\file.py"
+
+
+def test_normalize_tool_args_only_touches_path_like_keys() -> None:
+    args = {
+        "command": "py -3 [x.py](http://x.py)",
+        "content": "[keep this link](https://example.com) exactly",
+    }
+    cleaned = normalize_tool_args("write_file", args)
+    assert cleaned["command"] == "py -3 x.py"
+    assert cleaned["content"] == "[keep this link](https://example.com) exactly"
+
+
+def test_invoke_normalizes_command_before_execution(tools: LocalTools) -> None:
+    result = tools.invoke("run_command", {"command": "printf hello-[ok](http://gone.example)"})
+    assert "exit code: 0" in result.text
+    assert "hello-ok" in result.text
+    assert "gone.example" not in result.text
+
+
+# --------------------------------------------------------------------------
+# Destructive Windows commands and outside-workspace paths
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "del /f /q secret.txt",
+        "erase output.log",
+        "rmdir /s /q build",
+        "rd junk",
+        "format c:",
+        "diskpart",
+        "Remove-Item -Recurse folder",
+        "cmd /c del important.txt",
+        'powershell -Command "Remove-Item x"',
+    ],
+)
+def test_windows_destructive_commands_are_hard_blocked(tools: LocalTools, command: str) -> None:
+    assert tools._command_is_hard_blocked(command)
+    with pytest.raises(ToolError):
+        tools.run_command(command)
+
+
+def test_format_as_argument_is_not_blocked(tools: LocalTools) -> None:
+    assert not tools._command_is_hard_blocked("npm run format")
+    assert not tools._command_is_hard_blocked("git log --format=%H")
+    assert not tools._command_is_hard_blocked("python -m ruff format agent")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat /etc/passwd",
+        "type C:\\Users\\victim\\AppData\\Local\\ms-playwright\\chrome.exe",
+        "dir C:\\Users\\victim\\Documents",
+        "ls \\\\server\\share",
+        "cat ../../../etc/shadow",
+        "cd .. && dir",
+        'py -3 "C:\\Users\\victim\\Desktop\\other_folder\\check_pw.py"',
+    ],
+)
+def test_commands_referencing_outside_paths_are_rejected(tools: LocalTools, command: str) -> None:
+    with pytest.raises(ToolError, match="WORKSPACE_ROOT"):
+        tools.run_command(command)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX absolute-path scenario")
+def test_absolute_path_inside_workspace_is_allowed(tools: LocalTools) -> None:
+    tools.write_file("note.txt", "inside-note")
+    result = tools.run_command(f"cat {tools.root}/note.txt")
+    assert "inside-note" in result.text
+    assert "exit code: 0" in result.text
+
+
+def test_urls_in_commands_are_not_treated_as_paths(tools: LocalTools) -> None:
+    assert not tools._command_mentions_outside_paths("git clone https://github.com/user/repo.git")
+    assert not tools._command_mentions_outside_paths("pip install https://example.com/pkg.whl")
+    assert not tools._command_mentions_outside_paths("git log main..HEAD~1")
+
+
+# --------------------------------------------------------------------------
+# Read-only classification (POSIX + Windows)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["dir", "dir /s /b", "tree", "type report.txt", "where python", 'findstr /s "TODO" *.py'],
+)
+def test_windows_read_only_commands_are_recognised(command: str) -> None:
+    assert LocalTools.is_read_only(command)
+
+
+def test_windows_command_chain_is_not_read_only() -> None:
+    assert not LocalTools.is_read_only("cd /d folder && dir")
+    assert not LocalTools.is_read_only("dir & tree")
+
+
+def test_windows_read_only_commands_need_no_approval(tools: LocalTools) -> None:
+    assert not tools.requires_approval("run_command", {"command": "dir"})
+    assert not tools.requires_approval("run_command", {"command": "where python"})
+    # Chains still require approval even if every segment is read-only.
+    assert tools.requires_approval("run_command", {"command": "cd /d folder && dir"})
+
+
+def test_blocked_or_sensitive_commands_still_require_the_approval_gate(tools: LocalTools) -> None:
+    assert tools.requires_approval("run_command", {"command": "cat .env"})
+    assert tools.requires_approval("run_command", {"command": "del file.txt"})
+    assert tools.requires_approval("run_command", {"command": "cat /etc/passwd"})
+
+
+def test_diagnose_browser_runtime_needs_no_approval(tools: LocalTools) -> None:
+    assert not tools.requires_approval("diagnose_browser_runtime", {})
