@@ -144,6 +144,40 @@ def test_agent_keeps_artifacts_when_later_tools_are_read_only(tmp_path: Path) ->
     assert "shot.png" in result.text
 
 
+def test_agent_preserves_command_screenshot_after_later_read_only_step(tmp_path: Path) -> None:
+    """Test/command output must still be available for a terminal PNG at the end."""
+    (tmp_path / "app.py").write_text("print('ok')", encoding="utf-8")
+    terminal = "$ pytest -q\n\n1 passed\n\n[exit code: 0]"
+    client = ScriptedClient(
+        [
+            ModelReply("", (ToolCall("run_command", {"command": "pytest -q"}),)),
+            ModelReply("", (ToolCall("list_files", {"path": ".", "depth": 1}),)),
+            ModelReply("تست موفق بود."),
+        ]
+    )
+    storage = Storage(tmp_path / "data" / "agent.sqlite3")
+    tools = LocalTools(tmp_path, timeout=5, max_output=2000)
+    real_invoke = tools.invoke
+
+    def fake_invoke(name: str, args: dict[str, Any]) -> ToolResult:
+        if name == "run_command":
+            return ToolResult(terminal, terminal_text=terminal)
+        return real_invoke(name, args)
+
+    tools.invoke = fake_invoke  # type: ignore[method-assign]
+    agent = OllamaAgent(
+        settings(tmp_path, auto_approve=True), storage, tools, FakeRouter(client)  # type: ignore[arg-type]
+    )
+
+    final, pending, result = agent.run(1, "تست بگیر و بعد فایل‌ها را ببین", lambda _: None)
+
+    assert pending is None
+    assert final == "تست موفق بود."
+    assert result is not None
+    assert "app.py" in result.text
+    assert result.terminal_text == terminal
+
+
 def test_command_rules_cover_windows_and_posix() -> None:
     windows = _command_rules("nt")
     assert "cmd.exe" in windows

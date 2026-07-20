@@ -8,7 +8,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 
-from agent.bot import TelegramBot
+from agent.bot import TelegramBot, clean_chat_text
 from agent.config import Settings
 from agent.tools import ToolResult
 
@@ -127,7 +127,7 @@ def test_terminal_screenshot_flow_is_preserved(tmp_path: Path) -> None:
 
     message.reply_photo.assert_called_once()
     kwargs = message.reply_photo.call_args.kwargs
-    assert kwargs["caption"] == "🖥️ اسکرین‌شات خروجی آخرین دستور"
+    assert kwargs["caption"] == "🖥️ اسکرین‌شات خروجی دستورها/تست‌ها"
 
 
 def test_artifact_validation_accepts_only_workspace_png(tmp_path: Path) -> None:
@@ -139,3 +139,27 @@ def test_artifact_validation_accepts_only_workspace_png(tmp_path: Path) -> None:
     assert bot._validated_image_artifact(tmp_path / "nope.png") is None
     assert bot._validated_image_artifact(png.parent) is None
     assert bot._validated_image_artifact(None) is None
+
+
+def test_clean_chat_text_removes_noisy_markdown() -> None:
+    raw = """
+# انجام شد ✅
+طبق دسته‌بندی پیشنهادی، **۲۹ فایل** که در ریشه‌ی `Desktop\\Downloads` بودند منتقل شدند.
+
+- `*.jpg / تصاویر` → `Downloads\\Images`
+- [مستندات](https://example.com) بررسی شد
+```text
+خلاصه بدون قاب کد
+```
+"""
+
+    cleaned = clean_chat_text(raw)
+
+    assert "#" not in cleaned
+    assert "**" not in cleaned
+    assert "`" not in cleaned
+    assert "```" not in cleaned
+    assert "۲۹ فایل" in cleaned
+    assert "Desktop\\Downloads" in cleaned
+    assert "• *.jpg / تصاویر" in cleaned
+    assert "مستندات (https://example.com)" in cleaned

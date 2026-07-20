@@ -1,4 +1,4 @@
-"""Telegram UI: approvals, provider setup, history, and terminal screenshots."""
+"""Telegram and Bale UIs: approvals, provider setup, history, and terminal screenshots."""
 
 from __future__ import annotations
 
@@ -76,10 +76,66 @@ def terminal_image(content: str) -> BytesIO:
     return data
 
 
+_MD_LINK = re.compile(r"\[([^\[\]]{1,300})\]\(([^\s()\[\]]{1,600})\)")
+_MD_INLINE_CODE = re.compile(r"`([^`\n]{1,500})`")
+_MD_BOLD_ITALIC = re.compile(r"(\*\*|__|~~)(.*?)\1")
+_MD_ITALIC = re.compile(r"(?<!\w)(\*|_)([^\n*_]{1,300})\1(?!\w)")
+_MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+")
+_MD_ORDERED_LIST = re.compile(r"^\s*\d+[.)]\s+")
+_MD_UNORDERED_LIST = re.compile(r"^\s*[-*+]\s+")
+
+
+def clean_chat_text(text: str) -> str:
+    """Render model reports as clean plain Persian text for Telegram/Bale.
+
+    The model may still emit Markdown despite instructions. Bale also applies
+    Markdown-like rendering to all messages, so visible report text should not
+    contain #, **, backticks, fenced blocks, or noisy Markdown list syntax.
+    Command output and file previews are intentionally not passed through this.
+    """
+    value = text.replace("\r\n", "\n").replace("\r", "\n")
+    value = re.sub(r"^\s*```[A-Za-z0-9_-]*\s*$", "", value, flags=re.MULTILINE)
+    value = _MD_LINK.sub(lambda match: f"{match.group(1)} ({match.group(2)})", value)
+    value = _MD_INLINE_CODE.sub(lambda match: match.group(1), value)
+    for _ in range(4):
+        changed = _MD_BOLD_ITALIC.sub(lambda match: match.group(2), value)
+        changed = _MD_ITALIC.sub(lambda match: match.group(2), changed)
+        if changed == value:
+            break
+        value = changed
+
+    clean_lines: list[str] = []
+    for raw_line in value.split("\n"):
+        line = _MD_HEADING.sub("", raw_line).strip()
+        if not line:
+            clean_lines.append("")
+            continue
+        if _MD_ORDERED_LIST.match(line):
+            line = "• " + _MD_ORDERED_LIST.sub("", line).strip()
+        elif _MD_UNORDERED_LIST.match(line):
+            line = "• " + _MD_UNORDERED_LIST.sub("", line).strip()
+        line = re.sub(r"\s{2,}", " ", line)
+        clean_lines.append(line)
+
+    compact: list[str] = []
+    blank_count = 0
+    for line in clean_lines:
+        if line:
+            blank_count = 0
+            compact.append(line)
+        else:
+            blank_count += 1
+            if blank_count <= 1:
+                compact.append("")
+    return "\n".join(compact).strip() or text.strip()
+
+
 class TelegramBot:
+    storage_filename = "agent.sqlite3"
+
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.storage = Storage(settings.data_dir / "agent.sqlite3")
+        self.storage = Storage(settings.data_dir / self.storage_filename)
         self.tools = LocalTools(settings.workspace_root, settings.command_timeout, settings.max_output_chars)
         self.providers = ProviderRouter(settings)
         self.agent = OllamaAgent(settings, self.storage, self.tools, self.providers)
@@ -236,14 +292,20 @@ class TelegramBot:
             return
 
         await status.edit_text("✅ مرحلهٔ workflow انجام شد.")
-        if output and output.text.startswith("$"):
+        terminal_text = ""
+        if output:
+            terminal_text = output.terminal_text or (output.text if output.text.startswith("$") else "")
+        if terminal_text:
             await update.effective_message.reply_photo(
-                terminal_image(output.text), caption="🖥️ اسکرین‌شات خروجی آخرین دستور"
+                terminal_image(terminal_text), caption="🖥️ اسکرین‌شات خروجی دستورها/تست‌ها"
             )
         if output:
             await self._send_artifacts(update.effective_message, output)
         if final:
-            for chunk in [final[index : index + 4000] for index in range(0, len(final), 4000)]:
+            clean_final = clean_chat_text(final)
+            for chunk in [
+                clean_final[index : index + 4000] for index in range(0, len(clean_final), 4000)
+            ]:
                 await update.effective_message.reply_text(chunk, reply_markup=menu())
 
     def _validated_image_artifact(self, artifact: object) -> Path | None:
@@ -427,7 +489,12 @@ class TelegramBot:
             return
         query = update.callback_query
         assert query and query.message and update.effective_chat
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception:
+            # Callback answering only clears the client's loading state. Older Bale clients may not
+            # support it, and a transient API failure must not prevent handling the actual action.
+            pass
         data, chat_id = query.data or "", update.effective_chat.id
         if data == "home":
             await query.message.reply_text("منوی اصلی", reply_markup=menu())
@@ -566,8 +633,88 @@ class TelegramBot:
         return app
 
 
+class BaleBot(TelegramBot):
+    """Bale messenger UI with the same handlers and agent workflow as Telegram.
+
+    Bale's Bot API is intentionally Telegram-compatible for the methods this
+    project uses (long polling, commands, inline keyboards, callback queries,
+    message edits/deletes, chat actions, and photo uploads). Therefore the
+    safest way to keep feature parity is to run the exact same handler methods
+    through python-telegram-bot, but point its Bot API base URLs at Bale.
+    """
+
+    storage_filename = "agent_bale.sqlite3"
+
+    def authorized(self, update: Update) -> bool:
+        user = update.effective_user
+        return bool(user) and (
+            not self.settings.allowed_bale_user_ids
+            or user.id in self.settings.allowed_bale_user_ids
+        )
+
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if await self.deny_if_needed(update):
+            return
+        assert update.effective_message and update.effective_user
+        provider, model = self._selection(update.effective_chat.id)  # type: ignore[union-attr]
+        warning = (
+            "\n⚠️ ALLOWED_BALE_USER_IDS خالی است؛ قبل از استفادهٔ واقعی allow-list را تنظیم کنید."
+            if not self.settings.allowed_bale_user_ids
+            else ""
+        )
+        await update.effective_message.reply_text(
+            "سلام. من عامل حرفه‌ای محلی شما در بله هستم: درخواست را تحلیل می‌کنم، "
+            "ساختار و فایل‌ها را واقعاً بررسی می‌کنم، تغییر را فقط با تأیید انجام می‌دهم، "
+            "سپس تست و نتیجه را گزارش می‌دهم.\n\n"
+            "برای API ابری از «مدل و API» استفاده کنید؛ کلیدی که در ربات وارد می‌کنید "
+            "فقط تا زمان اجرای همین برنامه در حافظه می‌ماند و در SQLite ذخیره نمی‌شود.\n\n"
+            f"شناسهٔ بله شما: {update.effective_user.id}\n"
+            f"Workspace: {self.settings.workspace_root}\n"
+            f"مدل فعال: {PROFILES[provider].title} / {model}{warning}",
+            reply_markup=menu(),
+        )
+
+    async def _send_artifacts(self, message, output: ToolResult) -> None:
+        for artifact in output.artifacts:
+            path = self._validated_image_artifact(artifact)
+            if path is None:
+                await message.reply_text("⚠️ یکی از فایل‌های خروجی عامل معتبر نبود و ارسال نشد.")
+                continue
+            try:
+                with path.open("rb") as handle:
+                    await message.reply_photo(handle, caption="📸 اسکرین‌شات ساخته‌شده توسط عامل")
+            except Exception as exc:  # network/API failures are operational, not fatal
+                await message.reply_text(
+                    f"⚠️ ارسال تصویر به بله ناموفق بود ({type(exc).__name__}). "
+                    f"فایل در workspace ذخیره شده است: {path.name}"
+                )
+
+    @staticmethod
+    def _endpoint_with_bot_prefix(base_url: str) -> str:
+        base = base_url.rstrip("/")
+        return base if base.endswith("/bot") else f"{base}/bot"
+
+    def application(self) -> Application:
+        bale_api = self._endpoint_with_bot_prefix(self.settings.bale_base_url)
+        bale_file_api = self._endpoint_with_bot_prefix(self.settings.bale_base_file_url)
+        app = (
+            Application.builder()
+            .token(self.settings.bale_token)
+            .base_url(bale_api)
+            .base_file_url(bale_file_api)
+            .build()
+        )
+        app.add_handler(CommandHandler("start", self.start))
+        app.add_handler(CommandHandler("status", self.status))
+        app.add_handler(CommandHandler("models", self.models_command))
+        app.add_handler(CommandHandler("model", self.set_model_command))
+        app.add_handler(CallbackQueryHandler(self.callback))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.text))
+        return app
+
+
 def main() -> None:
-    settings = Settings.from_env()
+    settings = Settings.from_env(require_messenger="telegram")
     TelegramBot(settings).application().run_polling(drop_pending_updates=False)
 
 
