@@ -271,12 +271,25 @@ class LocalTools:
         if name in self.SENSITIVE_NAMES or name.startswith(".env.") or "credential" in name:
             raise ToolError("فایل محرمانه (.env / credential / کلید) محافظت شده است.")
 
+    IGNORED_PARTS = {
+        ".git",
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".gradle",
+        ".cache",
+        "appdata",
+    }
+
     def _visible(self, path: Path) -> bool:
         try:
             self._assert_not_sensitive(path)
-        except ToolError:
+            parts = path.relative_to(self.root).parts
+        except (ToolError, ValueError):
             return False
-        return not any(part in {".git", "node_modules", ".venv", "__pycache__"} for part in path.relative_to(self.root).parts)
+        lowered = {part.lower() for part in parts}
+        return not any(part.lower() in lowered for part in self.IGNORED_PARTS)
 
     def _truncate(self, text: str) -> str:
         return text[: self.max_output] + ("\n… خروجی کوتاه شد" if len(text) > self.max_output else "")
@@ -289,13 +302,43 @@ class LocalTools:
         depth = max(0, min(int(depth), 6))
         lines: list[str] = []
         try:
-            items = sorted(target.rglob("*"), key=lambda item: (not item.is_dir(), str(item).lower()))
+            raw_items = list(target.rglob("*"))
         except OSError as exc:
             raise ToolError(f"خواندن پوشه ناموفق بود: {exc}") from exc
+
+        def _sort_key(p: Path):
+            try:
+                is_dir = p.is_dir()
+            except OSError:
+                is_dir = False
+            return (not is_dir, str(p).lower())
+
+        try:
+            items = sorted(raw_items, key=_sort_key)
+        except OSError:
+            items = raw_items
+
         for item in items:
-            if not self._visible(item) or len(item.relative_to(target).parts) > depth:
+            try:
+                if not self._visible(item):
+                    continue
+            except OSError:
                 continue
-            lines.append(("📁 " if item.is_dir() else "📄 ") + str(item.relative_to(self.root)))
+            try:
+                rel_to_target = item.relative_to(target)
+            except (ValueError, OSError):
+                continue
+            if len(rel_to_target.parts) > depth:
+                continue
+            try:
+                is_dir = item.is_dir()
+            except OSError:
+                continue
+            try:
+                rel_to_root = item.relative_to(self.root)
+            except (ValueError, OSError):
+                continue
+            lines.append(("📁 " if is_dir else "📄 ") + str(rel_to_root))
             if len(lines) >= 500:
                 lines.append("… (نتایج به ۵۰۰ مورد محدود شدند)")
                 break
@@ -375,7 +418,10 @@ class LocalTools:
         if target.is_file():
             candidates = [target]
         elif target.is_dir():
-            candidates = list(target.rglob("*"))
+            try:
+                candidates = list(target.rglob("*"))
+            except OSError:
+                candidates = []
         else:
             raise ToolError("مسیر جست‌وجو پیدا نشد.")
         needle = query if case_sensitive else query.lower()
@@ -386,17 +432,35 @@ class LocalTools:
         for item in sorted(candidates, key=lambda candidate: str(candidate).lower()):
             if len(matches) >= maximum:
                 break
-            if not item.is_file() or not self._visible(item):
+            try:
+                if not item.is_file():
+                    continue
+            except OSError:
+                skipped += 1
                 continue
-            relative = item.relative_to(self.root)
+            try:
+                if not self._visible(item):
+                    continue
+            except OSError:
+                skipped += 1
+                continue
+            try:
+                relative = item.relative_to(self.root)
+            except (ValueError, OSError):
+                skipped += 1
+                continue
             if not fnmatch.fnmatch(str(relative).replace("\\", "/"), file_glob):
                 continue
-            if item.stat().st_size > 1_000_000:
+            try:
+                if item.stat().st_size > 1_000_000:
+                    skipped += 1
+                    continue
+            except OSError:
                 skipped += 1
                 continue
             try:
                 lines = item.read_text(encoding="utf-8").splitlines()
-            except UnicodeDecodeError:
+            except (UnicodeDecodeError, OSError):
                 skipped += 1
                 continue
             scanned += 1
@@ -516,8 +580,35 @@ class LocalTools:
             for name in ("pyproject.toml", "package.json", "Cargo.toml", "go.mod", "requirements.txt", "Dockerfile")
             if (target / name).is_file()
         ]
-        tests = [p.relative_to(self.root) for p in target.rglob("*") if p.is_file() and self._visible(p) and ("test" in p.name.lower() or p.parts and "tests" in p.parts)]
-        tree = self.list_files(str(target.relative_to(self.root)), depth=3).text
+        tests: list[Path] = []
+        try:
+            for p in target.rglob("*"):
+                try:
+                    if not p.is_file():
+                        continue
+                except OSError:
+                    continue
+                try:
+                    if not self._visible(p):
+                        continue
+                except OSError:
+                    continue
+                try:
+                    name_match = "test" in p.name.lower()
+                    parts_match = "tests" in p.parts
+                except OSError:
+                    continue
+                if name_match or parts_match:
+                    try:
+                        tests.append(p.relative_to(self.root))
+                    except (ValueError, OSError):
+                        continue
+        except OSError:
+            tests = []
+        try:
+            tree = self.list_files(str(target.relative_to(self.root)), depth=3).text
+        except (ToolError, OSError):
+            tree = "(درخت پوشه به‌دلیل مسیر ناپایدار قابل‌نمایش نیست.)"
         summary = [f"پروژه: {target.relative_to(self.root)}", f"فایل‌های راه‌انداز: {', '.join(manifests) or 'یافت نشد'}", f"فایل‌های تست: {len(tests)}", "", "درخت (عمق ۳):", tree]
         return ToolResult("\n".join(summary))
 
@@ -526,16 +617,54 @@ class LocalTools:
         self._assert_not_sensitive(target)
         if not target.is_dir():
             raise ToolError("مسیر باید پوشه باشد.")
-        iterator = target.rglob("*") if recursive else target.iterdir()
-        files = [item for item in iterator if item.is_file() and self._visible(item)]
+        try:
+            iterator = target.rglob("*") if recursive else target.iterdir()
+        except OSError:
+            iterator = []
+        files: list[Path] = []
+        skipped_unavailable = 0
+        for item in iterator:
+            try:
+                if not item.is_file():
+                    continue
+            except OSError:
+                skipped_unavailable += 1
+                continue
+            try:
+                if not self._visible(item):
+                    continue
+            except OSError:
+                skipped_unavailable += 1
+                continue
+            try:
+                # Ensure we can stat; if not, count as unavailable
+                item.stat()
+            except OSError:
+                skipped_unavailable += 1
+                continue
+            files.append(item)
+
         categories: dict[str, list[Path]] = {key: [] for key in self.CATEGORY_NAMES}
         hashes: dict[str, list[Path]] = {}
         skipped_large = 0
         for item in files:
-            category = self._category(item)
+            try:
+                category = self._category(item)
+            except OSError:
+                skipped_unavailable += 1
+                continue
             categories[category].append(item)
-            if item.stat().st_size <= 5_000_000:
-                digest = self._sha256(item)
+            try:
+                size = item.stat().st_size
+            except OSError:
+                skipped_unavailable += 1
+                continue
+            if size <= 5_000_000:
+                try:
+                    digest = self._sha256(item)
+                except OSError:
+                    skipped_unavailable += 1
+                    continue
                 hashes.setdefault(digest, []).append(item)
             else:
                 skipped_large += 1
@@ -549,6 +678,8 @@ class LocalTools:
             lines.append("  • " + " | ".join(str(p.relative_to(self.root)) for p in group))
         if skipped_large:
             lines.append(f"{skipped_large} فایل بزرگ‌تر از 5MB برای duplicate-check هش نشد.")
+        if skipped_unavailable:
+            lines.append(f"{skipped_unavailable} مسیر ناپایدار/غیرقابل‌دسترسی رد شد.")
         lines.append("برای جابه‌جایی امن، ابتدا organize_files با apply=false برنامه را ببینید؛ سپس apply=true تأیید می‌خواهد.")
         return ToolResult("\n".join(lines))
 
@@ -931,6 +1062,8 @@ class LocalTools:
             return methods[name](**args)
         except TypeError as exc:
             raise ToolError(f"پارامترهای ابزار نامعتبرند: {exc}") from exc
+        except OSError as exc:
+            raise ToolError(f"خطای فایل/سیستم هنگام اجرای ابزار: {exc}") from exc
 
     def requires_approval(self, name: str, args: dict[str, Any]) -> bool:
         if name in {"write_file", "patch_file", "create_directory", "capture_screenshot"}:
