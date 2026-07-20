@@ -1,92 +1,218 @@
-# عامل حرفه‌ای کدنویسی فارسی با Ollama و Telegram
+# عامل حرفه‌ای فارسی برای Telegram — Ollama / GapGPT / AvalAI
 
-یک عامل محلی و فارسی برای توسعهٔ نرم‌افزار که با مدل نصب‌شدهٔ شما (`qwen2.5:7b`) کار می‌کند. شما به ربات تلگرام دستور طبیعی می‌دهید؛ عامل پروژه را بررسی می‌کند، مراحلش را اعلام می‌کند، برای هر تغییر یا دستورِ تغییردهنده تأیید می‌گیرد، خروجی را تحلیل می‌کند و از آخرین خروجی ترمینال یک تصویر برای تلگرام می‌فرستد.
+یک **عامل واقعی برای workflow توسعه و مدیریت workspace** است، نه یک chatbot که فقط جواب یا یک JSON نمایشی می‌دهد. کاربر در تلگرام هدف را با زبان طبیعی می‌گوید؛ عامل وضعیت واقعی پوشه را بررسی می‌کند، برنامهٔ اجرایی می‌چیند، فایل‌ها و ساختار پروژه را مرحله‌ای می‌سازد، برای هر تغییر تأیید می‌گیرد، تست را اجرا می‌کند، خطا را تحلیل می‌کند و تا سقف مشخص اصلاح/اعتبارسنجی را ادامه می‌دهد. خروجی آخرین دستور نیز به‌شکل تصویر PNG ترمینال در تلگرام فرستاده می‌شود.
 
-> **اصل امنیتی:** این برنامه عمداً «عامل اجرای کور» نیست. مدل زبانی ممکن است اشتباه کند یا با prompt-injection گمراه شود. اجرای دستورهای تغییردهنده و نوشتن فایل، پیش‌فرض نیازمند تأیید شماست. فقط روی حساب/ماشین شخصی و workspace محدود اجرا کنید.
+> **امنیت قبل از اتوماسیون:** این برنامه روی فایل‌ها و فرمان‌های واقعی کار می‌کند. هیچ LLM—even بهترین مدل ابری—جایگزین تأیید انسان و محیط ایزوله نیست. برای کار جدی آن را در یک VM یا container بدون secret و با یک workspace mount‌شده اجرا کنید.
 
-## قابلیت‌ها
+---
 
-- اتصال مستقیم به Ollama محلی از طریق `http://127.0.0.1:11434/api/chat`؛ بدون کلید API ابری
-- گفتگوی کاملاً فارسی، با حافظهٔ ماندگار SQLite برای هر گفتگوی تلگرام
-- دکمه‌های کم‌تعداد و کاربردی: گفتگوی جدید، پاک‌سازی حافظه، وضعیت؛ کنترل اصلی فقط با پرامپت است
-- ابزارهای واقعی و قابل‌ممیزی: فهرست فایل، خواندن محدودهٔ فایل، نوشتن فایل و اجرای فرمان توسعه
-- sandbox مسیر: ابزارهای فایل فقط داخل `WORKSPACE_ROOT` کار می‌کنند؛ خروج از آن رد می‌شود
-- تأیید جداگانه برای تغییر فایل و فرمان‌های غیر فقط-خواندنی؛ دستورهای واضحاً فاجعه‌بار مسدود می‌شوند
-- timeout، محدودیت حجم خروجی، محدودیت حجم فایل و چرخهٔ حداکثر ۸ ابزار برای جلوگیری از هنگ/loop
-- گزارش زندهٔ مرحلهٔ تحلیل و اجرا در تلگرام و تصویر PNG از خروجی آخرین فرمان
-- حافظه را با «پاک‌کردن حافظه» برای همان چت پاک کنید، یا با «گفتگوی جدید» به thread مستقل بروید.
+## چه چیزهایی نسبت به نسخهٔ ساده بهتر شده‌اند؟
 
-## پیش‌نیازها
+### Agent workflow، نه پاسخ نمایشی
 
-- Linux/macOS یا محیطی با `bash` و Python **3.11+**
-- یک ربات Telegram از [@BotFather](https://t.me/BotFather)
-- Ollama نصب و مدل دریافت‌شده:
+عامل دستورالعمل عملیاتی مشخصی دارد:
+
+1. **فهم هدف و بررسی واقعی:** ابتدا workspace و فایل‌های مرتبط را با ابزار می‌خواند؛ ساختار یا نام فایل را حدس نمی‌زند.
+2. **برنامه و ساختار:** برای پروژهٔ جدید، پوشه‌ها، manifest، ماژول‌ها، تست‌ها و فایل‌های لازم را مرحله‌ای می‌سازد. برای پروژهٔ موجود، ابتدا فایل مرتبط را می‌خواند و با patch کوچک تغییر می‌دهد.
+3. **کنترل تغییر:** نوشتن/patch فایل، ساخت پوشه، اجرای فرمان تغییردهنده، جابه‌جایی فایل و ساخت screenshot همگی در تلگرام دکمهٔ **تأیید و اجرا / لغو** دارند.
+4. **تست و حلقهٔ اصلاح:** بعد از کد، عامل lint/test مناسب را اجرا یا پیشنهاد می‌کند. exit code و خروجی را تحلیل می‌کند؛ اگر خطا ببیند علت و اصلاح حداقلی را گزارش می‌کند و پس از تأیید دوباره اعتبارسنجی می‌کند.
+5. **گزارش قابل پیگیری:** در پایان فایل‌های مهم، تست‌های واقعاً اجراشده، خطاهای باقی‌مانده و گام بعدی را می‌گوید. رخدادها و history هر گفتگوی تلگرام در SQLite ثبت می‌شوند.
+
+حلقهٔ ابزار با `MAX_AGENT_TURNS` محدود شده تا مدل در loop بی‌پایان نماند. اگر به سقف برسد، صادقانه توقف را گزارش می‌کند.
+
+### ابزارهای واقعی و محافظت‌شده
+
+| قابلیت | رفتار |
+|---|---|
+| بررسی پروژه | `inspect_project`، درخت فایل، manifestها و تست‌ها را نشان می‌دهد |
+| فایل | list، read با شمارهٔ خط، write اتمیک، و `patch_file` با تطابق دقیق یک‌باره |
+| ساخت پروژه | `create_directory` و `write_file`، با تأیید کاربر |
+| اجرا و تست | `run_command` با timeout، خروجی محدود، exit code و تصویر ترمینال |
+| دسته‌بندی فایل | ابتدا `analyze_directory` (پسوندها و duplicateهای تا 5MB)، سپس preview؛ جابه‌جایی فقط با `apply=true` و تأیید، بدون overwrite |
+| وب | `search_web` متادیتای نتایج عمومی را می‌گیرد و آن را صریحاً **دادهٔ غیرقابل‌اعتماد** می‌داند |
+| screenshot وب | `capture_screenshot` برای URLهای HTTP(S)، با Playwright اختیاری و خروجی PNG در workspace |
+| screenshot خروجی command | خود ربات، تصویر آخرین خروجی ترمینال را بدون نیاز به desktop session می‌فرستد |
+
+تمام pathها با `resolve()` زیر `WORKSPACE_ROOT` کنترل می‌شوند. خواندن/نوشتن `.env`، credentialها، کلید SSH و مسیرهای حساس مسدود است. دستورهای واضحاً مخرب (`rm`، `mkfs`، shutdown، `git clean`، `git reset --hard` و …) hard-block هستند. تشخیص «read-only» عمداً کوچک و بدون shell chaining است؛ هر فرمان دیگر برای تأیید می‌آید.
+
+---
+
+## ارائه‌دهندگان و مدل‌ها
+
+عامل یک لایهٔ provider مستقل دارد؛ ابزارها و workflow برای همه یکسان‌اند:
+
+| Provider | اتصال | مدل پیشنهادی برای agent/coding |
+|---|---|---|
+| **Ollama** | `http://127.0.0.1:11434/api/chat` | مدل محلی `OLLAMA_MODEL` (مثلاً `qwen2.5:7b`) |
+| **GapGPT** | OpenAI-compatible: `https://api.gapgpt.app/v1/chat/completions` | `claude-sonnet-5`؛ کیفیت بیشتر: `gpt-5.6-sol`؛ متعادل: `gpt-5.6-terra` |
+| **AvalAI** | OpenAI-compatible: `https://api.avalai.ir/v1/chat/completions` | `claude-sonnet-5`؛ استدلال بیشتر: `gpt-5.6-sol`؛ کدنویسی long-context: `kimi-k2.7-code` |
+
+مدل‌های OpenAI-compatible با native **function calling** صدا زده می‌شوند. اگر مدل یا Ollama نصب‌شده function call را برنگرداند، عامل fallback محدود JSON تک‌ابزاری دارد؛ هیچ متن تولیدشده توسط مدل مستقیماً به shell یا Python داده نمی‌شود.
+
+### کلید API: امن و انعطاف‌پذیر
+
+دو روش وجود دارد:
+
+1. **پیشنهادی (پایدار):** کلید را فقط در محیط یا secret manager نگه دارید:
+
+```dotenv
+DEFAULT_PROVIDER=avalai
+AVALAI_API_KEY=sk-...
+# یا
+DEFAULT_PROVIDER=gapgpt
+GAPGPT_API_KEY=...
+```
+
+2. **موقت از تلگرام:** منوی `⚙️ مدل و API` → GapGPT/AvalAI یا `🔎 تشخیص API`. کلید برای تشخیص با `GET /models` روی endpoint مستند هر سرویس بررسی می‌شود. در صورت تشخیص، دکمهٔ **درست است / اشتباه است** می‌آید و کاربر می‌تواند provider را دستی تعیین کند.
+
+کلید واردشده در Telegram **هرگز در SQLite، audit یا تاریخچهٔ agent ذخیره نمی‌شود** و ربات تلاش می‌کند پیام کلید را حذف کند؛ با این حال Telegram محیط secret manager نیست. برای کلید دائمی/حساس، `.env` یا secret manager روش درست است. کلید session با restart برنامه از RAM پاک می‌شود.
+
+از `/models` یا دکمهٔ `🔄 دریافت مدل‌های قابل‌دسترسی` برای فهرست واقعی مدل‌های account فعلی استفاده کنید. `/model MODEL_ID` نیز نام مدل دلخواه را تنظیم می‌کند.
+
+---
+
+## نصب
+
+### 1) پیش‌نیازها
+
+- Python **3.11+**
+- یک bot token از [@BotFather](https://t.me/BotFather)
+- یک `WORKSPACE_ROOT` اختصاصی و موجود
+- برای حالت محلی: [Ollama](https://ollama.com) و یک مدل
 
 ```bash
 ollama pull qwen2.5:7b
 ollama serve
-# در یک ترمینال دیگر برای اطمینان:
-ollama run qwen2.5:7b
 ```
 
-## نصب
+### 2) نصب پکیج
 
 ```bash
 git clone https://github.com/Alirezahjf/AI_Agent_OLLAMA.git
 cd AI_Agent_OLLAMA
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate              # Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install -e '.[dev]'
 cp .env.example .env
 ```
 
-فایل `.env` را ویرایش کنید:
+برای screenshot واقعی صفحهٔ وب، browser اختیاری را هم نصب کنید:
 
-```dotenv
-TELEGRAM_BOT_TOKEN=123456:توکن-واقعی-ربات
-OLLAMA_MODEL=qwen2.5:7b
-WORKSPACE_ROOT=/home/me/projects
-# ابتدا /start را به ربات بفرستید تا ID عددی شما را نشان دهد، سپس این مقدار را پر کنید:
-ALLOWED_TELEGRAM_USER_IDS=123456789
+```bash
+pip install -e '.[browser,dev]'
+playwright install chromium
 ```
 
-`WORKSPACE_ROOT` باید **پوشه‌ای موجود** باشد و بهتر است محل پروژه‌های شما باشد، نه `/home` یا ریشهٔ سیستم. دایرکتوری `DATA_DIR` حاوی حافظهٔ گفتگوهاست؛ آن را در backup خصوصی نگه دارید و هرگز commit نکنید.
+### 3) پیکربندی `.env`
 
-اجرا:
+حداقل نمونه برای Ollama:
+
+```dotenv
+TELEGRAM_BOT_TOKEN=123456:real-bot-token
+ALLOWED_TELEGRAM_USER_IDS=123456789
+WORKSPACE_ROOT=/home/me/projects
+DATA_DIR=/home/me/.local/share/persian-agent
+DEFAULT_PROVIDER=ollama
+OLLAMA_MODEL=qwen2.5:7b
+```
+
+نمونه GapGPT:
+
+```dotenv
+DEFAULT_PROVIDER=gapgpt
+GAPGPT_BASE_URL=https://api.gapgpt.app/v1
+GAPGPT_API_KEY=YOUR_GAPGPT_API_KEY
+DEFAULT_MODEL=claude-sonnet-5
+```
+
+نمونه AvalAI:
+
+```dotenv
+DEFAULT_PROVIDER=avalai
+AVALAI_BASE_URL=https://api.avalai.ir/v1
+AVALAI_API_KEY=sk-...
+DEFAULT_MODEL=claude-sonnet-5
+```
+
+`DEFAULT_PROVIDER=auto` در صورت وجود `AVALAI_API_KEY` ابتدا AvalAI، سپس GapGPT و در نبود هر دو Ollama را انتخاب می‌کند. تمام تنظیمات و حدهای زمان در [`.env.example`](.env.example) توضیح داده شده‌اند.
+
+> ابتدا `/start` را بفرستید تا ID عددی خود را ببینید؛ سپس `ALLOWED_TELEGRAM_USER_IDS` را پر و برنامه را restart کنید. ربات با allow-list خالی نباید عمومی شود.
+
+### 4) اجرا
 
 ```bash
 python -m agent.bot
 ```
 
-در تلگرام `/start` را بزنید. اگر allow-list هنوز خالی است، ربات شناسهٔ عددی شما را نمایش می‌دهد؛ آن را در `.env` بگذارید و برنامه را restart کنید. **ربات با allow-list خالی را عمومی نکنید.**
+---
 
-## نمونه دستورهای فارسی
+## تجربهٔ کاربری Telegram
 
-- «پروژه را بررسی کن، ساختارش را توضیح بده و ایرادهای احتمالی را بگو.»
-- «فایل‌های تست را پیدا کن، تست‌ها را اجرا کن و فقط بعد از تأیید من خطاها را اصلاح کن.»
-- «در این پروژه یک endpoint برای health check اضافه کن؛ اول فایل‌های مرتبط را بخوان.»
-- «داخل پوشهٔ downloads پروژه، فایل‌های تکراری را فهرست کن و برای مرتب‌سازی برنامه بده.»
-- «تغییرات git را بررسی کن و یک پیام commit پیشنهادی فارسی بده.»
+- `/start` — معرفی، ID کاربر و provider فعال
+- `/status` — مدل، منبع کلید (فقط «ENV» یا «جلسه»، نه خود کلید)، workspace و guardrailها
+- `/models` — فهرست مدل‌های واقعی provider فعلی
+- `/model claude-sonnet-5` — مدل دلخواه (بدون واردکردن secret)
+- `⚙️ مدل و API` — تغییر Ollama/GapGPT/AvalAI، ورود موقت کلید و auto-detection
+- `📜 تاریخچه` — پیام‌ها و auditهای گفتگوی فعلی
+- `➕ گفتگوی جدید` — thread جدید با حفظ threadهای قبلی
+- `🧹 پاک‌کردن حافظه` — فقط حافظهٔ thread فعلی را پاک می‌کند
 
-عامل ابتدا اطلاعات لازم را می‌خواند. هنگام نوشتن فایل یا فرمانی مثل `pytest` / `npm install`، دکمهٔ **اجرا** یا **لغو** می‌فرستد. پس از تأیید، نتیجه را به مدل می‌دهد تا بررسی کند. `AUTO_APPROVE_MUTATIONS=true` این محافظ را حذف می‌کند و فقط برای VM ایزوله توصیه می‌شود.
+نمونه درخواست‌های درست:
 
-## مدل و پروتکل ابزار
-
-عامل از `/api/chat` Ollama استفاده می‌کند و به مدل یک دستور سیستم فارسی می‌دهد. مدل در زمان نیاز یک JSON تک‌ابزاری مانند زیر تولید می‌کند و هیچ کد دلخواهی از پاسخ مدل مستقیم اجرا نمی‌شود:
-
-```json
-{"tool":"read_file","args":{"path":"src/app.py","start_line":1,"end_line":220}}
+```text
+داخل پوشهٔ Machine_hesab اگر نبود آن را بساز. یک ماشین‌حساب پایتون CLI ساخت‌یافته
+با مدیریت ورودی نامعتبر، تقسیم بر صفر، README و تست pytest بنویس. قبل از هر تغییر
+فایل‌های فعلی را بررسی کن؛ بعد از ساخت pytest را اجرا کن و اگر خطا داشت علت را بگو و اصلاح کن.
 ```
 
-ابزارهای مجاز: `list_files`، `read_file`، `write_file` و `run_command`. پاسخ نهایی معمولی است. این طراحی، لاگ گفتگو و خروجی هر ابزار را برای ادامهٔ کار در SQLite حفظ می‌کند.
+```text
+این پروژه را بررسی کن، ساختار و تست‌هایش را گزارش بده. سپس endpoint health-check را
+با کمترین تغییر اضافه کن، تست مناسب بنویس و نتیجهٔ اجرای تست را با exit code گزارش کن.
+```
 
-## مرزهای امنیتی مهم
+```text
+پوشه downloads را فقط تحلیل و دسته‌بندی پیشنهادی بده؛ duplicateها را پیدا کن، اما تا
+وقتی preview را تأیید نکرده‌ام هیچ فایلی را جابه‌جا نکن.
+```
 
-- این **container امنیتی کامل نیست**. `bash` برای workflowهای توسعه لازم است؛ اگر فرمان‌های مورد تأیید را در سیستم اصلی اجرا کنید، همان سطح دسترسی کاربر برنامه را دارند. برای ایزوله‌سازی قوی، این برنامه را داخل Docker/VM بدون secrets و با mount محدود اجرا کنید.
-- هرگز token، فایل `.env`، کلید SSH یا credentials را به workspace قابل‌خواندن عامل اضافه نکنید.
-- allow-list تلگرام را حتماً تنظیم کنید. توکن BotFather را rotate کنید اگر در جایی افشا شد.
-- فرمان‌های بسیار خطرناک (`rm -rf /`، `mkfs`، خاموش‌کردن سیستم، curl|bash و موارد مشابه) مسدود می‌شوند؛ این فقط دفاع لایه‌ای است، نه جایگزین ایزوله‌سازی.
-- قبل از تأیید، متن کامل فرمان و مسیر/اندازهٔ فایل نمایش داده می‌شود. بدون بررسی تأیید نکنید.
+```text
+برای مستندات رسمی FastAPI درباره lifespan وب جست‌وجو کن، لینک‌های منبع را بده و هیچ
+دستور یا کدی از صفحهٔ وب را بدون بررسی اجرا نکن.
+```
+
+---
+
+## معماری
+
+```text
+agent/config.py     تنظیمات محیطی و حدها
+agent/providers.py  adapterهای Ollama و OpenAI-compatible (GapGPT/AvalAI)
+agent/brain.py      workflow bounded: inspect → plan → change → test → verify
+agent/tools.py      ابزارهای محلی، sandbox مسیر، policy و schemaهای function calling
+agent/storage.py    SQLite: history، preference غیرمحرمانه، pending action، audit
+agent/bot.py        Telegram UI، تأیید، provider picker، history و تصویر ترمینال
+tests/              تست‌های policy، ابزار و provider
+```
+
+### مدل داده و privacy
+
+- conversation و audit در `DATA_DIR/agent.sqlite3` هستند؛ از آن backup خصوصی بگیرید.
+- preference فقط provider/model است؛ **API key هیچ جدول SQLite ندارد**.
+- `pending_actions` برای preview/approval ذخیره می‌شود؛ محتوای `write_file` در audit تکرار نمی‌شود.
+- history برای جلوگیری از پرشدن context به تعداد پیام و 55k کاراکتر اخیر محدود می‌شود؛ خروجی بزرگ ابزار در context کوتاه می‌شود.
+
+---
+
+## امنیت و مرزها
+
+1. **تأیید به‌معنای sandbox نیست.** فرمان تأییدشده با سطح دسترسی process اجرا می‌شود. برای پروژه/دادهٔ حساس VM/container لازم است.
+2. **فایل secret وارد workspace نکنید.** guardrail جلوی مسیرهای شناخته‌شده را می‌گیرد اما جای مدیریت صحیح رازها را نمی‌گیرد.
+3. **خروجی وب، dependency و log می‌توانند prompt injection داشته باشند.** agent آن‌ها را دادهٔ غیرقابل‌اعتماد فریم می‌کند؛ تأیید انسانی هنوز ضروری است.
+4. `AUTO_APPROVE_MUTATIONS=true` فقط در VM disposable مجاز است. حتی با آن، hard blockها باقی می‌مانند.
+5. `run_command` برای workflow توسعه لازم است، ولی فرمان‌های install/test نیز ممکن است script دلخواه اجرا کنند؛ قبل از تأیید متن کامل را بخوانید.
+6. سرویس‌های ابری کد، context و خروجی ابزار لازم را به provider انتخاب‌شده می‌فرستند. برای دادهٔ محرمانه از Ollama محلی استفاده کنید.
+
+---
 
 ## تست و کیفیت
 
@@ -95,15 +221,4 @@ pytest -q
 ruff check agent tests
 ```
 
-تست‌ها شامل مرز workspace، خروجی فرمان، مسدودسازی فرمان تخریبی و سیاست تأیید هستند.
-
-## ساختار پروژه
-
-```text
-agent/config.py   # تنظیمات محیطی
-agent/storage.py  # حافظه SQLite و درخواست‌های در انتظار تأیید
-agent/tools.py    # ابزارهای محلی و guardrailها
-agent/brain.py    # loop مدل Ollama و JSON tool protocol
-agent/bot.py      # رابط Telegram، دکمه‌ها و تصویر ترمینال
-tests/            # تست‌های سیاست امنیتی ابزارها
-```
+تست‌ها policy مهم را پوشش می‌دهند: sandbox مسیر، فایل حساس، write/patch اتمیک، hard block دستورات، تشخیص صحیح read-only، پیش‌نمایش و جابه‌جایی بدون overwrite، provider routing و عدم ذخیرهٔ key.
