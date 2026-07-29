@@ -8,14 +8,15 @@
 ┌─────────────────────────────────────────────────────────────┐
 │  Frontends (thin clients)                                   │
 │                                                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │  CLI         │  │  Web UI      │  │  Telegram    │      │
-│  │  (terminal)  │  │  (browser)   │  │  Bot         │      │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘      │
-│         │                 │                  │              │
-└─────────┼─────────────────┼──────────────────┼──────────────┘
-          │                 │                  │
-          └─────────────────┴──────────────────┘
+│  ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐   │
+│  │ Desktop   │ │ Web UI    │ │ CLI       │ │ Telegram  │   │
+│  │ app       │ │ (browser) │ │ (terminal)│ │ / Bale bot│   │
+│  │ pywebview │ │ Alpine.js │ │ Rich      │ │ PTB       │   │
+│  └─────┬─────┘ └─────┬─────┘ └─────┬─────┘ └─────┬─────┘   │
+│        │             │             │             │          │
+└────────┼─────────────┼─────────────┼─────────────┼──────────┘
+         │             │             │             │
+         └─────────────┴─────────────┴─────────────┘
                             │
                   ┌─────────▼──────────┐
                   │   Bridge          │
@@ -68,7 +69,22 @@
   - `find_controls(name, class_name, automation_id, control_type)`
   - با virtual key codes (Ctrl+F حتی روی کیبورد فارسی کار می‌کنه)
 
-### ۵. Protocol
+### ۵. رابط‌های گرافیکی
+
+- **اپ دسکتاپ** (`local_agent/desktop/`) — پنجرهٔ بومی ویندوز با
+  pywebview روی Edge WebView2، به‌علاوهٔ آیکون tray، کلید میان‌بر
+  سراسری، نوتیفیکیشن ویندوز، قفل تک‌نمونه و اجرای خودکار.
+  Bridge و سرور وب را **در همان پروسه** بالا می‌آورد.
+  → [DESKTOP.md](DESKTOP.md)
+
+- **رابط وب** (`local_agent/web/`) — single-page app فارسی/RTL با
+  حالت تاریک، کارت اجرای ابزار، دیالوگ تأیید و رندر Markdown.
+  → [WEB_UI.md](WEB_UI.md)
+
+> اپ دسکتاپ **دقیقاً همان** front-end وب را لود می‌کند؛ هیچ رابط دومی
+> برای نگهداری وجود ندارد.
+
+### ۶. Protocol
 - JSON-RPC style با type-safety
 - WebSocket/SSE برای streaming events
 - Bearer token auth (auto-generated)
@@ -81,13 +97,21 @@ python -m local_agent
 ```
 همه چیز in-process. CLI خودش Bridge رو می‌سازه.
 
-### حالت ۲: Web UI
+### حالت ۲: اپ دسکتاپ (پیشنهادی)
+```powershell
+python local_agent_setup.py desktop
+```
+پنجرهٔ بومی ویندوز + آیکون tray + کلید میان‌بر `Ctrl+Alt+A`.
+Bridge و سرور وب داخل همون پروسه اجرا می‌شن.
+
+### حالت ۳: Web UI
 ```powershell
 python local_agent_setup.py web
 ```
-Web UI روی `http://127.0.0.1:7824` باز می‌شه.
+Web UI روی `http://127.0.0.1:7824` باز می‌شه. از گوشی هم (روی همون
+شبکه، با `LOCAL_AGENT_WEB_HOST=0.0.0.0`) قابل دسترسه.
 
-### حالت ۳: Telegram Bot + Bridge
+### حالت ۴: Telegram Bot + Bridge
 ابتدا Bridge رو در یک ترمینال روی ماشین خودتون start کنید:
 ```powershell
 set BRIDGE_URL=http://127.0.0.1:7823
@@ -97,15 +121,15 @@ python local_agent_setup.py bot-telegram
 
 ربات تلگرام به Bridge محلی وصل می‌شه. حالا از هر جا (حتی خارج از خونه) می‌تونید به Bridge دستور بدید.
 
-### حالت ۴: همه با هم
+### حالت ۵: همه با هم
 ```powershell
-# Terminal 1: CLI
+# Terminal 1: اپ دسکتاپ (Bridge اینجا بالا میاد)
+python local_agent_setup.py desktop
+
+# Terminal 2: CLI روی همون Bridge
 python -m local_agent
 
-# Terminal 2: Web UI
-python local_agent_setup.py web
-
-# Terminal 3: Telegram bot
+# Terminal 3: ربات تلگرام
 python local_agent_setup.py bot-telegram
 ```
 
@@ -140,9 +164,14 @@ python -m pytest tests_local_agent/ -v
 ```
 
 تست‌ها:
-- `test_bridge.py` - 16 تست (protocol, handlers, chat streaming)
-- `test_bridge_http.py` - 7 تست (HTTP server, SSE streaming)
-- `test_web.py` - 6 تست (FastAPI endpoints)
-- `test_gui_advanced.py` - 9 تست (UIA wrapper, Telegram driver)
-- `test_integration.py` - 8 تست (end-to-end scenarios)
-- + 80 تست دیگه (config, actions, llm, telegram, file ops, ...)
+- `test_bridge.py` — پروتکل، handlerها، استریم چت
+- `test_bridge_http.py` — سرور HTTP و SSE
+- `test_web.py` — endpointهای FastAPI، markup و assetهای رابط
+- `test_web_render.py` — تست واقعی مرورگر با Playwright (اختیاری)
+- `test_desktop.py` — tray، هات‌کی، قفل تک‌نمونه، آپدیتر، بیلد
+- `test_bridge_bot.py` — کیبوردهای inline ربات
+- `test_gui_advanced.py` — UIA wrapper و درایور تلگرام دسکتاپ
+- `test_integration.py` — سناریوهای end-to-end
+- و بقیه (config، actions، llm، telegram، file ops، ...)
+
+مجموعاً **۲۸۶ تست** (+۱۸ تست مرورگری با نصب Playwright).
