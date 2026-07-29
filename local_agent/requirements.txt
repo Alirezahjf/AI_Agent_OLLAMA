@@ -1,0 +1,9 @@
+# Minimum runtime requirements for the local Windows assistant.
+# These are the only packages the assistant hard-depends on.
+
+requests>=2.31
+Pillow>=10.0
+python-dotenv>=1.0
+# Rich is recommended for the CLI but the renderer degrades gracefully
+# without it (text-only output).
+rich>=13.0

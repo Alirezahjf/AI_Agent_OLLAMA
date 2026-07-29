@@ -268,10 +268,12 @@ class TelegramBot:
         try:
             final, pending, output = await asyncio.to_thread(self.agent.run, chat_id, user_text, progress, resume)
         except (ProviderError, RuntimeError) as exc:
-            await status.edit_text(f"❌ {exc}")
+            await status.edit_text(clean_chat_text(f"❌ {exc}"))
             return
         except Exception as exc:  # Do not expose a stack trace or secret-bearing request objects to Telegram.
-            await status.edit_text(f"❌ خطای پیش‌بینی‌نشده در workflow: {type(exc).__name__}: {exc}")
+            await status.edit_text(
+                clean_chat_text(f"❌ خطای پیش‌بینی‌نشده در workflow: {type(exc).__name__}: {exc}")
+            )
             return
 
         if pending:

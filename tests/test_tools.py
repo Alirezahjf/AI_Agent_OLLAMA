@@ -248,3 +248,21 @@ def test_blocked_or_sensitive_commands_still_require_the_approval_gate(tools: Lo
 
 def test_diagnose_browser_runtime_needs_no_approval(tools: LocalTools) -> None:
     assert not tools.requires_approval("diagnose_browser_runtime", {})
+
+
+def test_volatile_cache_directories_are_hidden_from_listing(tools: LocalTools) -> None:
+    tools.write_file("app.py", "print('ok')\n")
+    tools.write_file(".gradle/caches/module.txt", "ignore volatile cache")
+    result = tools.list_files(".")
+    assert "app.py" in result.text
+    assert ".gradle" not in result.text
+    assert "module.txt" not in result.text
+
+
+def test_invoke_wraps_os_errors_as_tool_errors(tools: LocalTools) -> None:
+    def boom(**kwargs):
+        raise FileNotFoundError("volatile cache disappeared")
+
+    tools.read_file = boom  # type: ignore[method-assign]
+    with pytest.raises(ToolError, match="خطای فایل/سیستم"):
+        tools.invoke("read_file", {"path": "anything.txt"})
