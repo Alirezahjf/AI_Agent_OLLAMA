@@ -71,8 +71,15 @@ def test_load_dotenv_does_not_override_existing(
 ) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text("LOCAL_AGENT_LLM__PROVIDER=openai_compatible\n", encoding="utf-8")
-    # Confirm env-file path is recognised by python-dotenv
+    # Confirm env-file path is recognised by python-dotenv.
+    # delenv+monkeypatch keeps the variable out of the real environment:
+    # load_settings() reads LOCAL_AGENT_* globally, so leaking it here
+    # would silently reconfigure every test that runs afterwards.
+    monkeypatch.delenv("LOCAL_AGENT_LLM__PROVIDER", raising=False)
     from dotenv import load_dotenv
 
     load_dotenv(env_file, override=False)
+    monkeypatch.setenv(
+        "LOCAL_AGENT_LLM__PROVIDER", os.environ.get("LOCAL_AGENT_LLM__PROVIDER", "")
+    )
     assert os.environ.get("LOCAL_AGENT_LLM__PROVIDER") == "openai_compatible"
