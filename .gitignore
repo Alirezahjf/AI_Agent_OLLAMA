@@ -7,3 +7,9 @@ __pycache__/
 *.pyc
 
 *.egg-info/
+
+# Desktop app build artifacts (PyInstaller + Inno Setup)
+build/
+dist/
+*.spec
+!local_agent/desktop/installer.iss
