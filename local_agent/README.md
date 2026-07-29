@@ -16,6 +16,19 @@
 > دسترسی ندارد. این ایجنت روی **خود ویندوز شما** اجرا می‌شود و واقعاً تلگرام
 > دسکتاپ/فتوشاپ/Task Manager شما را کنترل می‌کند.
 
+## چهار راه استفاده
+
+| رابط | دستور | مناسب برای |
+|---|---|---|
+| 🖥️ **اپ دسکتاپ** | `python local_agent_setup.py desktop` | استفادهٔ روزمره — پنجرهٔ بومی + tray + هات‌کی |
+| 🌐 **رابط وب** | `python local_agent_setup.py web` | مرورگر، از موبایل هم قابل دسترس |
+| ⌨️ **CLI** | `python -m local_agent` | ترمینال، اسکریپت، سرعت |
+| ✈️ **ربات تلگرام/بله** | `python local_agent_setup.py bot-telegram` | کنترل از راه دور |
+
+هر چهار رابط **یک حافظه و یک وضعیت مشترک** دارند (نگاه کنید به [BRIDGE.md](BRIDGE.md)).
+
+![رابط وب](../docs/images/web-dark.png)
+
 ---
 
 ## نصب سریع
@@ -180,6 +193,62 @@ assistant > تسک منیجر باز می‌شه و Chrome ها بسته می‌
 
 ---
 
+## رابط وب
+
+```powershell
+python local_agent_setup.py web     # http://127.0.0.1:7824
+```
+
+یک single-page app فارسی و RTL با حالت تاریک پیش‌فرض:
+
+* رندر Markdown با رنگ‌آمیزی کد و دکمهٔ کپی
+* کارت اجرای ابزار به‌صورت زنده (در انتظار / در حال اجرا / انجام شد / خطا)
+* دیالوگ تأیید با هایلایت خطر
+* سایدبار گفتگوها، مودال تنظیمات، پنل ابزارها
+* درگ‌اند‌دراپ فایل، ورودی صوتی، خروجی Markdown/JSON
+* کاملاً واکنش‌گرا — از موبایل هم می‌توانید وضعیت را ببینید
+
+<p align="center">
+  <img src="../docs/images/web-empty.png" alt="حالت خالی" width="420">
+  &nbsp;
+  <img src="../docs/images/web-mobile.png" alt="نمای موبایل" width="150">
+</p>
+
+همهٔ کتابخانه‌ها (Alpine.js، marked، highlight.js، فونت وزیرمتن) داخل
+پروژه هستند؛ رابط **بدون اینترنت** هم کامل کار می‌کند.
+
+📖 جزئیات کامل سیستم طراحی: [WEB_UI.md](WEB_UI.md)
+
+---
+
+## اپ دسکتاپ
+
+```powershell
+python local_agent_setup.py desktop
+```
+
+![اپ دسکتاپ](../docs/images/desktop-window.png)
+
+یک برنامهٔ بومی ویندوز (با pywebview روی Edge WebView2):
+
+* پنجرهٔ ۱۲۰۰×۸۰۰، قابل تغییر اندازه، عنوانش مسیر پوشهٔ کاری را نشان می‌دهد
+* **آیکون کنار ساعت** با منوی راست‌کلیک (نمایش، پوشهٔ کاری، تنظیمات، خروج)
+* **کلید میان‌بر سراسری** <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>A</kbd> از هر جای ویندوز
+* **نوتیفیکیشن ویندوز** هنگام درخواست تأیید، پایان کار، یا خطا
+* دکمهٔ ✕ در tray پنهان می‌کند (نمی‌بندد)
+* **تک‌نمونه** — اجرای دوم، پنجرهٔ موجود را جلو می‌آورد
+* اجرای خودکار با ویندوز (قابل تنظیم از خود برنامه)
+* بسته‌بندی به یک `.exe` با PyInstaller و اینستالر با Inno Setup
+
+```powershell
+python local_agent_setup.py build-desktop              # dist\PersianLocalAssistant.exe
+python local_agent_setup.py build-desktop --installer  # + اینستالر
+```
+
+📖 راهنمای کامل: [DESKTOP.md](DESKTOP.md)
+
+---
+
 ## لیست کامل ابزارها
 
 ### کنترل برنامه‌ها (Safe)
@@ -280,6 +349,24 @@ local_agent/
 │   ├── app.py               ← main REPL
 │   ├── render.py            ← Rich terminal renderer
 │   └── prompts.py           ← dynamic system prompt builder
+├── bridge/                  ← daemon مشترک همهٔ رابط‌ها (BRIDGE.md)
+│   ├── protocol.py          ← پیام‌های typed
+│   ├── api/                 ← BridgeClient + handlers (agent loop)
+│   ├── server/              ← HTTP + SSE
+│   └── telegram_bot/        ← ربات تلگرام/بله
+├── web/                     ← رابط وب (WEB_UI.md)
+│   ├── app.py               ← FastAPI + WebSocket
+│   ├── templates/index.html
+│   └── static/              ← style.css, app.js, vendor/
+├── desktop/                 ← اپ دسکتاپ ویندوز (DESKTOP.md)
+│   ├── app.py               ← پنجرهٔ pywebview + JS API
+│   ├── tray.py              ← آیکون و منوی tray
+│   ├── hotkey.py            ← کلید میان‌بر سراسری
+│   ├── single_instance.py   ← قفل تک‌نمونه
+│   ├── autostart.py         ← اجرای خودکار با ویندوز
+│   ├── updater.py           ← بررسی release در GitHub
+│   ├── build.py             ← ساخت exe با PyInstaller
+│   └── installer.iss        ← اسکریپت Inno Setup
 └── utils/
     └── platform.py          ← Windows helpers (registry, UWP, ctypes)
 
@@ -295,14 +382,27 @@ local_agent_setup.py         ← installer / doctor / config opener
 python -m pytest tests_local_agent/ -v
 ```
 
-۶۲ تست شامل:
-- ۱۲ تست برای config و persistence
-- ۹ تست برای context و history
-- ۹ تست برای action registry
-- ۸ تست برای file operations
-- ۱۵ تست برای LLM client
-- ۵ تست برای CLI smoke
-- ۴ تست برای platform helpers
+**۲۸۶ تست** (به‌علاوهٔ ۱۸ تست مرورگری که با نصب Playwright فعال می‌شوند):
+
+| حوزه | تعداد |
+|---|---|
+| config، context، actions، file ops | ۳۸ |
+| LLM client (ollama + openai-compatible) | ۱۵+ |
+| Bridge: protocol، handlers، HTTP/SSE، یکپارچگی | ۳۱ |
+| رابط وب: markup، asset، endpoint | ۲۰ |
+| اپ دسکتاپ: tray، هات‌کی، قفل، آپدیتر، بیلد | ۶۸ |
+| GUI automation و تلگرام | ۱۳ |
+| بقیه (CLI، platform، ربات) | باقی |
+
+تست‌های مرورگری رابط وب:
+
+```powershell
+pip install playwright
+playwright install chromium
+python -m pytest tests_local_agent/test_web_render.py -v
+```
+
+اگر مرورگری نصب نباشد این تست‌ها بی‌سروصدا skip می‌شوند.
 
 ---
 
@@ -334,5 +434,5 @@ CLI اجرا می‌شود ولی فقط ابزارهای read-only (جستجو�
 **تفاوت با Hermes Agent و Claude Code چیست؟**
 - این ایجنت **واقعاً دسکتاپ شما را کنترل می‌کند** (pyautogui + Telethon).
 - اکانت شخصی تلگرام شما را دارد (نه فقط bot).
-- CLI terminal-based است (نه TUI گرافیکی، برای سرعت).
+- سه رابط دارد: اپ دسکتاپ بومی، رابط وب، و CLI — با حافظهٔ مشترک.
 - متن‌باز، بدون subscription، روی ماشین خودتان.

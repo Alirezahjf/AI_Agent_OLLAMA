@@ -10,6 +10,8 @@ Run with:
     python local_agent_setup.py uninstall    # remove the package (editable only)
     python local_agent_setup.py start        # launch the Bridge daemon (in-process)
     python local_agent_setup.py web          # launch the local web UI
+    python local_agent_setup.py desktop      # launch the native desktop app
+    python local_agent_setup.py build-desktop # build the single-file .exe
     python local_agent_setup.py bot-telegram # launch the Telegram bot
     python local_agent_setup.py bot-bale     # launch the Bale bot
 
@@ -112,6 +114,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ("telethon (optional)", "telethon"),
         ("fastapi (web UI)", "fastapi"),
         ("uvicorn (web UI)", "uvicorn"),
+        ("pywebview (desktop app)", "webview"),
+        ("pystray (tray icon)", "pystray"),
     ]
     for label, mod in deps:
         try:
@@ -132,6 +136,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print("After installing everything, you can:")
     print("    python -m local_agent            # start the local CLI (in-process bridge)")
     print("    python local_agent_setup.py web  # start the web UI on http://127.0.0.1:7824")
+    print("    python local_agent_setup.py desktop  # start the native desktop app")
     print("    python local_agent_setup.py bot-telegram  # start the Telegram bot (needs TELEGRAM_BOT_TOKEN)")
     return 0
 
@@ -177,6 +182,36 @@ def cmd_web(args: argparse.Namespace) -> int:
     return run_web([])
 
 
+def cmd_desktop(args: argparse.Namespace) -> int:
+    """Launch the native desktop app (pywebview window + tray icon)."""
+    sys.path.insert(0, str(ROOT))
+    from local_agent.desktop import run as run_desktop
+
+    argv: list[str] = []
+    if getattr(args, "hidden", False):
+        argv.append("--hidden")
+    if getattr(args, "browser", False):
+        argv.append("--browser")
+    if getattr(args, "debug", False):
+        argv.append("--debug")
+    return run_desktop(argv)
+
+
+def cmd_build_desktop(args: argparse.Namespace) -> int:
+    """Build the single-file Windows executable with PyInstaller."""
+    sys.path.insert(0, str(ROOT))
+    from local_agent.desktop.build import main as build_main
+
+    argv: list[str] = []
+    if getattr(args, "installer", False):
+        argv.append("--installer")
+    if getattr(args, "onedir", False):
+        argv.append("--onedir")
+    if getattr(args, "spec_only", False):
+        argv.append("--spec-only")
+    return build_main(argv)
+
+
 def cmd_bot_telegram(args: argparse.Namespace) -> int:
     sys.path.insert(0, str(ROOT))
     from local_agent.bridge.telegram_bot import run_telegram
@@ -208,6 +243,8 @@ def build_parser() -> argparse.ArgumentParser:
               uninstall      remove the package
               start          start the local CLI (in-process bridge)
               web            start the local web UI on http://127.0.0.1:7824
+              desktop        start the native desktop app (window + tray icon)
+              build-desktop  build the single-file .exe with PyInstaller
               bot-telegram   start the Telegram bot (needs TELEGRAM_BOT_TOKEN)
               bot-bale       start the Bale bot (needs BALE_BOT_TOKEN)
             """
@@ -222,6 +259,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("uninstall").set_defaults(func=cmd_uninstall)
     sub.add_parser("start").set_defaults(func=cmd_start)
     sub.add_parser("web").set_defaults(func=cmd_web)
+
+    desktop = sub.add_parser("desktop", help="start the native desktop app")
+    desktop.add_argument("--hidden", action="store_true", help="start minimised to the tray")
+    desktop.add_argument("--browser", action="store_true", help="use the system browser instead")
+    desktop.add_argument("--debug", action="store_true", help="open the webview devtools")
+    desktop.set_defaults(func=cmd_desktop)
+
+    build = sub.add_parser("build-desktop", help="build the Windows .exe")
+    build.add_argument("--installer", action="store_true", help="also run Inno Setup")
+    build.add_argument("--onedir", action="store_true", help="build a folder instead of one file")
+    build.add_argument("--spec-only", dest="spec_only", action="store_true", help="write the spec only")
+    build.set_defaults(func=cmd_build_desktop)
     sub.add_parser("bot-telegram").set_defaults(func=cmd_bot_telegram)
     sub.add_parser("bot-bale").set_defaults(func=cmd_bot_bale)
     return parser

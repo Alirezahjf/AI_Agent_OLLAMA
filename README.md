@@ -11,7 +11,18 @@
 | **ربات تلگرام/بله** (`agent/`) | سرور/سرور شما | فایل، کد، command، وب، screenshot وب — از راه دور از تلگرام |
 | **ایجنت محلی ویندوز** (`local_agent/`) | **دسکتاپ ویندوز شما** | باز کردن برنامه‌ها، کنترل GUI، **اکانت شخصی تلگرام**، Task Manager، فایل، shell |
 
-برای مستندات ایجنت محلی، فایل [`local_agent/README.md`](local_agent/README.md) را ببینید.
+ایجنت محلی چهار رابط دارد که همگی یک حافظه و یک وضعیت مشترک دارند:
+
+| رابط | دستور | مستندات |
+|---|---|---|
+| 🖥️ اپ دسکتاپ ویندوز | `python local_agent_setup.py desktop` | [DESKTOP.md](local_agent/DESKTOP.md) |
+| 🌐 رابط وب | `python local_agent_setup.py web` | [WEB_UI.md](local_agent/WEB_UI.md) |
+| ⌨️ CLI | `python -m local_agent` | [README.md](local_agent/README.md) |
+| ✈️ ربات تلگرام/بله | `python local_agent_setup.py bot-telegram` | [BRIDGE.md](local_agent/BRIDGE.md) |
+
+![رابط وب دستیار محلی](docs/images/web-dark.png)
+
+برای مستندات کامل ایجنت محلی، فایل [`local_agent/README.md`](local_agent/README.md) را ببینید.
 
 > **امنیت قبل از اتوماسیون:** این برنامه روی فایل‌ها و فرمان‌های واقعی کار می‌کند. هیچ LLM—even بهترین مدل ابری—جایگزین تأیید انسان و محیط ایزوله نیست. برای کار جدی آن را در یک VM یا container بدون secret و با یک workspace mount‌شده اجرا کنید.
 

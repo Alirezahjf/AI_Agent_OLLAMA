@@ -106,3 +106,173 @@ def test_static_files_served(web_server: WebServer) -> None:
     # Static may or may not exist depending on installation; we just verify
     # that the route doesn't 500
     assert r.status_code in {200, 404}
+
+
+# ---------------------------------------------------------------------------
+# Redesigned UI: markup, assets, and the new endpoints
+# ---------------------------------------------------------------------------
+
+
+WEB_DIR = Path(__file__).resolve().parents[1] / "local_agent" / "web"
+
+
+def test_index_is_rtl_persian_and_dark_by_default() -> None:
+    html = (WEB_DIR / "templates" / "index.html").read_text(encoding="utf-8")
+    assert 'lang="fa"' in html
+    assert 'dir="rtl"' in html
+    assert 'data-theme="dark"' in html
+    assert 'name="viewport"' in html  # responsive
+
+
+def test_index_wires_the_alpine_component() -> None:
+    html = (WEB_DIR / "templates" / "index.html").read_text(encoding="utf-8")
+    assert 'x-data="assistantApp()"' in html
+    assert "vendor/alpine.min.js" in html
+    assert "vendor/marked.min.js" in html
+    assert "vendor/highlight.min.js" in html
+
+
+def test_index_contains_every_required_ui_region() -> None:
+    html = (WEB_DIR / "templates" / "index.html").read_text(encoding="utf-8")
+    for marker in (
+        'class="topbar"',      # header with connection status
+        'class="sidebar"',     # conversation history
+        'class="chat"',        # message list
+        'class="composer"',    # input box
+        'class="panel"',       # actions / status side panel
+        'class="empty"',       # empty state
+        'class="dropzone"',    # drag & drop
+        'class="toasts"',      # notifications
+        "settingsOpen",        # settings modal
+        "exportOpen",          # export modal
+        "shortcutsOpen",       # keyboard shortcuts modal
+        "approval",            # approval dialog
+        "tool__status",        # tool execution cards
+    ):
+        assert marker in html, f"missing UI region: {marker}"
+
+
+def test_vendored_assets_are_present_so_the_ui_works_offline() -> None:
+    vendor = WEB_DIR / "static" / "vendor"
+    for name in (
+        "alpine.min.js",
+        "marked.min.js",
+        "highlight.min.js",
+        "hljs-dark.min.css",
+        "hljs-light.min.css",
+        "fonts/Vazirmatn-Regular.woff2",
+    ):
+        asset = vendor / name
+        assert asset.is_file(), f"missing vendored asset: {name}"
+        assert asset.stat().st_size > 0
+
+
+def test_stylesheet_defines_both_themes() -> None:
+    css = (WEB_DIR / "static" / "style.css").read_text(encoding="utf-8")
+    assert 'html[data-theme="dark"]' in css
+    assert 'html[data-theme="light"]' in css
+    assert "@media (max-width: 860px)" in css  # mobile breakpoint
+    assert "prefers-reduced-motion" in css     # accessibility
+
+
+def test_app_js_exposes_the_component_factory() -> None:
+    js = (WEB_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    assert "window.assistantApp = assistantApp" in js
+    for feature in (
+        "renderMarkdown", "respondApproval", "exportConversation",
+        "toggleVoice", "onDrop", "toggleTheme", "onGlobalKey", "beep",
+    ):
+        assert feature in js, f"missing behaviour: {feature}"
+
+
+def test_ui_assets_are_served(web_server: WebServer) -> None:
+    base = f"http://127.0.0.1:{web_server.port}"
+    for path in ("/static/app.js", "/static/style.css", "/static/vendor/alpine.min.js"):
+        response = requests.get(base + path, timeout=3)
+        assert response.status_code == 200, path
+        assert response.content
+
+
+def test_healthz(web_server: WebServer) -> None:
+    r = requests.get(f"http://127.0.0.1:{web_server.port}/healthz", timeout=3)
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+
+def test_api_actions_detail_is_structured(web_server: WebServer) -> None:
+    r = requests.get(f"http://127.0.0.1:{web_server.port}/api/actions/detail", timeout=5)
+    assert r.status_code == 200
+    actions = r.json()
+    assert actions and isinstance(actions, list)
+    entry = next(a for a in actions if a["name"] == "open_application")
+    assert entry["risk"] in {"safe", "destructive", "system"}
+    assert isinstance(entry["args"], list)
+    assert entry["description"]
+
+
+def test_parse_action_line_handles_garbage() -> None:
+    from local_agent.web.app import parse_action_line
+
+    good = parse_action_line("read_file  [risk=safe]  args=(path)  Read a text file")
+    assert good == {
+        "name": "read_file",
+        "risk": "safe",
+        "args": ["path"],
+        "description": "Read a text file",
+    }
+    degraded = parse_action_line("something unexpected")
+    assert degraded["name"] == "something"
+    assert degraded["risk"] == "safe"
+
+
+def test_upload_writes_into_the_workspace(web_server: WebServer, tmp_path: Path) -> None:
+    import base64
+
+    payload = base64.b64encode("سلام".encode("utf-8")).decode("ascii")
+    r = requests.post(
+        f"http://127.0.0.1:{web_server.port}/api/upload",
+        json={"name": "uploaded.txt", "content_base64": payload},
+        timeout=5,
+    )
+    assert r.status_code == 200
+    saved = Path(r.json()["saved"])
+    assert saved.is_file()
+    assert saved.read_text(encoding="utf-8") == "سلام"
+
+
+def test_upload_strips_directory_components(web_server: WebServer) -> None:
+    import base64
+
+    payload = base64.b64encode(b"x").decode("ascii")
+    r = requests.post(
+        f"http://127.0.0.1:{web_server.port}/api/upload",
+        json={"name": "../escape.txt", "content_base64": payload},
+        timeout=5,
+    )
+    assert r.status_code == 200
+    assert Path(r.json()["saved"]).name == "escape.txt"
+
+
+def test_file_endpoint_serves_and_guards(web_server: WebServer, tmp_path: Path) -> None:
+    (tmp_path / "artifact.md").write_text("# hi", encoding="utf-8")
+    base = f"http://127.0.0.1:{web_server.port}"
+    ok = requests.get(base + "/api/file", params={"path": "artifact.md"}, timeout=3)
+    assert ok.status_code == 200
+    assert "# hi" in ok.text
+
+    for escape in ("../../etc/passwd", "/etc/passwd"):
+        blocked = requests.get(base + "/api/file", params={"path": escape}, timeout=3)
+        assert blocked.status_code in {403, 404}
+
+    missing = requests.get(base + "/api/file", params={"path": "nope.txt"}, timeout=3)
+    assert missing.status_code == 404
+
+
+def test_settings_endpoint_updates_the_model(web_server: WebServer) -> None:
+    r = requests.post(
+        f"http://127.0.0.1:{web_server.port}/api/settings",
+        json={"provider": "ollama", "model": "llama3.1:8b", "confirm_mode": "always"},
+        timeout=10,
+    )
+    assert r.status_code == 200
+    assert r.json()["model"] == "llama3.1:8b"

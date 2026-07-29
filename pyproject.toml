@@ -23,6 +23,11 @@ desktop = [
   "uvicorn[standard]>=0.27",
   "pydantic>=2.5",
 ]
+app = [
+  "pywebview>=5.0",
+  "pystray>=0.19",
+]
+build = ["pyinstaller>=6.0"]
 dev = ["pytest>=8.0", "ruff>=0.5"]
 
 [project.scripts]
@@ -32,6 +37,8 @@ persian-local-assistant = "local_agent.cli:run_cli"
 persian-local-web = "local_agent.web:run_web"
 persian-bridge-telegram = "local_agent.bridge.telegram_bot:run_telegram"
 persian-bridge-bale = "local_agent.bridge.telegram_bot:run_bale"
+persian-local-desktop = "local_agent.desktop:run"
+persian-local-installer = "local_agent.desktop.build:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "tests_local_agent"]

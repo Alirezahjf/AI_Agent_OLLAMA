@@ -17,3 +17,8 @@ uvicorn[standard]>=0.27
 pydantic>=2.5
 pyperclip>=1.8
 uiautomation>=2.0; sys_platform == "win32"
+
+# Native desktop app (system webview + tray icon).
+# pywebview uses Edge WebView2 on Windows, WebKit elsewhere.
+pywebview>=5.0
+pystray>=0.19

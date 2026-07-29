@@ -175,12 +175,33 @@ class AssistantSettings:
 
 
 def _read_json(path: Path) -> dict:
+    """Read a config file, tolerating the ``#`` comments in our template.
+
+    :func:`_build_template` writes a header of ``#`` lines above the JSON
+    body so a first-time user can read what the file is for.  Plain
+    ``json.loads`` chokes on those, which used to make every run after
+    the very first one fail with "config file is not valid JSON".  We
+    strip comment lines before parsing, and only report a real syntax
+    error if the stripped text still does not parse.
+    """
     if not path.is_file():
         return {}
+    raw = path.read_text(encoding="utf-8")
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ConfigError(f"config file is not valid JSON: {path} ({exc})") from exc
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        stripped = _strip_template_comments(raw).strip()
+        if not stripped:
+            # Comment-only or empty file: fall back to the defaults rather
+            # than refusing to start.
+            return {}
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise ConfigError(f"config file is not valid JSON: {path} ({exc})") from exc
+    if not isinstance(payload, dict):
+        raise ConfigError(f"config file must contain a JSON object: {path}")
+    return payload
 
 
 def _apply_env_overrides(payload: dict) -> dict:

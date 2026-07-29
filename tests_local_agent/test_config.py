@@ -91,3 +91,73 @@ def test_settings_with_overrides_keeps_other_fields(tmp_path: Path) -> None:
     assert new.work_dir == tmp_path / "subdir"
     assert new.data_dir == tmp_path
     assert new.llm == settings.llm
+
+
+# ---------------------------------------------------------------------------
+# Regression: the generated template must be re-readable
+# ---------------------------------------------------------------------------
+
+
+def test_second_load_reads_the_generated_template(tmp_path: Path) -> None:
+    """load_settings() writes a #-commented template on first run.
+
+    Every later run has to be able to read it back.  This used to raise
+    "config file is not valid JSON" and broke the CLI, web UI, desktop
+    app and bots on their second launch.
+    """
+    from local_agent.core.config import load_settings
+
+    config = tmp_path / "config.json"
+    first = load_settings(config, data_dir=tmp_path)
+    assert config.is_file()
+    assert config.read_text(encoding="utf-8").lstrip().startswith("#")
+
+    second = load_settings(config, data_dir=tmp_path)
+    third = load_settings(config, data_dir=tmp_path)
+    assert second.llm.provider == first.llm.provider
+    assert third.llm.ollama_model == first.llm.ollama_model
+
+
+def test_comment_only_config_falls_back_to_defaults(tmp_path: Path) -> None:
+    from local_agent.core.config import load_settings
+
+    config = tmp_path / "config.json"
+    config.write_text("# just a note\n# and another\n", encoding="utf-8")
+    settings = load_settings(config, data_dir=tmp_path)
+    assert settings.llm.provider == "ollama"
+
+
+def test_empty_config_falls_back_to_defaults(tmp_path: Path) -> None:
+    from local_agent.core.config import load_settings
+
+    config = tmp_path / "config.json"
+    config.write_text("   \n", encoding="utf-8")
+    assert load_settings(config, data_dir=tmp_path).llm.provider == "ollama"
+
+
+def test_plain_json_without_comments_still_works(tmp_path: Path) -> None:
+    from local_agent.core.config import load_settings
+
+    config = tmp_path / "config.json"
+    config.write_text('{"llm": {"provider": "auto", "ollama_model": "m"}}', encoding="utf-8")
+    settings = load_settings(config, data_dir=tmp_path)
+    assert settings.llm.provider == "auto"
+    assert settings.llm.ollama_model == "m"
+
+
+def test_genuinely_broken_json_still_raises(tmp_path: Path) -> None:
+    from local_agent.core.config import ConfigError, load_settings
+
+    config = tmp_path / "config.json"
+    config.write_text('{"llm": {"provider": ', encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_settings(config, data_dir=tmp_path)
+
+
+def test_non_object_config_is_rejected(tmp_path: Path) -> None:
+    from local_agent.core.config import ConfigError, load_settings
+
+    config = tmp_path / "config.json"
+    config.write_text("[1, 2, 3]", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_settings(config, data_dir=tmp_path)
