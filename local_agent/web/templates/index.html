@@ -1,29 +1,551 @@
 <!doctype html>
-<html lang="fa" dir="rtl">
+<html lang="fa" dir="rtl" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<title>Local Windows Assistant</title>
-<link rel="stylesheet" href="/static/style.css">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0b1020">
+<title>دستیار محلی ویندوز</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
+<link rel="stylesheet" href="../static/vendor/hljs-dark.min.css" id="hljs-dark-theme">
+<link rel="stylesheet" href="../static/vendor/hljs-light.min.css" id="hljs-light-theme" disabled>
+<link rel="stylesheet" href="../static/style.css">
 </head>
 <body>
-  <header>
-    <h1>Local Windows Assistant</h1>
-    <div id="status" class="muted">در حال اتصال…</div>
+<div
+  id="app"
+  x-data="assistantApp()"
+  x-init="init()"
+  :class="{ 'sidebar-open': historyOpen, 'panel-open': panelOpen }"
+  @dragover.prevent="dragging = true"
+  @dragleave.prevent="dragging = false"
+  @drop.prevent="onDrop($event)"
+  @keydown.window="onGlobalKey($event)"
+>
+
+  <!-- ================= Ambient background ================= -->
+  <div class="aurora" aria-hidden="true">
+    <span class="aurora__blob aurora__blob--one"></span>
+    <span class="aurora__blob aurora__blob--two"></span>
+    <span class="aurora__blob aurora__blob--three"></span>
+    <span class="aurora__grid"></span>
+  </div>
+
+  <!-- ================= Header ================= -->
+  <header class="topbar">
+    <div class="topbar__group">
+      <button class="icon-btn" @click="historyOpen = !historyOpen" :aria-pressed="historyOpen"
+              title="گفتگوها (Ctrl+K)" aria-label="نمایش گفتگوها">
+        <svg viewBox="0 0 24 24" class="icon"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+      </button>
+      <div class="brand">
+        <span class="brand__mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" class="icon"><path d="M12 3l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 8.7l5.4-.8z"/></svg>
+        </span>
+        <span class="brand__text">
+          <strong>دستیار محلی ویندوز</strong>
+          <small x-text="workspaceLabel"></small>
+        </span>
+      </div>
+    </div>
+
+    <div class="topbar__group topbar__group--center">
+      <div class="pill pill--status" :class="'pill--' + connectionTone" :title="connectionTitle">
+        <span class="dot" :class="{ 'dot--pulse': connection === 'connected' }"></span>
+        <span x-text="connectionLabel"></span>
+      </div>
+      <div class="pill pill--muted hide-sm" :title="'مدل فعال: ' + model">
+        <svg viewBox="0 0 24 24" class="icon icon--sm"><path d="M12 2a4 4 0 014 4v1h1a3 3 0 013 3v3a5 5 0 01-5 5h-.5l-2.5 4-2.5-4H9a5 5 0 01-5-5v-3a3 3 0 013-3h1V6a4 4 0 014-4z"/></svg>
+        <span x-text="model"></span>
+      </div>
+    </div>
+
+    <div class="topbar__group topbar__group--end">
+      <button class="icon-btn" @click="toggleTheme()" :title="theme === 'dark' ? 'حالت روشن' : 'حالت تاریک'"
+              aria-label="تغییر پوسته">
+        <svg x-show="theme === 'dark'" viewBox="0 0 24 24" class="icon"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></svg>
+        <svg x-show="theme === 'light'" viewBox="0 0 24 24" class="icon" x-cloak><path d="M20 14.5A8.5 8.5 0 019.5 4a8.5 8.5 0 1010.5 10.5z"/></svg>
+      </button>
+      <button class="icon-btn" @click="soundEnabled = !soundEnabled; persistPrefs()"
+              :class="{ 'icon-btn--muted': !soundEnabled }" :title="soundEnabled ? 'صدا روشن' : 'صدا خاموش'"
+              aria-label="صدای اعلان">
+        <svg x-show="soundEnabled" viewBox="0 0 24 24" class="icon"><path d="M11 5L6 9H3v6h3l5 4V5z"/><path d="M15.5 8.5a5 5 0 010 7"/></svg>
+        <svg x-show="!soundEnabled" viewBox="0 0 24 24" class="icon" x-cloak><path d="M11 5L6 9H3v6h3l5 4V5z"/><path d="M16 9l5 6M21 9l-5 6"/></svg>
+      </button>
+      <button class="icon-btn hide-sm" @click="exportOpen = true" title="خروجی گرفتن از گفتگو" aria-label="خروجی">
+        <svg viewBox="0 0 24 24" class="icon"><path d="M12 3v12M8 11l4 4 4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
+      </button>
+      <button class="icon-btn" @click="openSettings()" title="تنظیمات (Ctrl+,)" aria-label="تنظیمات">
+        <svg viewBox="0 0 24 24" class="icon"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.6 1.6 0 00-1.8-.3 1.6 1.6 0 00-1 1.5V21a2 2 0 11-4 0v-.1A1.6 1.6 0 008 19.4a1.6 1.6 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.6 1.6 0 00.3-1.8 1.6 1.6 0 00-1.5-1H2a2 2 0 110-4h.1A1.6 1.6 0 004.6 8a1.6 1.6 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.6 1.6 0 001.8.3H9a1.6 1.6 0 001-1.5V2a2 2 0 114 0v.1a1.6 1.6 0 001 1.5 1.6 1.6 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.6 1.6 0 00-.3 1.8V9a1.6 1.6 0 001.5 1H22a2 2 0 110 4h-.1a1.6 1.6 0 00-1.5 1z"/></svg>
+      </button>
+      <button class="icon-btn only-sm" @click="panelOpen = !panelOpen" title="ابزارها" aria-label="ابزارها">
+        <svg viewBox="0 0 24 24" class="icon"><path d="M14.7 6.3a4 4 0 01-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 015.4-5.4l-2.6 2.6-1.4-1.4z"/></svg>
+      </button>
+    </div>
   </header>
-  <main>
-    <section id="chat" class="messages"></section>
-    <form id="composer">
-      <textarea id="input" rows="2" placeholder="پیام خود را بنویسید… (Enter برای ارسال، Shift+Enter برای خط جدید)"></textarea>
-      <button type="submit">ارسال</button>
-    </form>
-  </main>
-  <aside id="sidebar">
-    <h2>ابزارها</h2>
-    <ul id="actions"></ul>
-    <h2>تنظیمات</h2>
-    <button id="clear">🧹 پاک کردن حافظه</button>
-    <button id="screenshot">📸 اسکرین‌شات</button>
+
+  <!-- ================= Conversation sidebar ================= -->
+  <aside class="sidebar" :aria-hidden="(!historyOpen).toString()">
+    <div class="sidebar__head">
+      <button class="btn btn--primary btn--block" @click="newConversation()">
+        <svg viewBox="0 0 24 24" class="icon icon--sm"><path d="M12 5v14M5 12h14"/></svg>
+        گفتگوی جدید
+      </button>
+    </div>
+    <div class="sidebar__search">
+      <svg viewBox="0 0 24 24" class="icon icon--sm"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.2-3.2"/></svg>
+      <input type="search" x-model="conversationQuery" placeholder="جستجو در گفتگوها…" aria-label="جستجوی گفتگو">
+    </div>
+    <nav class="sidebar__list" aria-label="فهرست گفتگوها">
+      <template x-if="filteredConversations.length === 0">
+        <p class="sidebar__empty">هنوز گفتگویی ذخیره نشده است.</p>
+      </template>
+      <template x-for="c in filteredConversations" :key="c.id">
+        <div class="conv" :class="{ 'conv--active': c.id === conversationId }" @click="openConversation(c.id)">
+          <div class="conv__body">
+            <span class="conv__title" x-text="c.title"></span>
+            <span class="conv__meta">
+              <span x-text="formatDate(c.updated_at)"></span>
+              <span aria-hidden="true">·</span>
+              <span x-text="c.message_count + ' پیام'"></span>
+            </span>
+          </div>
+          <button class="icon-btn icon-btn--tiny" @click.stop="deleteConversation(c.id)" :aria-label="'حذف ' + c.title" title="حذف">
+            <svg viewBox="0 0 24 24" class="icon icon--sm"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
+          </button>
+        </div>
+      </template>
+    </nav>
+    <div class="sidebar__foot">
+      <button class="btn btn--ghost btn--block" @click="clearMemory()">
+        <svg viewBox="0 0 24 24" class="icon icon--sm"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
+        پاک کردن حافظهٔ Bridge
+      </button>
+    </div>
   </aside>
-  <script src="/static/app.js"></script>
+  <div class="scrim" @click="historyOpen = false; panelOpen = false" aria-hidden="true"></div>
+
+  <!-- ================= Chat column ================= -->
+  <main class="chat" @scroll.passive="onScroll($event)" x-ref="chatScroll">
+    <div class="chat__inner">
+
+      <!-- Empty state -->
+      <template x-if="messages.length === 0 && !busy">
+        <section class="empty">
+          <div class="empty__badge" aria-hidden="true">
+            <svg viewBox="0 0 24 24" class="icon"><path d="M12 3l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 8.7l5.4-.8z"/></svg>
+          </div>
+          <h1 class="empty__title">سلام 👋 چه کاری برایتان انجام دهم؟</h1>
+          <p class="empty__subtitle">
+            من روی همین ویندوز اجرا می‌شوم: برنامه باز می‌کنم، فایل می‌سازم، پنجره‌ها را مدیریت می‌کنم
+            و در تلگرام دسکتاپ پیام می‌فرستم. کارهای حساس فقط با تأیید شما انجام می‌شود.
+          </p>
+          <div class="suggestions">
+            <template x-for="s in suggestions" :key="s.text">
+              <button class="suggestion" @click="useSuggestion(s.text)">
+                <span class="suggestion__icon" x-text="s.icon" aria-hidden="true"></span>
+                <span class="suggestion__body">
+                  <span class="suggestion__title" x-text="s.title"></span>
+                  <span class="suggestion__text" x-text="s.text"></span>
+                </span>
+              </button>
+            </template>
+          </div>
+        </section>
+      </template>
+
+      <!-- Messages -->
+      <template x-for="(m, index) in messages" :key="m.id">
+        <article class="msg" :class="'msg--' + m.role" :style="'--i:' + Math.min(index, 12)">
+
+          <!-- assistant / user bubbles -->
+          <template x-if="m.role === 'user' || m.role === 'assistant'">
+            <div class="msg__row">
+              <div class="avatar" :class="'avatar--' + m.role" aria-hidden="true">
+                <template x-if="m.role === 'assistant'">
+                  <svg viewBox="0 0 24 24" class="icon icon--sm"><rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 3v4M9 13h.01M15 13h.01"/></svg>
+                </template>
+                <template x-if="m.role === 'user'">
+                  <svg viewBox="0 0 24 24" class="icon icon--sm"><circle cx="12" cy="8" r="4"/><path d="M4 20a8 8 0 0116 0"/></svg>
+                </template>
+              </div>
+              <div class="bubble">
+                <header class="bubble__head">
+                  <span class="bubble__who" x-text="m.role === 'user' ? 'شما' : 'دستیار'"></span>
+                  <span class="bubble__time" x-text="formatTime(m.ts)"></span>
+                </header>
+                <div class="bubble__body markdown" x-html="renderMarkdown(m.content)"></div>
+                <footer class="bubble__actions">
+                  <button class="chip-btn" @click="copyText(m.content)" title="کپی متن">
+                    <svg viewBox="0 0 24 24" class="icon icon--sm"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
+                    کپی
+                  </button>
+                  <template x-if="m.role === 'user'">
+                    <button class="chip-btn" @click="resend(m.content)" title="ارسال دوباره">
+                      <svg viewBox="0 0 24 24" class="icon icon--sm"><path d="M4 12a8 8 0 1114 5"/><path d="M4 17v-5h5"/></svg>
+                      ارسال دوباره
+                    </button>
+                  </template>
+                </footer>
+              </div>
+            </div>
+          </template>
+
+          <!-- tool execution card -->
+          <template x-if="m.role === 'tool'">
+            <div class="tool" :class="'tool--' + m.status" :data-risk="m.risk">
+              <button class="tool__head" @click="m.expanded = !m.expanded" :aria-expanded="m.expanded.toString()">
+                <span class="tool__status" :class="'tool__status--' + m.status" aria-hidden="true">
+                  <template x-if="m.status === 'running'"><span class="spinner"></span></template>
+                  <template x-if="m.status === 'pending'"><span class="dot dot--amber"></span></template>
+                  <template x-if="m.status === 'done'">
+                    <svg viewBox="0 0 24 24" class="icon icon--sm"><path d="M5 13l4 4L19 7"/></svg>
+                  </template>
+                  <template x-if="m.status === 'error'">
+                    <svg viewBox="0 0 24 24" class="icon icon--sm"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                  </template>
+                </span>
+                <span class="tool__name" x-text="m.name"></span>
+                <span class="tool__badge" x-text="statusLabel(m.status)"></span>
+                <span class="tool__chevron" :class="{ 'tool__chevron--open': m.expanded }" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" class="icon icon--sm"><path d="M6 9l6 6 6-6"/></svg>
+                </span>
+              </button>
+              <div class="tool__body" x-show="m.expanded" x-transition.opacity>
+                <template x-if="m.arguments">
+                  <div class="tool__section">
+                    <span class="tool__label">ورودی</span>
+                    <pre class="code"><code x-text="pretty(m.arguments)"></code></pre>
+                  </div>
+                </template>
+                <template x-if="m.output">
+                  <div class="tool__section">
+                    <span class="tool__label">خروجی</span>
+                    <pre class="code" dir="auto"><code x-text="m.output"></code></pre>
+                  </div>
+                </template>
+                <template x-if="m.artifacts && m.artifacts.length">
+                  <div class="tool__section">
+                    <span class="tool__label">فایل‌ها</span>
+                    <div class="files">
+                      <template x-for="f in m.artifacts" :key="f">
+                        <a class="file-card" :href="fileUrl(f)" target="_blank" rel="noopener">
+                          <span class="file-card__icon" x-text="fileIcon(f)" aria-hidden="true"></span>
+                          <span class="file-card__body">
+                            <span class="file-card__name" x-text="baseName(f)"></span>
+                            <span class="file-card__path" x-text="f"></span>
+                          </span>
+                        </a>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
+          <!-- approval request -->
+          <template x-if="m.role === 'approval'">
+            <div class="approval" :class="{ 'approval--danger': m.risk !== 'safe', 'approval--resolved': m.resolved }">
+              <div class="approval__head">
+                <span class="approval__icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" class="icon"><path d="M12 3l9 16H3z"/><path d="M12 10v4M12 17h.01"/></svg>
+                </span>
+                <div>
+                  <strong class="approval__title">تأیید لازم است</strong>
+                  <p class="approval__subtitle">
+                    دستیار می‌خواهد <code x-text="m.name"></code> را اجرا کند
+                    <span class="risk" :class="'risk--' + m.risk" x-text="riskLabel(m.risk)"></span>
+                  </p>
+                </div>
+              </div>
+              <pre class="code code--compact"><code x-text="pretty(m.arguments)"></code></pre>
+              <div class="approval__actions" x-show="!m.resolved">
+                <button class="btn btn--danger" @click="respondApproval(m, true)">
+                  <svg viewBox="0 0 24 24" class="icon icon--sm"><path d="M5 13l4 4L19 7"/></svg>
+                  بله، اجرا کن
+                </button>
+                <button class="btn btn--ghost" @click="respondApproval(m, false)">
+                  <svg viewBox="0 0 24 24" class="icon icon--sm"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                  نه، لغو کن
+                </button>
+                <span class="approval__hint">کلید <kbd>Y</kbd> برای تأیید، <kbd>N</kbd> برای لغو</span>
+              </div>
+              <p class="approval__result" x-show="m.resolved" x-text="m.approved ? '✅ تأیید شد' : '✖️ لغو شد'"></p>
+            </div>
+          </template>
+
+          <!-- system / error notes -->
+          <template x-if="m.role === 'system' || m.role === 'error'">
+            <div class="note" :class="'note--' + m.role">
+              <span x-text="m.content"></span>
+            </div>
+          </template>
+        </article>
+      </template>
+
+      <!-- typing / skeleton -->
+      <template x-if="busy && !streamingText">
+        <div class="msg msg--assistant">
+          <div class="msg__row">
+            <div class="avatar avatar--assistant" aria-hidden="true">
+              <svg viewBox="0 0 24 24" class="icon icon--sm"><rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 3v4M9 13h.01M15 13h.01"/></svg>
+            </div>
+            <div class="bubble bubble--skeleton" aria-live="polite" aria-label="در حال پاسخ">
+              <div class="typing"><span></span><span></span><span></span></div>
+              <div class="skeleton skeleton--lg"></div>
+              <div class="skeleton skeleton--md"></div>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <div x-ref="bottomAnchor"></div>
+    </div>
+
+    <button class="scroll-bottom" x-show="!atBottom" x-transition @click="scrollToBottom(true)" aria-label="رفتن به آخر">
+      <svg viewBox="0 0 24 24" class="icon"><path d="M12 5v14M6 13l6 6 6-6"/></svg>
+    </button>
+  </main>
+
+  <!-- ================= Composer ================= -->
+  <footer class="composer">
+    <template x-if="attachments.length">
+      <div class="composer__attachments">
+        <template x-for="(a, i) in attachments" :key="a.name + i">
+          <span class="attachment">
+            <span x-text="fileIcon(a.name)" aria-hidden="true"></span>
+            <span x-text="a.name"></span>
+            <button class="icon-btn icon-btn--tiny" @click="attachments.splice(i, 1)" aria-label="حذف پیوست">
+              <svg viewBox="0 0 24 24" class="icon icon--sm"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
+          </span>
+        </template>
+      </div>
+    </template>
+    <form class="composer__box" @submit.prevent="send()">
+      <button type="button" class="icon-btn" @click="$refs.fileInput.click()" title="پیوست فایل" aria-label="پیوست فایل">
+        <svg viewBox="0 0 24 24" class="icon"><path d="M21 12.5L12.5 21a5 5 0 01-7-7l8-8a3.5 3.5 0 015 5l-8 8a2 2 0 01-3-3l7.5-7.5"/></svg>
+      </button>
+      <input type="file" x-ref="fileInput" multiple hidden @change="onFilePicked($event)">
+      <textarea
+        x-ref="input"
+        x-model="draft"
+        @input="autoGrow($event)"
+        @keydown="onComposerKey($event)"
+        rows="1"
+        :placeholder="placeholder"
+        aria-label="متن پیام"
+      ></textarea>
+      <button type="button" class="icon-btn" :class="{ 'icon-btn--rec': listening }" @click="toggleVoice()"
+              :title="voiceSupported ? 'ورودی صوتی' : 'مرورگر شما از ورودی صوتی پشتیبانی نمی‌کند'" aria-label="ورودی صوتی">
+        <svg viewBox="0 0 24 24" class="icon"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/></svg>
+      </button>
+      <button type="button" class="btn btn--stop" x-show="busy" @click="interrupt()" title="توقف">
+        <svg viewBox="0 0 24 24" class="icon icon--sm"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+        توقف
+      </button>
+      <button type="submit" class="btn btn--send" x-show="!busy" :disabled="!draft.trim() && attachments.length === 0" title="ارسال (Ctrl+Enter)">
+        <svg viewBox="0 0 24 24" class="icon icon--sm"><path d="M4 12l16-8-6 16-2.5-6.5z"/></svg>
+        ارسال
+      </button>
+    </form>
+    <div class="composer__hints">
+      <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> ارسال</span>
+      <span><kbd>Ctrl</kbd>+<kbd>L</kbd> پاک‌سازی</span>
+      <span><kbd>Ctrl</kbd>+<kbd>K</kbd> گفتگوها</span>
+      <span><kbd>Ctrl</kbd>+<kbd>/</kbd> میان‌برها</span>
+    </div>
+  </footer>
+
+  <!-- ================= Info / actions panel ================= -->
+  <aside class="panel" :aria-hidden="(!panelOpen).toString()">
+    <section class="panel__card">
+      <h2 class="panel__title">وضعیت</h2>
+      <dl class="kv">
+        <div><dt>مدل</dt><dd x-text="model"></dd></div>
+        <div><dt>ارائه‌دهنده</dt><dd x-text="providerLabel"></dd></div>
+        <div><dt>پوشهٔ کاری</dt><dd class="kv__mono" :title="workspace" x-text="workspace"></dd></div>
+        <div><dt>حالت تأیید</dt><dd x-text="confirmModeLabel"></dd></div>
+        <div><dt>میزبان</dt><dd x-text="hostname"></dd></div>
+      </dl>
+      <div class="panel__row">
+        <button class="btn btn--ghost btn--sm" @click="runQuickAction('screen_capture', { filename: 'ui-shot.png' })">📸 اسکرین‌شات</button>
+        <button class="btn btn--ghost btn--sm" @click="runQuickAction('system_info', {})">🖥️ اطلاعات سیستم</button>
+      </div>
+    </section>
+
+    <section class="panel__card panel__card--grow">
+      <h2 class="panel__title">
+        ابزارها
+        <span class="panel__count" x-text="actionCount"></span>
+      </h2>
+      <div class="panel__search">
+        <svg viewBox="0 0 24 24" class="icon icon--sm"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.2-3.2"/></svg>
+        <input type="search" x-model="actionQuery" placeholder="جستجوی ابزار…" aria-label="جستجوی ابزار">
+      </div>
+      <div class="groups">
+        <template x-for="group in filteredActionGroups" :key="group.name">
+          <details class="group" open>
+            <summary class="group__head">
+              <span class="group__icon" x-text="group.icon" aria-hidden="true"></span>
+              <span x-text="group.name"></span>
+              <span class="group__count" x-text="group.items.length"></span>
+            </summary>
+            <ul class="group__list">
+              <template x-for="a in group.items" :key="a.name">
+                <li class="action" :title="a.description">
+                  <span class="risk-dot" :class="'risk-dot--' + a.risk" :aria-label="riskLabel(a.risk)"></span>
+                  <span class="action__name" x-text="a.name"></span>
+                  <span class="action__desc" dir="auto" x-text="a.description"></span>
+                </li>
+              </template>
+            </ul>
+          </details>
+        </template>
+      </div>
+    </section>
+  </aside>
+
+  <!-- ================= Settings modal ================= -->
+  <div class="modal" x-show="settingsOpen" x-transition.opacity x-cloak @click.self="settingsOpen = false">
+    <div class="modal__card" role="dialog" aria-modal="true" aria-label="تنظیمات">
+      <header class="modal__head">
+        <h2>تنظیمات</h2>
+        <button class="icon-btn" @click="settingsOpen = false" aria-label="بستن">
+          <svg viewBox="0 0 24 24" class="icon"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </header>
+      <div class="modal__body">
+        <div class="field">
+          <label for="set-provider">ارائه‌دهندهٔ مدل</label>
+          <select id="set-provider" x-model="form.provider">
+            <option value="ollama">Ollama (محلی)</option>
+            <option value="openai_compatible">سازگار با OpenAI (AvalAI / GapGPT / ...)</option>
+            <option value="auto">خودکار</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="set-model">مدل</label>
+          <div class="field__row">
+            <input id="set-model" list="model-options" x-model="form.model" placeholder="مثلاً qwen2.5:7b">
+            <button class="btn btn--ghost btn--sm" @click="refreshModels()" :disabled="modelsLoading">
+              <span x-show="!modelsLoading">به‌روزرسانی فهرست</span>
+              <span x-show="modelsLoading" x-cloak>در حال دریافت…</span>
+            </button>
+          </div>
+          <datalist id="model-options">
+            <template x-for="m in models" :key="m"><option :value="m"></option></template>
+          </datalist>
+        </div>
+        <div class="field" x-show="form.provider !== 'ollama'">
+          <label for="set-base">آدرس پایهٔ API</label>
+          <input id="set-base" x-model="form.openai_base_url" placeholder="https://api.avalai.ir/v1" dir="ltr">
+        </div>
+        <div class="field" x-show="form.provider !== 'ollama'">
+          <label for="set-key">کلید API</label>
+          <input id="set-key" type="password" x-model="form.openai_api_key" placeholder="••••••••" dir="ltr" autocomplete="off">
+          <p class="field__hint">کلید فقط روی همین دستگاه ذخیره می‌شود و هرگز به جایی ارسال نمی‌شود.</p>
+        </div>
+        <div class="field">
+          <label for="set-confirm">حالت تأیید</label>
+          <select id="set-confirm" x-model="form.confirm_mode">
+            <option value="destructive">فقط کارهای خطرناک (پیشنهادی)</option>
+            <option value="always">همیشه بپرس</option>
+            <option value="never">هرگز نپرس (فقط ماشین آزمایشی)</option>
+          </select>
+        </div>
+        <div class="field field--switch">
+          <label for="set-sound">صدای اعلان</label>
+          <input id="set-sound" type="checkbox" class="switch" x-model="soundEnabled" @change="persistPrefs()">
+        </div>
+        <div class="field field--switch">
+          <label for="set-theme">حالت تاریک</label>
+          <input id="set-theme" type="checkbox" class="switch" :checked="theme === 'dark'" @change="toggleTheme()">
+        </div>
+        <div class="field field--switch" x-show="desktop">
+          <label for="set-autostart">اجرای خودکار هنگام روشن شدن ویندوز</label>
+          <input id="set-autostart" type="checkbox" class="switch" x-model="form.autostart" @change="setAutostart()">
+        </div>
+      </div>
+      <footer class="modal__foot">
+        <button class="btn btn--ghost" @click="settingsOpen = false">انصراف</button>
+        <button class="btn btn--primary" @click="saveSettings()">ذخیره</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- ================= Export modal ================= -->
+  <div class="modal" x-show="exportOpen" x-transition.opacity x-cloak @click.self="exportOpen = false">
+    <div class="modal__card modal__card--sm" role="dialog" aria-modal="true" aria-label="خروجی گفتگو">
+      <header class="modal__head">
+        <h2>خروجی گفتگو</h2>
+        <button class="icon-btn" @click="exportOpen = false" aria-label="بستن">
+          <svg viewBox="0 0 24 24" class="icon"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </header>
+      <div class="modal__body">
+        <p class="muted">گفتگوی فعلی را روی دیسک ذخیره کنید.</p>
+        <div class="export-grid">
+          <button class="export-card" @click="exportConversation('md')">
+            <span aria-hidden="true">📝</span><strong>Markdown</strong><small>خوانا برای انسان</small>
+          </button>
+          <button class="export-card" @click="exportConversation('json')">
+            <span aria-hidden="true">🧾</span><strong>JSON</strong><small>ساختاریافته برای ابزارها</small>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= Shortcuts modal ================= -->
+  <div class="modal" x-show="shortcutsOpen" x-transition.opacity x-cloak @click.self="shortcutsOpen = false">
+    <div class="modal__card modal__card--sm" role="dialog" aria-modal="true" aria-label="میان‌برها">
+      <header class="modal__head">
+        <h2>میان‌برهای صفحه‌کلید</h2>
+        <button class="icon-btn" @click="shortcutsOpen = false" aria-label="بستن">
+          <svg viewBox="0 0 24 24" class="icon"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </header>
+      <div class="modal__body">
+        <ul class="shortcuts">
+          <li><kbd>Enter</kbd><span>ارسال پیام</span></li>
+          <li><kbd>Shift</kbd>+<kbd>Enter</kbd><span>خط جدید</span></li>
+          <li><kbd>Ctrl</kbd>+<kbd>Enter</kbd><span>ارسال از هر جای صفحه</span></li>
+          <li><kbd>Ctrl</kbd>+<kbd>L</kbd><span>پاک کردن صفحه</span></li>
+          <li><kbd>Ctrl</kbd>+<kbd>K</kbd><span>باز/بستن گفتگوها</span></li>
+          <li><kbd>Ctrl</kbd>+<kbd>,</kbd><span>تنظیمات</span></li>
+          <li><kbd>Ctrl</kbd>+<kbd>/</kbd><span>همین پنجره</span></li>
+          <li><kbd>Esc</kbd><span>بستن پنجره‌ها / توقف</span></li>
+          <li><kbd>Y</kbd> / <kbd>N</kbd><span>تأیید یا رد درخواست باز</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= Drag & drop overlay ================= -->
+  <div class="dropzone" x-show="dragging" x-transition.opacity x-cloak>
+    <div class="dropzone__card">
+      <svg viewBox="0 0 24 24" class="icon icon--xl"><path d="M12 16V4M8 8l4-4 4 4M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
+      <strong>فایل را اینجا رها کنید</strong>
+      <span>فایل در پوشهٔ کاری ذخیره و به دستیار معرفی می‌شود</span>
+    </div>
+  </div>
+
+  <!-- ================= Toasts ================= -->
+  <div class="toasts" aria-live="polite">
+    <template x-for="t in toasts" :key="t.id">
+      <div class="toast" :class="'toast--' + t.tone" x-transition>
+        <span class="toast__icon" x-text="t.icon" aria-hidden="true"></span>
+        <span x-text="t.text"></span>
+      </div>
+    </template>
+  </div>
+</div>
+
+<script src="../static/vendor/marked.min.js" defer></script>
+<script src="../static/vendor/highlight.min.js" defer></script>
+<script src="../static/app.js" defer></script>
+<script src="../static/vendor/alpine.min.js" defer></script>
 </body>
 </html>
