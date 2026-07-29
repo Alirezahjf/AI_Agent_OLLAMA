@@ -297,16 +297,14 @@ class _BaseBot:
                 run_id=event.run_id,
             )
             args_preview = _short(event.payload.get("arguments", {}), limit=600)
+            risk = str(event.payload.get("risk", "destructive"))
+            banner = {
+                "system": "🚨 عملیات سیستمی — تأیید لازم است",
+                "destructive": "⚠️ عملیات خطرناک — تأیید لازم است",
+            }.get(risk, "❓ تأیید لازم است")
             await status_msg.edit_text(
-                f"⚠️ تأیید لازم است: {name}\n\n{args_preview}",
-                reply_markup=InlineKeyboardMarkup(
-                    [
-                        [
-                            InlineKeyboardButton("✅ تأیید", callback_data=f"ok:{request_id}"),
-                            InlineKeyboardButton("✖️ لغو", callback_data=f"no:{request_id}"),
-                        ]
-                    ]
-                ),
+                f"{banner}\n\n🔧 {name}\n{args_preview}",
+                reply_markup=self._approval_keyboard(request_id, risk),
             )
             return None
         elif event.type == EventType.TOOL_RESULT.value:
@@ -340,24 +338,54 @@ class _BaseBot:
             pass
         if not query.data or ":" not in query.data:
             return
-        verb, request_id = query.data.split(":", 1)
+        verb, payload = query.data.split(":", 1)
+        if verb == "menu":
+            await self._handle_menu(update, context, payload)
+            return
+        if verb not in {"ok", "no"}:
+            return
+        await self._handle_approval(query, payload, approved=verb == "ok")
+
+    async def _handle_approval(self, query, request_id: str, *, approved: bool) -> None:
+        """Resolve a tool confirmation and rewrite the keyboard in place."""
         pending = self._pending.pop(request_id, None)
         if pending is None:
-            await query.message.reply_text("این درخواست منقضی شده است.")
+            await query.message.reply_text("⌛ این درخواست منقضی شده است.")
             return
-        approved = verb == "ok"
-        # Send a follow-up RPC to the bridge.  We POST to /confirm; for the
-        # in-process backend this is exposed via the resolve_confirmation
-        # call on the handlers.  The HTTP client doesn't expose it directly,
-        # so we fall back to a chat message if the dedicated call is missing.
         try:
             self._resolve(request_id, approved)
         except Exception as exc:  # noqa: BLE001
             await query.message.reply_text(f"❌ {exc}")
             return
-        await query.message.reply_text(
-            "✅ تأیید شد" if approved else "✖️ لغو شد",
-        )
+        verdict = "✅ تأیید شد" if approved else "✖️ لغو شد"
+        # Replace the buttons with the outcome so the message cannot be
+        # answered twice and the history stays readable.
+        try:
+            await query.edit_message_text(
+                f"{verdict}\n\n🔧 {pending.name}\n{_short(pending.arguments, limit=600)}"
+            )
+        except Exception:  # noqa: BLE001 - Telegram rejects no-op edits
+            await query.message.reply_text(verdict)
+
+    async def _handle_menu(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, action: str
+    ) -> None:
+        """Handle a tap on the persistent menu keyboard."""
+        if action == "status":
+            await self.status_cmd(update, context)
+        elif action == "actions":
+            await self.actions_cmd(update, context)
+        elif action == "history":
+            await self.history_cmd(update, context)
+        elif action == "reset":
+            self.client.clear_history()
+            await update.callback_query.message.reply_text(
+                "🧹 حافظهٔ Bridge پاک شد.", reply_markup=self._menu()
+            )
+        elif action == "help":
+            await update.callback_query.message.reply_text(
+                self._help_text(), reply_markup=self._menu()
+            )
 
     def _resolve(self, request_id: str, approved: bool) -> None:
         """Resolve a pending confirmation.  Subclasses may override for HTTP."""
@@ -369,13 +397,48 @@ class _BaseBot:
     # ------------------------------------------------------------- menu
 
     def _menu(self) -> InlineKeyboardMarkup:
+        """The persistent 2x2 control panel shown under bot messages."""
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("📌 وضعیت", callback_data="menu:status"),
-                    InlineKeyboardButton("🧹 پاک‌کردن", callback_data="menu:reset"),
+                    InlineKeyboardButton("📊 وضعیت", callback_data="menu:status"),
+                    InlineKeyboardButton("🧰 ابزارها", callback_data="menu:actions"),
+                ],
+                [
+                    InlineKeyboardButton("📜 تاریخچه", callback_data="menu:history"),
+                    InlineKeyboardButton("🧹 پاک‌کردن حافظه", callback_data="menu:reset"),
+                ],
+                [
+                    InlineKeyboardButton("❓ راهنما", callback_data="menu:help"),
                 ],
             ]
+        )
+
+    @staticmethod
+    def _approval_keyboard(request_id: str, risk: str = "destructive") -> InlineKeyboardMarkup:
+        """Approval buttons, labelled by how dangerous the action is."""
+        approve = "✅ اجرا کن" if risk != "system" else "⚠️ بله، مطمئنم"
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(approve, callback_data=f"ok:{request_id}"),
+                    InlineKeyboardButton("🛑 لغو", callback_data=f"no:{request_id}"),
+                ]
+            ]
+        )
+
+    @staticmethod
+    def _help_text() -> str:
+        return (
+            "🤖 راهنمای دستیار محلی\n\n"
+            "کافی است پیام خود را بنویسید تا روی ویندوز اجرا شود.\n\n"
+            "دستورها:\n"
+            "  /status — وضعیت مدل و پوشهٔ کاری\n"
+            "  /actions — فهرست ابزارها\n"
+            "  /history — آخرین پیام‌ها\n"
+            "  /model NAME — تغییر مدل\n"
+            "  /reset — پاک کردن حافظه\n\n"
+            "کارهای خطرناک قبل از اجرا از شما تأیید می‌گیرند."
         )
 
 

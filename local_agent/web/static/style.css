@@ -215,6 +215,7 @@ kbd {
   transition: grid-template-columns var(--dur) var(--ease);
   position: relative;
   isolation: isolate;
+  overflow-x: clip;
 }
 #app.sidebar-open { grid-template-columns: var(--sidebar-w) 1fr var(--panel-w); }
 
@@ -1151,6 +1152,7 @@ html[dir="ltr"] .switch:checked::after { transform: translateX(18px); }
     box-shadow: var(--shadow-lg);
   }
   html[dir="rtl"] .panel { transform: translateX(-100%); }
+  html[dir="ltr"] .panel { transform: translateX(100%); }
   #app.panel-open .panel { transform: none; }
   .only-sm { display: grid; }
 }
@@ -1166,10 +1168,12 @@ html[dir="ltr"] .switch:checked::after { transform: translateX(18px); }
     inset-block: var(--header-h) 0;
     inset-inline-start: 0;
     width: min(300px, 88vw);
-    transform: translateX(-8px);
+    /* Fully off-canvas: a partial nudge would spill past the viewport
+       edge and create a horizontal scrollbar on narrow screens. */
+    transform: translateX(-100%);
     box-shadow: var(--shadow-lg);
   }
-  html[dir="rtl"] .sidebar { transform: translateX(8px); }
+  html[dir="rtl"] .sidebar { transform: translateX(100%); }
   #app.sidebar-open .sidebar { transform: none; }
   #app.sidebar-open .scrim,
   #app.panel-open .scrim { opacity: 1; pointer-events: auto; }
