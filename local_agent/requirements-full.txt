@@ -1,0 +1,19 @@
+# Full feature set (install with `python local_agent_setup.py install-all`).
+
+-r requirements.txt
+
+# Mouse / keyboard automation on a real desktop session
+pyautogui>=0.9.54
+
+# Faster screenshot capture
+mss>=9.0
+
+# Personal-account Telegram via Telethon (user client, NOT a bot)
+telethon>=1.36
+
+# Web UI (FastAPI + uvicorn + websockets)
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.5
+pyperclip>=1.8
+uiautomation>=2.0; sys_platform == "win32"

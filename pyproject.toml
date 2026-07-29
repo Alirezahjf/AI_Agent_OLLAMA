@@ -12,14 +12,29 @@ dependencies = [
 
 [project.optional-dependencies]
 browser = ["playwright>=1.45,<2"]
+desktop = [
+  "pyautogui>=0.9.54",
+  "mss>=9.0",
+  "telethon>=1.36",
+  "rich>=13.0",
+  "pyperclip>=1.8",
+  "uiautomation>=2.0",
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
+  "pydantic>=2.5",
+]
 dev = ["pytest>=8.0", "ruff>=0.5"]
 
 [project.scripts]
 persian-agent-telegram = "agent.bot:main"
 persian-agent-bale = "agent.bale_bot:main"
+persian-local-assistant = "local_agent.cli:run_cli"
+persian-local-web = "local_agent.web:run_web"
+persian-bridge-telegram = "local_agent.bridge.telegram_bot:run_telegram"
+persian-bridge-bale = "local_agent.bridge.telegram_bot:run_bale"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "tests_local_agent"]
 
 [tool.ruff]
 line-length = 100

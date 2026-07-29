@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>Local Windows Assistant</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Local Windows Assistant</h1>
+    <div id="status" class="muted">در حال اتصال…</div>
+  </header>
+  <main>
+    <section id="chat" class="messages"></section>
+    <form id="composer">
+      <textarea id="input" rows="2" placeholder="پیام خود را بنویسید… (Enter برای ارسال، Shift+Enter برای خط جدید)"></textarea>
+      <button type="submit">ارسال</button>
+    </form>
+  </main>
+  <aside id="sidebar">
+    <h2>ابزارها</h2>
+    <ul id="actions"></ul>
+    <h2>تنظیمات</h2>
+    <button id="clear">🧹 پاک کردن حافظه</button>
+    <button id="screenshot">📸 اسکرین‌شات</button>
+  </aside>
+  <script src="/static/app.js"></script>
+</body>
+</html>
