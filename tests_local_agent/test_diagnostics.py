@@ -110,3 +110,115 @@ def test_main_prints_json(tmp_path: Path, capsys, monkeypatch) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert code in {0, 1}
     assert "results" in payload
+
+
+# ---------------------------------------------------------------------------
+# Packaging / installability
+# ---------------------------------------------------------------------------
+
+
+def _write_project(root: Path, pyproject: str, packages: list[str]) -> Path:
+    """Build a fake repo tree and return a diagnostics-like __file__ path."""
+    for name in packages:
+        pkg = root / name
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    return root / "local_agent" / "diagnostics.py"
+
+
+_GOOD = """
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "x"
+version = "1.0"
+
+[tool.setuptools.packages.find]
+include = ["agent*", "local_agent*"]
+"""
+
+_FLAT_LAYOUT_TRAP = """
+[project]
+name = "x"
+version = "1.0"
+"""
+
+
+def test_packaging_check_passes_when_packages_are_explicit(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    probe = _write_project(tmp_path, _GOOD, ["agent", "local_agent", "tests_local_agent"])
+    monkeypatch.setattr(dx, "__file__", str(probe))
+    result = dx.check_packaging()
+    assert result.status == dx.OK
+    assert result.data["explicit_packages"] is True
+
+
+def test_packaging_check_catches_the_flat_layout_error(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    """This is the exact failure users hit: 'Multiple top-level packages'."""
+    probe = _write_project(
+        tmp_path, _FLAT_LAYOUT_TRAP, ["agent", "local_agent", "tests_local_agent"]
+    )
+    monkeypatch.setattr(dx, "__file__", str(probe))
+    result = dx.check_packaging()
+    assert result.status == dx.FAIL
+    assert "packages" in result.hint
+    assert set(result.data["top_level"]) == {"agent", "local_agent", "tests_local_agent"}
+
+
+def test_packaging_check_flags_a_missing_build_system(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    probe = _write_project(
+        tmp_path,
+        '[project]\nname = "x"\nversion = "1.0"\n[tool.setuptools.packages.find]\ninclude = ["a*"]\n',
+        ["local_agent"],
+    )
+    monkeypatch.setattr(dx, "__file__", str(probe))
+    result = dx.check_packaging()
+    assert result.status == dx.FAIL
+    assert "build-system" in result.detail
+
+
+def test_packaging_check_allows_a_single_top_level_package(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    probe = _write_project(
+        tmp_path, "[build-system]\nrequires = []\n" + _FLAT_LAYOUT_TRAP, ["local_agent"]
+    )
+    monkeypatch.setattr(dx, "__file__", str(probe))
+    assert dx.check_packaging().status == dx.OK
+
+
+def test_dependency_check_marks_missing_web_deps_as_fatal(monkeypatch) -> None:  # noqa: ANN001
+    import importlib.util
+
+    real = importlib.util.find_spec
+
+    def fake(name: str, *a, **k):  # noqa: ANN001, ANN202
+        if name in {"uvicorn", "fastapi"}:
+            return None
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake)
+    result = dx.check_dependencies()
+    assert result.status == dx.FAIL
+    assert "uvicorn" in result.detail
+    assert "[all]" in result.hint
+
+
+def test_dependency_check_groups_optional_extras(monkeypatch) -> None:  # noqa: ANN001
+    import importlib.util
+
+    real = importlib.util.find_spec
+
+    def fake(name: str, *a, **k):  # noqa: ANN001, ANN202
+        if name in {"webview", "pystray"}:
+            return None
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake)
+    result = dx.check_dependencies()
+    # Web deps are present here, so a missing native shell is only a warning.
+    assert result.status == dx.WARN
+    assert result.data["missing_optional"]["app"] == ["pywebview", "pystray"]
+    # The hint must be a runnable command naming every affected extra.
+    assert result.hint.startswith("نصب کنید: pip install -e")
+    assert "app" in result.hint

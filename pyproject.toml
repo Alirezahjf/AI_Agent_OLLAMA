@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "persian-ollama-coding-agent"
 version = "2.0.0"
@@ -12,23 +16,40 @@ dependencies = [
 
 [project.optional-dependencies]
 browser = ["playwright>=1.45,<2"]
+
+# Everything the FastAPI web UI needs.  Kept separate from `desktop` so
+# `pip install -e ".[web]"` gives a working browser UI without pulling in
+# Windows-only automation packages.
+web = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
+  "pydantic>=2.5",
+]
+
+# Local automation: mouse/keyboard, screenshots, clipboard, personal
+# Telegram.  `uiautomation` is Windows-only, hence the environment marker.
 desktop = [
+  "persian-ollama-coding-agent[web]",
   "pyautogui>=0.9.54",
   "mss>=9.0",
   "telethon>=1.36",
   "rich>=13.0",
   "pyperclip>=1.8",
-  "uiautomation>=2.0",
-  "fastapi>=0.110",
-  "uvicorn[standard]>=0.27",
-  "pydantic>=2.5",
+  "uiautomation>=2.0; sys_platform == 'win32'",
 ]
+
+# The native window + tray icon.
 app = [
+  "persian-ollama-coding-agent[desktop]",
   "pywebview>=5.0",
   "pystray>=0.19",
 ]
+
 build = ["pyinstaller>=6.0"]
 dev = ["pytest>=8.0", "ruff>=0.5"]
+
+# One-shot install for a normal Windows user.
+all = ["persian-ollama-coding-agent[web,desktop,app]"]
 
 [project.scripts]
 persian-agent-telegram = "agent.bot:main"
@@ -39,6 +60,26 @@ persian-bridge-telegram = "local_agent.bridge.telegram_bot:run_telegram"
 persian-bridge-bale = "local_agent.bridge.telegram_bot:run_bale"
 persian-local-desktop = "local_agent.desktop:run"
 persian-local-installer = "local_agent.desktop.build:main"
+
+# Without this, setuptools' flat-layout auto-discovery sees `agent`,
+# `local_agent` *and* `tests_local_agent` at the top level and refuses to
+# build ("Multiple top-level packages discovered in a flat-layout").
+# Listing the shipped packages explicitly keeps the test suites out of the
+# distribution and makes `pip install -e .` work on a clean machine.
+[tool.setuptools.packages.find]
+include = ["agent*", "local_agent*"]
+exclude = ["tests*", "tests_local_agent*", "docs*"]
+
+# The web UI is served from disk at runtime, so its HTML/CSS/JS/fonts have
+# to be installed alongside the Python modules.
+[tool.setuptools.package-data]
+"local_agent.web" = [
+  "templates/*.html",
+  "static/*.js",
+  "static/*.css",
+  "static/vendor/*",
+  "static/vendor/fonts/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "tests_local_agent"]

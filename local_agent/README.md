@@ -64,10 +64,37 @@ python local_agent_setup.py install-all
 
 `install-all` همه چیز را نصب می‌کند:
 - runtime اصلی (requests, Pillow, dotenv, rich)
+- رابط وب (`fastapi`, `uvicorn`, `pydantic`)
 - mouse/keyboard automation (`pyautogui`, `mss`)
 - Telegram user client (`telethon`)
+- پنجرهٔ بومی و آیکون نوار وظیفه (`pywebview`, `pystray`)
 
 اگر فقط LLM و کارهای read-only می‌خواهید: `python local_agent_setup.py install`
+
+#### نصب دستی با pip (به‌جای اسکریپت)
+
+بسته‌های اختیاری به‌صورت **extra** گروه‌بندی شده‌اند و می‌توانید فقط آنچه لازم دارید را نصب کنید:
+
+| extra | چه چیزی می‌آورد | چه وقت لازم است |
+|---|---|---|
+| `web` | fastapi، uvicorn، pydantic | رابط وب و اپ دسکتاپ |
+| `desktop` | pyautogui، mss، telethon، rich، pyperclip، uiautomation | کنترل ماوس/کیبورد و تلگرام شخصی |
+| `app` | pywebview، pystray | پنجرهٔ بومی و آیکون کنار ساعت |
+| `all` | هر سهٔ بالا | حالت پیشنهادی برای کاربر ویندوز |
+| `dev` | pytest، ruff | توسعه و اجرای تست |
+
+```powershell
+pip install -e ".[all]"        # همه‌چیز (پیشنهادی)
+pip install -e ".[web]"        # فقط رابط وب
+pip install -e ".[all,dev]"    # همه‌چیز + ابزار تست
+```
+
+> **نکتهٔ PowerShell:** در PowerShell از **دابل‌کوت** استفاده کنید (`".[all]"`).
+> سینگل‌کوت (`'.[all]'`) که در مثال‌های Bash می‌بینید در PowerShell درست تفسیر نمی‌شود.
+
+اگر `pip install -e .` با خطای
+`Multiple top-level packages discovered in a flat-layout` شکست خورد، یعنی
+نسخهٔ قدیمی `pyproject.toml` را دارید؛ آخرین تغییرات را `git pull` کنید.
 
 **لینوکس — وابستگی‌های اضافی:**
 

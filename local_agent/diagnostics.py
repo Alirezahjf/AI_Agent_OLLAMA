@@ -165,16 +165,37 @@ def check_platform() -> CheckResult:
 
 
 def check_dependencies() -> CheckResult:
-    required = {"requests": "requests", "fastapi": "fastapi", "uvicorn": "uvicorn",
-                "pydantic": "pydantic", "PIL": "Pillow", "dotenv": "python-dotenv"}
-    optional = {"pyautogui": "pyautogui", "mss": "mss", "webview": "pywebview",
-                "pystray": "pystray", "telegram": "python-telegram-bot",
-                "telethon": "telethon", "pyperclip": "pyperclip", "rich": "rich"}
+    """Report missing packages grouped by the feature they unlock.
+
+    Only the packages the assistant genuinely cannot start without are
+    fatal.  Everything else is reported as a warning naming the *extra*
+    that installs it, so the hint is a command the user can paste.
+    """
     import importlib.util
 
+    required = {"requests": "requests", "PIL": "Pillow", "dotenv": "python-dotenv"}
+    # module -> (pip name, extra that provides it)
+    optional = {
+        "fastapi": ("fastapi", "web"),
+        "uvicorn": ("uvicorn", "web"),
+        "pydantic": ("pydantic", "web"),
+        "pyautogui": ("pyautogui", "desktop"),
+        "mss": ("mss", "desktop"),
+        "telethon": ("telethon", "desktop"),
+        "pyperclip": ("pyperclip", "desktop"),
+        "rich": ("rich", "desktop"),
+        "telegram": ("python-telegram-bot", "desktop"),
+        "webview": ("pywebview", "app"),
+        "pystray": ("pystray", "app"),
+    }
+
     missing = [pkg for mod, pkg in required.items() if importlib.util.find_spec(mod) is None]
-    absent_optional = [pkg for mod, pkg in optional.items() if importlib.util.find_spec(mod) is None]
-    data = {"missing_required": missing, "missing_optional": absent_optional}
+    absent: dict[str, list[str]] = {}
+    for module, (pkg, extra) in optional.items():
+        if importlib.util.find_spec(module) is None:
+            absent.setdefault(extra, []).append(pkg)
+
+    data = {"missing_required": missing, "missing_optional": absent}
     if missing:
         return CheckResult(
             "deps", "وابستگی‌ها", FAIL,
@@ -182,14 +203,77 @@ def check_dependencies() -> CheckResult:
             "نصب کنید: pip install " + " ".join(missing),
             data,
         )
-    if absent_optional:
+    if absent:
+        flat = [pkg for pkgs in absent.values() for pkg in pkgs]
+        # The web UI cannot start at all without these three.
+        blocking = absent.get("web", [])
+        detail = "بسته‌های غایب: " + "، ".join(flat)
+        if blocking:
+            return CheckResult(
+                "deps", "وابستگی‌ها", FAIL,
+                detail + f" — بدون {'، '.join(blocking)} رابط وب و اپ دسکتاپ اجرا نمی‌شوند",
+                'نصب کنید: pip install -e ".[all]"  (یا: python local_agent_setup.py install-all)',
+                data,
+            )
+        extras = ",".join(sorted(absent))
         return CheckResult(
-            "deps", "وابستگی‌ها", WARN,
-            "بسته‌های اختیاری غایب: " + "، ".join(absent_optional),
-            "برای پنجرهٔ بومی و ابزارهای دسکتاپ: pip install -e \".[desktop,app]\"",
+            "deps", "وابستگی‌ها", WARN, detail,
+            f'نصب کنید: pip install -e ".[{extras}]"',
             data,
         )
     return CheckResult("deps", "وابستگی‌ها", OK, "همهٔ بسته‌ها نصب‌اند", "", data)
+
+
+def check_packaging() -> CheckResult:
+    """Verify ``pip install -e .`` can actually resolve this project.
+
+    A flat layout with several top-level directories (``agent``,
+    ``local_agent``, ``tests_local_agent``) makes setuptools bail out with
+    "Multiple top-level packages discovered in a flat-layout" unless the
+    packages are listed explicitly.  We check the declaration rather than
+    shelling out to pip so the check stays instant and offline.
+    """
+    root = Path(__file__).resolve().parent.parent
+    pyproject = root / "pyproject.toml"
+    if not pyproject.is_file():
+        return CheckResult(
+            "packaging", "بسته‌بندی پروژه", WARN, "pyproject.toml پیدا نشد",
+            "احتمالاً پروژه به‌صورت نصب‌شده اجرا می‌شود؛ معمولاً مشکلی نیست.",
+        )
+    try:
+        text = pyproject.read_text(encoding="utf-8")
+    except OSError as exc:
+        return CheckResult("packaging", "بسته‌بندی پروژه", WARN, str(exc)[:120], "")
+
+    problems: list[str] = []
+    if "[build-system]" not in text:
+        problems.append("بخش [build-system] تعریف نشده")
+    explicit = (
+        "[tool.setuptools.packages.find]" in text
+        or "[tool.setuptools]" in text
+        or "packages =" in text
+    )
+    top_level = sorted(
+        entry.name
+        for entry in root.iterdir()
+        if entry.is_dir() and (entry / "__init__.py").is_file() and not entry.name.startswith(".")
+    )
+    if len(top_level) > 1 and not explicit:
+        problems.append(
+            "چند پکیج سطح‌بالا (" + "، ".join(top_level) + ") بدون تعیین صریح packages"
+        )
+    data = {"top_level": top_level, "explicit_packages": explicit}
+    if problems:
+        return CheckResult(
+            "packaging", "بسته‌بندی پروژه", FAIL, "؛ ".join(problems),
+            "در pyproject.toml بخش [tool.setuptools.packages.find] را با "
+            'include = ["agent*", "local_agent*"] اضافه کنید، وگرنه '
+            "pip install -e . با خطای flat-layout شکست می‌خورد.",
+            data,
+        )
+    return CheckResult(
+        "packaging", "بسته‌بندی پروژه", OK, "pip install -e . قابل اجراست", "", data
+    )
 
 
 def check_paths(settings: AssistantSettings) -> CheckResult:
@@ -469,6 +553,7 @@ def run_checks(
         check_python,
         check_platform,
         check_dependencies,
+        check_packaging,
         lambda: check_paths(settings),
         lambda: check_config(settings),
         lambda: check_llm_config(settings),

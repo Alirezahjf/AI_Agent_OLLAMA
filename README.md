@@ -145,9 +145,13 @@ git clone https://github.com/Alirezahjf/AI_Agent_OLLAMA.git
 cd AI_Agent_OLLAMA
 python3 -m venv .venv
 source .venv/bin/activate              # Windows PowerShell: .venv\Scripts\Activate.ps1
-pip install -e '.[dev]'
+pip install -e '.[dev]'                # PowerShell: pip install -e ".[dev]"
 cp .env.example .env
 ```
+
+> **ویندوز / PowerShell:** حتماً از دابل‌کوت استفاده کنید — `pip install -e ".[dev]"`.
+> برای دستیار محلی (رابط وب + اپ دسکتاپ) این را بزنید: `pip install -e ".[all]"`
+> یا ساده‌تر `python local_agent_setup.py install-all`.
 
 برای screenshot واقعی صفحهٔ وب، browser اختیاری را هم نصب کنید — حتماً با **همان interpreterی** که ربات را اجرا می‌کنید (اگر venv فعال است، همان `python`):
 
