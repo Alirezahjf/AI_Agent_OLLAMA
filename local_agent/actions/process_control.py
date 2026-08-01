@@ -14,6 +14,7 @@ from typing import Any
 
 from ..core.errors import AssistantError, DependencyMissing
 from ..core.logging_setup import get_logger
+from ..utils.encoding import TEXT_IO, decode_output
 from ..utils.platform import is_linux, is_windows
 from .registry import ActionContext, ActionRegistry, risk, Risk
 
@@ -117,15 +118,16 @@ def _list_powershell(needle: str, limit: int) -> str:
         completed = subprocess.run(
             ["powershell", "-NoProfile", "-Command", script],
             capture_output=True,
-            text=True,
+            **TEXT_IO,
             timeout=15,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise AssistantError(f"could not list processes: {exc}") from exc
     if completed.returncode != 0:
-        raise AssistantError(f"powershell failed: {completed.stderr[:200]}")
-    lines = [ln for ln in completed.stdout.splitlines() if ln.strip()]
+        raise AssistantError(f"powershell failed: {decode_output(completed.stderr)[:200]}")
+    stdout = decode_output(completed.stdout)
+    lines = [ln for ln in stdout.splitlines() if ln.strip()]
     if len(lines) <= 1:
         return "no processes returned by PowerShell."
     rows: list[str] = []
@@ -152,7 +154,7 @@ def _list_linux_fallback(needle: str, limit: int) -> str:
             completed = subprocess.run(
                 ["ps", "-eo", "pid,comm,pcpu,pmem", "--sort=-pmem"],
                 capture_output=True,
-                text=True,
+                **TEXT_IO,
                 timeout=10,
                 check=False,
             )
@@ -209,17 +211,19 @@ def _kill_windows(pid: int) -> str:
         completed = subprocess.run(
             ["taskkill", "/PID", str(pid), "/T", "/F"],
             capture_output=True,
-            text=True,
+            **TEXT_IO,
             timeout=10,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise AssistantError(f"taskkill failed: {exc}") from exc
+    stdout = decode_output(completed.stdout)
+    stderr = decode_output(completed.stderr)
     if completed.returncode == 0:
         return f"killed pid {pid}"
     raise AssistantError(
         f"taskkill exit {completed.returncode}: "
-        f"{(completed.stdout + completed.stderr).strip()[:200]}"
+        f"{(stdout + stderr).strip()[:200]}"
     )
 
 

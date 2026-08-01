@@ -17,6 +17,7 @@ The checks are ordered from "cheap and local" to "talks to the network".
 from __future__ import annotations
 
 import json
+import os
 import platform
 import shutil
 import socket
@@ -462,14 +463,38 @@ def check_screenshot(settings: AssistantSettings) -> CheckResult:
     )
 
 
+def _is_our_web_server(port: int, timeout: float = 1.5) -> bool:
+    """Return True if our own web server is listening on the port."""
+    import urllib.request
+    import urllib.error
+
+    url = f"http://127.0.0.1:{port}/healthz"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            if resp.status == 200:
+                data = resp.read().decode("utf-8", errors="replace")
+                if '"ok": true' in data or '"ok":true' in data:
+                    return True
+    except (urllib.error.URLError, urllib.error.HTTPError, socket.timeout, OSError):
+        pass
+    return False
+
+
 def check_port(settings: AssistantSettings, port: int = 7824) -> CheckResult:
     with socket.socket() as probe:
         try:
             probe.bind(("127.0.0.1", port))
         except OSError:
+            if _is_our_web_server(port):
+                return CheckResult(
+                    "port", "پورت رابط وب", OK,
+                    f"دستیار روی پورت {port} در حال اجراست",
+                    "", {"port": port, "ours": True},
+                )
             return CheckResult(
-                "port", "پورت رابط وب", WARN, f"پورت {port} مشغول است",
-                "یا دستیار از قبل باز است، یا با --port پورت دیگری بدهید.", {"port": port},
+                "port", "پورت رابط وب", WARN, f"پورت {port} توسط برنامهٔ دیگری اشغال شده",
+                "یا دستیار از قبل باز است، یا با --port پورت دیگری بدهید.",
+                {"port": port, "ours": False},
             )
     return CheckResult("port", "پورت رابط وب", OK, f"پورت {port} آزاد است", "", {"port": port})
 
@@ -535,6 +560,76 @@ def check_disk(settings: AssistantSettings) -> CheckResult:
     return CheckResult("disk", "فضای دیسک", OK, f"{free_gb:.1f} گیگابایت آزاد", "", data)
 
 
+def check_interpreter() -> CheckResult:
+    """Detect whether we are running inside the project's virtualenv."""
+    if sys.prefix != sys.base_prefix:
+        return CheckResult(
+            "interpreter", "مفسر پایتون", OK,
+            "داخل محیط مجازی فعال است", "", {"venv": True}
+        )
+
+    venv_path = Path(__file__).resolve().parent.parent.parent / ".venv"
+    if venv_path.is_dir():
+        activate = "Activate.ps1" if os.name == "nt" else "activate"
+        hint = (
+            f"محیط مجازی پروژه فعال نیست؛ با مفسر سراسری اجرا می‌کنید. "
+            f"لطفاً اجرا کنید: {venv_path / 'Scripts' / activate} (ویندوز) "
+            f"یا source {venv_path / 'bin' / activate} (لینوکس)"
+        )
+        return CheckResult(
+            "interpreter", "مفسر پایتون", FAIL,
+            "محیط مجازی پروژه فعال نیست؛ با مفسر سراسری اجرا می‌کنید",
+            hint, {"venv": False, "venv_path": str(venv_path)}
+        )
+
+    return CheckResult(
+        "interpreter", "مفسر پایتون", WARN,
+        "محیط مجازی پیدا نشد",
+        "پیشنهاد می‌شود از همان مفسر جاری استفاده کنید یا .venv بسازید.",
+        {"venv": False}
+    )
+
+
+def check_encoding() -> CheckResult:
+    """Check terminal encoding and detect mojibake risk."""
+    from .utils.encoding import looks_like_mojibake
+
+    enc = getattr(sys.stdout, "encoding", None) or "unknown"
+    data = {"encoding": enc}
+
+    if enc and enc.lower() in ("utf-8", "utf8"):
+        return CheckResult("encoding", "رمزگذاری ترمینال", OK, f"UTF-8 ({enc})", "", data)
+
+    # Try a quick Persian round-trip via subprocess
+    try:
+        import subprocess
+        completed = subprocess.run(
+            [sys.executable, "-c", "print('فهرست')"],
+            capture_output=True, text=False, timeout=3
+        )
+        out = completed.stdout.decode(enc, errors="replace") if enc else ""
+        if looks_like_mojibake(out):
+            hint = (
+                "ترمینال شما فارسی را درست نشان نمی‌دهد. "
+                "در PowerShell اجرا کنید:\n"
+                "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n"
+                "$env:PYTHONUTF8=1"
+            )
+            return CheckResult(
+                "encoding", "رمزگذاری ترمینال", WARN,
+                f"خروجی فارسی ممکن است خراب شود ({enc})",
+                hint, data
+            )
+    except Exception:
+        pass
+
+    return CheckResult(
+        "encoding", "رمزگذاری ترمینال", WARN,
+        f"UTF-8 نیست ({enc})",
+        "دستور PowerShell بالا را اجرا کنید.", data
+    )
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -564,6 +659,8 @@ def run_checks(
         check_desktop,
         lambda: check_bots(settings),
         lambda: check_disk(settings),
+        check_interpreter,
+        check_encoding,
     ]
     for check in checks:
         report.results.append(_timed(check))
