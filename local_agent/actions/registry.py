@@ -70,6 +70,8 @@ class Action:
     parameters: dict[str, Any]
     required: tuple[str, ...] = ()
     risk_level: Risk = Risk.SAFE
+    unavailable: bool = False
+    unavailable_reason: str = ""
 
     def to_tool_definition(self):
         from ..llm.client import ToolDefinition
@@ -212,6 +214,10 @@ def run_action(
 ) -> str:
     """Validate, confirm if needed, and execute an action."""
     action = registry.get(name)
+    if action.unavailable:
+        raise AssistantError(
+            action.unavailable_reason or f"action {name!r} is not available in this environment"
+        )
     arguments = _coerce_arguments(action, arguments)
     _validate_arguments(action, arguments)
 
@@ -245,7 +251,8 @@ def list_actions(registry: ActionRegistry) -> list[Action]:
 def describe_action(action: Action) -> str:
     risk = action.risk_level.value
     params = ", ".join(sorted(action.parameters.keys())) or "-"
-    return f"{action.name}  [risk={risk}]  args=({params})  {action.description}"
+    suffix = " [UNAVAILABLE]" if action.unavailable else ""
+    return f"{action.name}  [risk={risk}]  args=({params}){suffix}  {action.description}"
 
 
 # ---------------------------------------------------------------------------

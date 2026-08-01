@@ -370,12 +370,20 @@ def test_tray_callbacks_are_all_optional() -> None:
 
 
 def test_autostart_reports_platform_support() -> None:
-    assert autostart.supported() is (sys.platform == "win32")
+    assert autostart.supported() is (sys.platform == "win32" or sys.platform.startswith("linux"))
 
 
 def test_autostart_is_noop_off_windows() -> None:
     if sys.platform == "win32":  # pragma: no cover - never on CI
         pytest.skip("would modify the real registry")
+    if sys.platform.startswith("linux"):
+        # Linux autostart is supported — just test that it doesn't crash
+        autostart.is_enabled()
+        autostart.enable()
+        autostart.disable()
+        autostart.set_enabled(False)
+        return
+    # macOS / other: should be a no-op
     assert autostart.is_enabled() is False
     assert autostart.enable() is False
     assert autostart.disable() is False

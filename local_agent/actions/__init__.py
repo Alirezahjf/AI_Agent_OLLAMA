@@ -36,7 +36,15 @@ __all__ = [
 
 
 def build_default_registry(context: ActionContext) -> ActionRegistry:
-    """Compose the full registry of actions for the CLI."""
+    """Compose the full registry of actions for the CLI.
+
+    Actions that cannot work in the current environment are still
+    registered but marked with an ``unavailable`` attribute so the
+    Bridge can refuse early with a helpful message.
+    """
+    from ..utils.platform import capabilities
+
+    caps = capabilities()
     registry = ActionRegistry()
     register_app_control(registry, context)
     register_window_control(registry, context)
@@ -46,4 +54,23 @@ def build_default_registry(context: ActionContext) -> ActionRegistry:
     register_web(registry, context)
     register_system(registry, context)
     register_gui_advanced(registry, context)
+
+    # Mark actions that cannot work in this environment
+    if not caps.get("gui"):
+        for name in ("list_windows", "move_window", "minimize_window",
+                     "maximize_window", "focus_window", "take_screenshot",
+                     "click_at", "type_text", "press_key", "drag_mouse",
+                     "scroll_at"):
+            action = registry._actions.get(name)
+            if action is not None:
+                action.unavailable = True  # type: ignore[attr-defined]
+                action.unavailable_reason = "این ابزار فقط در محیط گرافیکی قابل استفاده است."  # type: ignore[attr-defined]
+
+    if not caps.get("clipboard"):
+        for name in ("clipboard_read", "clipboard_write"):
+            action = registry._actions.get(name)
+            if action is not None:
+                action.unavailable = True  # type: ignore[attr-defined]
+                action.unavailable_reason = "کلیپ‌بورد در دسترس نیست. xclip/xsel را نصب کنید."  # type: ignore[attr-defined]
+
     return registry
