@@ -1,11 +1,31 @@
-# اپ دسکتاپ ویندوز
+# اپ دسکتاپ
 
-یک برنامهٔ **بومی ویندوز** — نه ترمینال، نه تب مرورگر. پنجرهٔ خودش،
-آیکون کنار ساعت، کلید میان‌بر سراسری، و نوتیفیکیشن ویندوز.
+یک برنامهٔ **بومی** — نه ترمینال، نه تب مرورگر. پنجرهٔ خودش،
+آیکون کنار ساعت، کلید میان‌بر سراسری، و نوتیفیکیشن.
+
+**ویندوز** (پنجرهٔ pywebview، tray، کلید سراسری، اجرای خودکار):
 
 ```powershell
 python local_agent_setup.py desktop
 ```
+
+**لینوکس** (پنجرهٔ pywebview یا مرورگر، tray اختیاری):
+
+```bash
+python local_agent_setup.py desktop
+# یا اگر بدون pywebview:
+python local_agent_setup.py desktop --browser
+```
+
+**سرور لینوکس بدون نمایشگر** (رابط وب در شبکه):
+
+```bash
+python local_agent_setup.py web --host 0.0.0.0 --port 7824
+```
+
+> ⚠️ هشدار امنیتی: اگر آدرس غیرمحلی (مثل `0.0.0.0`) انتخاب کنید،
+> یک توکن احراز هویت لازم است. توکن در `<DATA_DIR>/bridge.token`
+> ذخیره می‌شود.
 
 ![پنجرهٔ اپ دسکتاپ](../docs/images/desktop-window.png)
 
@@ -169,6 +189,10 @@ $env:LOCAL_AGENT_MINIMIZE_TO_TRAY = "false"
 
 در نسخهٔ سورس از `pythonw.exe` استفاده می‌شود تا پنجرهٔ کنسول باز نشود.
 
+**لینوکس:** فایل `~/.config/autostart/persian-local-assistant.desktop` ساخته
+می‌شود. محیط‌های دسکتاپ (GNOME, KDE, ...) این فایل را به‌طور خودکار
+می‌خوانند.
+
 ### به‌روزرسانی
 
 آخرین release مخزن GitHub بررسی می‌شود، با فاصلهٔ حداقل ۲۴ ساعت.
@@ -230,7 +254,10 @@ $env:LOCAL_AGENT_MINIMIZE_TO_TRAY = "false"
 |---|---|
 | `pywebview` | اجرا در مرورگر سیستم |
 | `pystray` | بدون tray، بقیه سر جایش |
-| غیر ویندوز | tray و هات‌کی و رجیستری غیرفعال، بقیه کار می‌کند |
+| غیر ویندوز | tray و هات‌کی غیرفعال، بقیه کار می‌کند |
+| بدون نمایشگر (سرور) | خودکار به حالت سرور وب می‌رود |
+| `wmctrl`/`xdotool` | ابزارهای پنجره روی لینوکس غیرفعال |
+| `xclip`/`xsel` | کلیپ‌بورد روی لینوکس غیرفعال |
 | بدون اینترنت | بررسی به‌روزرسانی بی‌صدا رد می‌شود |
 
 به همین دلیل تست‌های دسکتاپ روی لینوکس هم سبز هستند.
@@ -336,6 +363,32 @@ python local_agent_setup.py desktop --hotkey "ctrl+shift+f12"
 ```powershell
 reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v PersianLocalAssistant
 ```
+
+**لینوکس: pywebview باز نمی‌شود**
+وابستگی‌های GTK را نصب کنید:
+
+```bash
+sudo apt install python3-gi python3-gi-cairo gir1.2-webkit2-4.1
+pip install pywebview[gtk]
+```
+
+**لینوکس: کلیپ‌بورد کار نمی‌کند**
+`xclip` یا `xsel` را نصب کنید:
+
+```bash
+sudo apt install xclip
+```
+
+**لینوکس: ابزارهای پنجره کار نمی‌کنند**
+`wmctrl` یا `xdotool` را نصب کنید:
+
+```bash
+sudo apt install wmctrl xdotool
+```
+
+**سرور: اتصال از راه دور رد می‌شود**
+توکن احراز هویت لازم است. توکن در `<DATA_DIR>/bridge.token` است.
+یا متغیر `LOCAL_AGENT_BRIDGE_TOKEN` را تنظیم کنید.
 
 ---
 

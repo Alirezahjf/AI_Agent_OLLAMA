@@ -96,7 +96,7 @@ def build_spec(*, icon: Path | None, onefile: bool = True, console: bool = False
     hidden = ",\n        ".join(repr(name) for name in HIDDEN_IMPORTS)
     excludes = ",\n        ".join(repr(name) for name in EXCLUDES)
     icon_line = f"icon={str(icon)!r}," if icon else ""
-    entry = str(PACKAGE / "desktop" / "__main__.py")
+    entry = str(PACKAGE / "desktop" / "launcher.py")
 
     exe_block = (
         f"""exe = EXE(

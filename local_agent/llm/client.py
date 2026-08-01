@@ -110,6 +110,22 @@ class LLMClient(ABC):
     ) -> ModelReply:
         """Return a model reply given the conversation and available tools."""
 
+    def stream_complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[ToolDefinition],
+    ) -> Iterable[tuple[str, str]]:
+        """Yield (event_type, content) tuples as the model generates.
+
+        The default implementation falls back to the non-streaming
+        ``complete`` and emits a single ``assistant_delta`` followed by
+        ``done``.  Subclasses should override this for true streaming.
+        """
+        reply = self.complete(messages, tools)
+        if reply.content:
+            yield ("assistant_delta", reply.content)
+        yield ("done", "")
+
     @abstractmethod
     def list_models(self) -> list[str]:
         """Return the list of models this provider exposes (best-effort)."""
@@ -207,6 +223,56 @@ class OllamaClient(LLMClient):
         except (requests.RequestException, ValueError) as exc:
             logger.warning("Ollama /api/tags failed: %s", exc)
             return []
+
+    def stream_complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[ToolDefinition],
+    ) -> Iterable[tuple[str, str]]:
+        """Stream the Ollama response, yielding ``assistant_delta`` chunks."""
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+            "options": {"temperature": self._temperature, "num_ctx": 32768},
+        }
+        if tools:
+            payload["tools"] = [tool.to_openai() for tool in tools]
+
+        try:
+            response = requests.post(
+                f"{self._base}/api/chat",
+                json=payload,
+                timeout=self._timeout,
+                stream=True,
+            )
+        except requests.RequestException as exc:
+            raise LLMTimeout(f"Ollama streaming failed: {exc}") from exc
+
+        if response.status_code >= 400:
+            # Fall back to non-streaming
+            yield ("assistant_delta", self.complete(messages, tools).content)
+            yield ("done", "")
+            return
+
+        content_parts: list[str] = []
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            message = data.get("message") or {}
+            chunk = message.get("content", "")
+            if chunk:
+                content_parts.append(chunk)
+                yield ("assistant_delta", chunk)
+            # If the response is done, break
+            if data.get("done", False):
+                break
+
+        yield ("done", "")
 
     @staticmethod
     def _sleep_backoff(attempt: int, response: requests.Response | None = None) -> None:
@@ -347,6 +413,61 @@ class OpenAICompatibleClient(LLMClient):
         except (requests.RequestException, ValueError) as exc:
             logger.warning("provider /models failed: %s", exc)
             return []
+
+    def stream_complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[ToolDefinition],
+    ) -> Iterable[tuple[str, str]]:
+        """Stream the OpenAI-compatible response, yielding ``assistant_delta`` chunks."""
+        body: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": self._temperature,
+            "stream": True,
+        }
+        if tools:
+            body["tools"] = [tool.to_openai() for tool in tools]
+            body["tool_choice"] = "auto"
+
+        try:
+            response = requests.post(
+                f"{self._base}/chat/completions",
+                headers=self._headers,
+                json=body,
+                timeout=self._timeout,
+                stream=True,
+            )
+        except requests.RequestException as exc:
+            raise LLMTimeout(f"streaming failed: {exc}") from exc
+
+        if response.status_code >= 400:
+            # Fall back to non-streaming
+            yield ("assistant_delta", self.complete(messages, tools).content)
+            yield ("done", "")
+            return
+
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            if not line.startswith("data: "):
+                continue
+            data_str = line[6:]
+            if data_str.strip() == "[DONE]":
+                break
+            try:
+                data = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+            choices = data.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta") or {}
+            content = delta.get("content", "")
+            if content:
+                yield ("assistant_delta", content)
+
+        yield ("done", "")
 
     @staticmethod
     def _sleep_backoff(attempt: int, response: requests.Response | None = None) -> None:

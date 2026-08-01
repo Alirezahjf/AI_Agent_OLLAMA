@@ -3,12 +3,15 @@
 These tools are SAFE; they don't change the system in a way that
 requires confirmation. Opening a program you ask for is exactly what
 the human intended.
+
+On Linux, the agent resolves aliases and uses ``xdg-open`` or the
+executable on PATH.  On Windows, the full resolution chain (PATH,
+registry, UWP) is used.
 """
 
 from __future__ import annotations
 
 import os
-import shlex
 import shutil
 import subprocess
 import time
@@ -18,6 +21,11 @@ from typing import Any
 from ..core.errors import AssistantError, DependencyMissing
 from ..core.logging_setup import get_logger
 from ..utils.platform import (
+    Platform,
+    capabilities,
+    current_platform,
+    is_linux,
+    is_windows,
     list_installed_apps_windows,
     resolve_windows_executable,
     start_windows_process,
@@ -29,11 +37,59 @@ from .registry import ActionContext, ActionRegistry, risk, Risk
 logger = get_logger("actions.app_control")
 
 
+# ---------------------------------------------------------------------------
+# Linux alias table
+# ---------------------------------------------------------------------------
+
+_LINUX_ALIASES: dict[str, str] = {
+    "chrome": "google-chrome",
+    "google chrome": "google-chrome",
+    "chromium": "chromium-browser",
+    "firefox": "firefox",
+    "mozilla firefox": "firefox",
+    "edge": "microsoft-edge",
+    "microsoft edge": "microsoft-edge",
+    "telegram": "telegram-desktop",
+    "telegram desktop": "telegram-desktop",
+    "whatsapp": "whatsapp-nativefier",
+    "vscode": "code",
+    "vs code": "code",
+    "visual studio code": "code",
+    "code": "code",
+    "notepad": "gedit",
+    "notepad++": "notepadpp",
+    "calculator": "gnome-calculator",
+    "calc": "gnome-calculator",
+    "explorer": "nautilus",
+    "file explorer": "nautilus",
+    "files": "nautilus",
+    "task manager": "gnome-system-monitor",
+    "taskmanager": "gnome-system-monitor",
+    "terminal": "gnome-terminal",
+    "cmd": "gnome-terminal",
+    "command prompt": "gnome-terminal",
+    "powershell": "pwsh",
+    "paint": "gimp",
+    "word": "libreoffice --writer",
+    "excel": "libreoffice --calc",
+    "powerpoint": "libreoffice --impress",
+    "spotify": "spotify",
+    "discord": "discord",
+    "slack": "slack",
+    "vlc": "vlc",
+    "sublime text": "subl",
+    "sublime": "subl",
+    "pycharm": "pycharm-community",
+    "intellij": "idea",
+    "docker desktop": "docker",
+}
+
+
 def register_app_control(registry: ActionRegistry, context: ActionContext) -> None:
     registry.decorator(
         name="open_application",
         description=(
-            "Open a Windows application by its common name (e.g. 'chrome', 'telegram', "
+            "Open an application by its common name (e.g. 'chrome', 'telegram', "
             "'photoshop', 'explorer', 'notepad', 'calculator', 'task manager', 'cmd', "
             "'powershell', 'firefox', 'edge', 'vscode'). The agent resolves aliases "
             "and starts the program non-blocking; success is reported as soon as the "
@@ -54,8 +110,9 @@ def register_app_control(registry: ActionRegistry, context: ActionContext) -> No
         name="close_application",
         description=(
             "Close an application gracefully by its process name (e.g. 'chrome', "
-            "'Telegram', 'Photoshop'). Uses taskkill /T /IM on Windows. If force is "
-            "true, the process is killed. This is DESTRUCTIVE — will be confirmed."
+            "'Telegram', 'Photoshop'). Uses taskkill /T /IM on Windows, pkill on "
+            "Linux. If force is true, the process is killed. This is DESTRUCTIVE — "
+            "will be confirmed."
         ),
         parameters={
             "name": {"type": "string", "description": "Process or friendly name to close."},
@@ -79,7 +136,7 @@ def register_app_control(registry: ActionRegistry, context: ActionContext) -> No
     registry.decorator(
         name="list_applications",
         description=(
-            "Return a list of common applications installed on this Windows machine. "
+            "Return a list of common applications installed on this machine. "
             "Use before opening an app to verify its real name."
         ),
         parameters={
@@ -106,14 +163,11 @@ def register_app_control(registry: ActionRegistry, context: ActionContext) -> No
 
 
 def _friendly_to_real(name: str) -> str:
-    """Map a friendly app name to a known executable.
-
-    The map is intentionally small but covers the apps the user actually
-    mentioned in the brief: chrome, telegram desktop, photoshop, firefox,
-    edge, vscode, task manager, file explorer, etc.
-    """
+    """Map a friendly app name to a known executable."""
     cleaned = name.strip().lower()
-    aliases = {
+
+    # Windows aliases
+    win_aliases = {
         "chrome": "chrome",
         "google chrome": "chrome",
         "firefox": "firefox",
@@ -161,7 +215,12 @@ def _friendly_to_real(name: str) -> str:
         "android studio": "studio64",
         "docker desktop": "docker",
     }
-    return aliases.get(cleaned, cleaned)
+
+    linux_aliases = _LINUX_ALIASES
+
+    if is_windows():
+        return win_aliases.get(cleaned, cleaned)
+    return linux_aliases.get(cleaned, cleaned)
 
 
 @risk(Risk.SAFE)
@@ -178,6 +237,15 @@ def open_application(
     arguments = (arguments or "").strip()
     working_dir_path = Path(working_dir).expanduser() if working_dir else None
 
+    if is_windows():
+        return _open_windows(real, arguments, working_dir_path, name, wait, timeout)
+    return _open_linux(real, arguments, working_dir_path, name, wait, timeout)
+
+
+def _open_windows(
+    real: str, arguments: str, working_dir_path: Path | None,
+    name: str, wait: bool, timeout: int,
+) -> str:
     # Built-in Windows binaries that should always work
     builtin = {
         "calc", "notepad", "mspaint", "taskmgr", "cmd", "powershell", "wt", "explorer",
@@ -189,7 +257,6 @@ def open_application(
             raise AssistantError(f"could not start built-in {real!r}: {exc}") from exc
         return _format_started(real, proc, arguments)
 
-    # Try the resolution chain: PATH, common install dirs, registry, then UWP.
     exe_path = resolve_windows_executable(real)
     if exe_path is None:
         raise AssistantError(
@@ -203,7 +270,7 @@ def open_application(
     if wait:
         deadline = time.time() + max(1, timeout)
         title_hint = real.replace(".exe", "").lower()
-        from .window_control import _wait_for_window  # local import to avoid cycle
+        from .window_control import _wait_for_window
 
         window = _wait_for_window(title_hint, deadline)
         if window:
@@ -211,6 +278,35 @@ def open_application(
         else:
             response += " | window not detected within timeout (process is running)."
     return response
+
+
+def _open_linux(
+    real: str, arguments: str, working_dir_path: Path | None,
+    name: str, wait: bool, timeout: int,
+) -> str:
+    # Try to find the executable on PATH
+    exe = shutil.which(real)
+    if exe is None:
+        # Try xdg-open as a last resort for URLs / desktop files
+        raise AssistantError(
+            f"برنامه‌ای با نام {name!r} یافت نشد. "
+            "مطمئن شوید نصب شده و در PATH قرار دارد. "
+            f"نام بسته روی لینوکس احتمالاً «{real}» است."
+        )
+    try:
+        cmd = [exe]
+        if arguments:
+            import shlex
+            cmd.extend(shlex.split(arguments))
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(working_dir_path) if working_dir_path else None,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise AssistantError(f"could not start {real!r}: {exc}") from exc
+    return _format_started(real, proc, arguments)
 
 
 def _format_started(real: str, proc: subprocess.Popen | None, args: str) -> str:
@@ -224,9 +320,12 @@ def _format_started(real: str, proc: subprocess.Popen | None, args: str) -> str:
 @risk(Risk.DESTRUCTIVE)
 def close_application(*, name: str, force: bool = False, context: ActionContext) -> str:
     real = _friendly_to_real(name)
-    if os.name != "nt":
-        # POSIX fallback for unit tests
-        return _posix_kill(real, force)
+    if is_windows():
+        return _close_windows(real, force)
+    return _close_linux(real, name, force)
+
+
+def _close_windows(real: str, force: bool) -> str:
     flag = "/F" if force else ""
     cmd = ["taskkill", "/T", "/IM", f"{real}.exe"]
     if flag:
@@ -239,7 +338,6 @@ def close_application(*, name: str, force: bool = False, context: ActionContext)
         raise AssistantError(f"taskkill failed: {exc}") from exc
     if completed.returncode == 0:
         return f"closed {real} (exit 0): {completed.stdout.strip()}"
-    # 'process not found' is also a success for the user — return the info.
     if "not found" in (completed.stdout + completed.stderr).lower():
         return f"no running process named {real!r}; nothing to do."
     raise AssistantError(
@@ -248,20 +346,52 @@ def close_application(*, name: str, force: bool = False, context: ActionContext)
     )
 
 
-def _posix_kill(name: str, force: bool) -> str:
+def _close_linux(real: str, name: str, force: bool) -> str:
+    """Close an application on Linux using psutil or pkill."""
+    try:
+        import psutil
+        return _close_linux_psutil(real, name, force, psutil)
+    except ImportError:
+        pass
+
+    # Fallback to pkill
     if not shutil.which("pkill"):
         raise DependencyMissing(
-            "pkill is required to close applications on POSIX",
-            install_hint="apt-get install procps",
+            "برای بستن برنامه روی لینوکس، ابزار pkill یا بستهٔ psutil لازم است. "
+            "نصب کنید: sudo apt install procps  یا  pip install psutil",
+            install_hint="apt-get install procps  یا  pip install psutil",
         )
     flag = "-9" if force else ""
     try:
-        subprocess.run(
-            ["pkill", flag, name], capture_output=True, text=True, check=False, timeout=10
-        )
+        cmd = ["pkill"]
+        if flag:
+            cmd.append(flag)
+        cmd.append(real)
+        subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=10)
     except OSError as exc:
         raise AssistantError(f"pkill failed: {exc}") from exc
-    return f"pkill {name} dispatched (force={force})."
+    return f"pkill {real} dispatched (force={force})."
+
+
+def _close_linux_psutil(real: str, name: str, force: bool, psutil: Any) -> str:
+    """Close an application using psutil for process matching."""
+    import signal
+
+    found = False
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            proc_name = (proc.info.get("name") or "").lower()
+            cmdline = " ".join(proc.info.get("cmdline") or []).lower()
+            if real.lower() in proc_name or real.lower() in cmdline:
+                found = True
+                sig = signal.SIGKILL if force else signal.SIGTERM
+                proc.send_signal(sig)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    if not found:
+        return f"no running process named {name!r}; nothing to do."
+    verb = "killed" if force else "terminated"
+    return f"{verb} processes matching {real!r}."
 
 
 @risk(Risk.SAFE)
@@ -277,23 +407,55 @@ def focus_window(*, title: str, context: ActionContext) -> str:
 @risk(Risk.SAFE)
 def list_applications(*, filter: str = "", context: ActionContext) -> str:
     needle = (filter or "").strip().lower()
-    apps = list_installed_apps_windows()
-    if needle:
-        apps = [a for a in apps if needle in a["name"].lower() or needle in a["path"].lower()]
-    if not apps:
-        return f"no installed apps matched filter {needle!r}."
-    lines = [f"found {len(apps)} applications:"]
-    for app in apps[:200]:
-        lines.append(f"  • {app['name']:30s} {app['path']}")
-    if len(apps) > 200:
-        lines.append(f"  ... ({len(apps) - 200} more)")
+    if is_windows():
+        apps = list_installed_apps_windows()
+        if needle:
+            apps = [a for a in apps if needle in a["name"].lower() or needle in a["path"].lower()]
+        if not apps:
+            return f"no installed apps matched filter {needle!r}."
+        lines = [f"found {len(apps)} applications:"]
+        for app in apps[:200]:
+            lines.append(f"  • {app['name']:30s} {app['path']}")
+        if len(apps) > 200:
+            lines.append(f"  ... ({len(apps) - 200} more)")
+        return "\n".join(lines)
+
+    # Linux: list executables on PATH
+    return _list_linux_applications(needle)
+
+
+def _list_linux_applications(needle: str) -> str:
+    """List common desktop applications on Linux."""
+    common_apps = [
+        "firefox", "google-chrome", "chromium-browser", "code", "gedit",
+        "nautilus", "gnome-terminal", "gnome-calculator", "vlc", "spotify",
+        "discord", "slack", "telegram-desktop", "gimp", "libreoffice",
+        "subl", "pycharm-community", "idea", "steam", "obs-studio",
+    ]
+    found = []
+    for app in common_apps:
+        if shutil.which(app):
+            if not needle or needle in app.lower():
+                found.append(app)
+    if not found:
+        return "هیچ برنامهٔ شناخته‌شده‌ای یافت نشد." if needle else f"no apps matched filter {needle!r}."
+    lines = [f"found {len(found)} applications on PATH:"]
+    for app in found:
+        path = shutil.which(app) or app
+        lines.append(f"  • {app:30s} {path}")
     return "\n".join(lines)
 
 
 @risk(Risk.SAFE)
 def locate_application(*, name: str, context: ActionContext) -> str:
     real = _friendly_to_real(name)
-    path = resolve_windows_executable(real)
-    if path is None:
-        return f"no executable found for {name!r}."
-    return str(path)
+    if is_windows():
+        path = resolve_windows_executable(real)
+        if path is None:
+            return f"no executable found for {name!r}."
+        return str(path)
+    # Linux: check PATH
+    found = shutil.which(real)
+    if found:
+        return found
+    return f"no executable found for {name!r} on PATH."

@@ -43,14 +43,14 @@ from pydantic import BaseModel
 from ..bridge import BridgeClient
 from ..core.config import AssistantSettings
 from ..core.logging_setup import get_logger, setup_logging
+from ..utils.paths import web_static_dir, web_templates_dir
 
 
 logger = get_logger("web")
 
 
-HERE = Path(__file__).resolve().parent
-TEMPLATES = HERE / "templates"
-STATIC = HERE / "static"
+TEMPLATES = web_templates_dir()
+STATIC = web_static_dir()
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
@@ -383,15 +383,48 @@ class WebServer:
 
 
 def run_web(argv: list[str] | None = None) -> int:
+    import argparse
     import os
 
     from ..core.config import load_settings
+    from ..utils.platform import log_platform_summary
+
+    parser = argparse.ArgumentParser(
+        prog="persian-local-web",
+        description="Serve the web UI for the Local Assistant.",
+    )
+    parser.add_argument("--host", default=os.environ.get("LOCAL_AGENT_WEB_HOST", "127.0.0.1"),
+                        help="Bind address (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int,
+                        default=int(os.environ.get("LOCAL_AGENT_WEB_PORT", "7824")),
+                        help="Port (default: 7824)")
+    args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
     settings = load_settings()
     setup_logging(settings.data_dir)
+    log_platform_summary()
+
+    host = args.host
+    port = args.port
+
+    # Security: require a token when binding to a non-loopback address
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        token_path = settings.data_dir / "bridge.token"
+        if not token_path.is_file():
+            print(
+                "⚠️  هشدار امنیتی: شما در حال اتصال به آدرس غیرمحلی هستید "
+                f"({host}). یک توکن احراز هویت لازم است.\n"
+                "ابتدا یک بار دستیار را به صورت محلی اجرا کنید تا توکن تولید شود، "
+                "یا متغیر LOCAL_AGENT_BRIDGE_TOKEN را تنظیم کنید.\n"
+                f"مسیر توکن: {token_path}",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"⚠️  حالت سرور: رابط در آدرس {host}:{port} قابل دسترسی خواهد بود.")
+        print(f"   توکن احراز هویت: {token_path}")
+        print(f"   برای اتصال: http://{host}:{port}/?token=YOUR_TOKEN")
+
     client = BridgeClient.start_in_process(settings)
-    port = int(os.environ.get("LOCAL_AGENT_WEB_PORT", "7824"))
-    host = os.environ.get("LOCAL_AGENT_WEB_HOST", "127.0.0.1")
     server = WebServer(settings, client, host=host, port=port)
     server.start_in_thread()
     server.wait_until_ready()

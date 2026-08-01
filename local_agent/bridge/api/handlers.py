@@ -374,6 +374,12 @@ class BridgeHandlers:
                 ))
                 return
             if reply.content:
+                # Emit assistant_delta for streaming frontends
+                self.event_bus.publish(Event(
+                    type=EventType.ASSISTANT_DELTA.value,
+                    payload={"text": reply.content},
+                    run_id=run_id,
+                ))
                 self.runtime.append(ConversationMessage(role="assistant", content=reply.content))
                 self.event_bus.publish(Event(
                     type=EventType.ASSISTANT_FINAL.value,

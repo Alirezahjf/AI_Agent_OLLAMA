@@ -11,12 +11,12 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
-import time
 from pathlib import Path
 from typing import Any
 
 from ..core.errors import AssistantError
 from ..core.logging_setup import get_logger
+from ..utils.platform import is_linux, is_windows
 from .registry import ActionContext, ActionRegistry, risk, Risk
 
 
@@ -51,8 +51,8 @@ def register_system(registry: ActionRegistry, context: ActionContext) -> None:
     registry.decorator(
         name="open_path",
         description=(
-            "Open a file or directory with the system's default handler (Explorer "
-            "for directories, the default app for files). Safe."
+            "Open a file or directory with the system's default handler "
+            "(Explorer on Windows, xdg-open on Linux). Safe."
         ),
         parameters={"path": {"type": "string"}},
         required=("path",),
@@ -162,7 +162,7 @@ def open_path(*, path: str, context: ActionContext) -> str:
     if not target.exists():
         raise AssistantError(f"path does not exist: {target}")
     try:
-        if os.name == "nt":
+        if is_windows():
             os.startfile(str(target))  # type: ignore[attr-defined]
         elif platform.system() == "Darwin":
             subprocess.Popen(["open", str(target)], close_fds=True)
@@ -177,28 +177,60 @@ def open_path(*, path: str, context: ActionContext) -> str:
 def shutdown_computer(
     *, delay_seconds: int = 60, restart: bool = False, context: ActionContext
 ) -> str:
-    if os.name != "nt":
-        return "shutdown is implemented for Windows only in this version."
     delay = max(0, min(int(delay_seconds or 60), 3600))
-    flag = "/r" if restart else "/s"
-    try:
-        subprocess.run(
-            ["shutdown", flag, "/t", str(delay), "/c", "scheduled by local assistant"],
-            check=False,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AssistantError(f"shutdown failed: {exc}") from exc
+
+    if is_windows():
+        flag = "/r" if restart else "/s"
+        try:
+            subprocess.run(
+                ["shutdown", flag, "/t", str(delay), "/c", "scheduled by local assistant"],
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise AssistantError(f"shutdown failed: {exc}") from exc
+    else:
+        # Linux: use systemctl or shutdown command
+        cmd = None
+        if shutil.which("systemctl"):
+            action = "reboot" if restart else "poweroff"
+            cmd = ["systemctl", action]
+        elif shutil.which("shutdown"):
+            flag = "-r" if restart else "-h"
+            cmd = ["shutdown", flag, f"+{max(1, delay // 60)}"]
+        else:
+            raise AssistantError(
+                "دستور خاموش کردن روی این سیستم در دسترس نیست. "
+                "systemctl یا shutdown را نصب کنید."
+            )
+        try:
+            subprocess.run(cmd, check=False, timeout=10)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise AssistantError(f"shutdown failed: {exc}") from exc
+
     verb = "restart" if restart else "shutdown"
     return f"{verb} scheduled in {delay} seconds. Use cancel_shutdown to abort."
 
 
 @risk(Risk.SYSTEM)
 def cancel_shutdown(*, context: ActionContext) -> str:
-    if os.name != "nt":
-        return "shutdown cancel is implemented for Windows only in this version."
-    try:
-        subprocess.run(["shutdown", "/a"], check=False, timeout=10)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AssistantError(f"cancel failed: {exc}") from exc
+    if is_windows():
+        try:
+            subprocess.run(["shutdown", "/a"], check=False, timeout=10)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise AssistantError(f"cancel failed: {exc}") from exc
+    else:
+        # Linux
+        if shutil.which("shutdown"):
+            try:
+                subprocess.run(["shutdown", "-c"], check=False, timeout=10)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise AssistantError(f"cancel failed: {exc}") from exc
+        elif shutil.which("systemctl"):
+            try:
+                subprocess.run(["systemctl", "cancel"], check=False, timeout=10)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise AssistantError(f"cancel failed: {exc}") from exc
+        else:
+            return "دستور لغو خاموش کردن در دسترس نیست."
     return "shutdown cancelled (if one was pending)."

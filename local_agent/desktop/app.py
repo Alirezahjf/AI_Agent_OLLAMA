@@ -35,6 +35,7 @@ from typing import Any
 
 from ..core.config import AssistantSettings, load_settings
 from ..core.logging_setup import get_logger, setup_logging
+from ..utils.platform import is_headless_server, log_platform_summary
 from . import autostart
 from .hotkey import DEFAULT_HOTKEY, HotkeyError, HotkeyManager
 from .single_instance import AlreadyRunning, SingleInstance
@@ -586,8 +587,20 @@ def run(argv: list[str] | None = None) -> int:
 
     settings = load_settings()
     setup_logging(settings.data_dir)
+    log_platform_summary()
 
     config = DesktopConfig.from_env()
+
+    # Headless server detection
+    if is_headless_server():
+        print(
+            "⚠️  نمایشگر یافت نشد — حالت سرور فعال می‌شود.\n"
+            "رابط وب در مرورگر قابل دسترسی خواهد بود.",
+            file=sys.stderr,
+        )
+        # Fall back to web server mode
+        from ..web.app import run_web
+        return run_web(["--host", "0.0.0.0", "--port", str(config.port)])
     if args.port:
         config.port = args.port
     if args.hotkey:
@@ -613,11 +626,18 @@ def run(argv: list[str] | None = None) -> int:
     # --- browser fallback ------------------------------------------------
     if args.browser or not is_pywebview_available():
         if not args.browser:
-            print(
+            msg = (
                 "pywebview یافت نشد؛ رابط در مرورگر باز می‌شود.\n"
-                "برای پنجرهٔ بومی: pip install pywebview pystray",
-                file=sys.stderr,
+                "برای پنجرهٔ بومی: pip install pywebview pystray"
             )
+            if sys.platform.startswith("linux"):
+                msg += (
+                    "\n\nروی لینوکس، pywebview به GTK یا Qt نیاز دارد. "
+                    "نصب کنید:\n"
+                    "  sudo apt install python3-gi python3-gi-cairo gir1.2-webkit2-4.1\n"
+                    "  pip install pywebview[gtk]"
+                )
+            print(msg, file=sys.stderr)
         url = app.start_backend()
         if not args.no_tray:
             app.start_tray()

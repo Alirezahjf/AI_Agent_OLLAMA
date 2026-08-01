@@ -1,15 +1,22 @@
 """Clipboard helpers (get / set / clear).
 
-We don't bundle pyperclip by default; the implementation prefers
-Windows-native APIs (ctypes) so no extra dependency is required.
+Windows: uses native ctypes APIs (no extra dependency).
+macOS: uses pbcopy/pbpaste.
+Linux: uses xclip/xsel or pyperclip (which wraps them). Detects
+       missing tools and gives a clear Persian message instead of
+       raising a raw FileNotFoundError.
 """
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 from typing import Any
 
-from ..core.errors import AssistantError
+from ..core.errors import AssistantError, DependencyMissing
 from ..core.logging_setup import get_logger
+from ..utils.platform import is_linux, is_macos, is_windows
 from .registry import ActionContext, ActionRegistry, risk, Risk
 
 
@@ -57,6 +64,16 @@ def clipboard_write(*, text: str, context: ActionContext) -> str:
 
 
 def _read_clipboard() -> str:
+    if is_windows():
+        return _read_clipboard_windows()
+
+    if is_macos():
+        return _read_clipboard_macos()
+
+    return _read_clipboard_linux()
+
+
+def _read_clipboard_windows() -> str:
     try:
         import ctypes
         from ctypes import wintypes
@@ -80,20 +97,83 @@ def _read_clipboard() -> str:
         finally:
             user32.CloseClipboard()
     except (OSError, AttributeError):
-        # POSIX fallback for tests.
-        try:
-            from tkinter import Tk  # type: ignore
+        return ""
 
-            root = Tk()
-            root.withdraw()
-            content = root.clipboard_get()
-            root.destroy()
-            return str(content)
-        except Exception:  # noqa: BLE001
-            return ""
+
+def _read_clipboard_macos() -> str:
+    try:
+        completed = subprocess.run(
+            ["pbpaste"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return completed.stdout or ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _read_clipboard_linux() -> str:
+    # Try xclip
+    if shutil.which("xclip"):
+        try:
+            completed = subprocess.run(
+                ["xclip", "-selection", "clipboard", "-o"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            return completed.stdout or ""
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    # Try xsel
+    if shutil.which("xsel"):
+        try:
+            completed = subprocess.run(
+                ["xsel", "--clipboard", "--output"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            return completed.stdout or ""
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    # Try pyperclip
+    try:
+        import pyperclip
+        return pyperclip.paste() or ""
+    except Exception:
+        pass
+
+    # No clipboard tool available
+    display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    if not display:
+        return "کلیپ‌بورد در دسترس نیست (بدون نمایشگر)."
+    raise DependencyMissing(
+        "برای خواندن کلیپ‌بورد روی لینوکس، xclip یا xsel لازم است. "
+        "نصب کنید: sudo apt install xclip",
+        install_hint="sudo apt install xclip",
+    )
 
 
 def _write_clipboard(text: str) -> None:
+    if is_windows():
+        _write_clipboard_windows(text)
+        return
+
+    if is_macos():
+        _write_clipboard_macos(text)
+        return
+
+    _write_clipboard_linux(text)
+
+
+def _write_clipboard_windows(text: str) -> None:
     try:
         import ctypes
         from ctypes import wintypes
@@ -124,9 +204,9 @@ def _write_clipboard(text: str) -> None:
         finally:
             user32.CloseClipboard()
     except (OSError, AttributeError):
-        # POSIX fallback
+        # Fallback
         try:
-            from tkinter import Tk  # type: ignore
+            from tkinter import Tk
 
             root = Tk()
             root.withdraw()
@@ -134,5 +214,69 @@ def _write_clipboard(text: str) -> None:
             root.clipboard_append(text)
             root.update()
             root.destroy()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise AssistantError(f"clipboard write failed: {exc}") from exc
+
+
+def _write_clipboard_macos(text: str) -> None:
+    try:
+        subprocess.run(
+            ["pbcopy"],
+            input=text,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AssistantError(f"clipboard write failed: {exc}") from exc
+
+
+def _write_clipboard_linux(text: str) -> None:
+    # Try xclip
+    if shutil.which("xclip"):
+        try:
+            subprocess.run(
+                ["xclip", "-selection", "clipboard"],
+                input=text,
+                text=True,
+                timeout=5,
+                check=True,
+            )
+            return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    # Try xsel
+    if shutil.which("xsel"):
+        try:
+            subprocess.run(
+                ["xsel", "--clipboard", "--input"],
+                input=text,
+                text=True,
+                timeout=5,
+                check=True,
+            )
+            return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    # Try pyperclip
+    try:
+        import pyperclip
+        pyperclip.copy(text)
+        return
+    except Exception:
+        pass
+
+    # No clipboard tool available
+    display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    if not display:
+        raise AssistantError(
+            "کلیپ‌بورد در دسترس نیست (بدون نمایشگر). "
+            "در محیط سرور، امکان نوشتن در کلیپ‌بورد وجود ندارد."
+        )
+    raise DependencyMissing(
+        "برای نوشتن در کلیپ‌بورد روی لینوکس، xclip یا xsel لازم است. "
+        "نصب کنید: sudo apt install xclip",
+        install_hint="sudo apt install xclip",
+    )
