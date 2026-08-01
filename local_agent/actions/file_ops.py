@@ -1,4 +1,4 @@
-"""File operations: safe read / write / move / copy / delete.
+"""File operations: safe read / write / move / copy / delete / search.
 
 Paths are sandboxed to the assistant's work directory unless the user
 explicitly passes an absolute path that is allowed by the policy. The
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,32 @@ def register_file_ops(registry: ActionRegistry, context: ActionContext) -> None:
         parameters={"path": {"type": "string"}, "content": {"type": "string"}},
         required=("path", "content"),
     )(write_file)
+
+    registry.decorator(
+        name="append_file",
+        description=(
+            "Append text to a file. Creates the file if it does not exist. "
+            "DESTRUCTIVE — modifies existing files."
+        ),
+        parameters={
+            "path": {"type": "string"},
+            "content": {"type": "string"},
+        },
+        required=("path", "content"),
+    )(append_file)
+
+    registry.decorator(
+        name="copy_path",
+        description=(
+            "Copy a file or directory. If the source is a directory, copies "
+            "recursively. DESTRUCTIVE."
+        ),
+        parameters={
+            "source": {"type": "string"},
+            "destination": {"type": "string"},
+        },
+        required=("source", "destination"),
+    )(copy_path)
 
     registry.decorator(
         name="list_directory",
@@ -93,6 +120,80 @@ def register_file_ops(registry: ActionRegistry, context: ActionContext) -> None:
         required=("query",),
     )(search_files)
 
+    registry.decorator(
+        name="zip_directory",
+        description=(
+            "Compress a directory into a ZIP archive. Returns the archive path."
+        ),
+        parameters={
+            "source": {"type": "string", "description": "Directory to compress."},
+            "destination": {"type": "string", "description": "Output ZIP path."},
+        },
+        required=("source",),
+    )(zip_directory)
+
+    registry.decorator(
+        name="unzip_file",
+        description=(
+            "Extract a ZIP archive to a directory. Returns the extraction directory."
+        ),
+        parameters={
+            "source": {"type": "string", "description": "ZIP file to extract."},
+            "destination": {"type": "string", "description": "Output directory."},
+        },
+        required=("source",),
+    )(unzip_file)
+
+    registry.decorator(
+        name="download_file",
+        description=(
+            "Download a file from a URL and save it to disk. Returns the saved path. "
+            "SAFE — only writes to the workspace."
+        ),
+        parameters={
+            "url": {"type": "string", "description": "URL to download."},
+            "path": {"type": "string", "description": "Local filename (relative to workspace)."},
+        },
+        required=("url",),
+    )(download_file)
+
+    registry.decorator(
+        name="get_env",
+        description=(
+            "Read the value of an environment variable. Returns an empty string "
+            "if the variable is not set."
+        ),
+        parameters={
+            "name": {"type": "string", "description": "Variable name."},
+        },
+        required=("name",),
+    )(get_env)
+
+    registry.decorator(
+        name="set_env",
+        description=(
+            "Set an environment variable for the current session. "
+            "DESTRUCTIVE — modifies the process environment."
+        ),
+        parameters={
+            "name": {"type": "string", "description": "Variable name."},
+            "value": {"type": "string", "description": "Variable value."},
+        },
+        required=("name", "value"),
+    )(set_env)
+
+    registry.decorator(
+        name="wait",
+        description=(
+            "Wait for a specified number of seconds. Useful for GUI sequencing. "
+            "SAFE."
+        ),
+        parameters={
+            "seconds": {"type": "number", "description": "Duration in seconds."},
+        },
+        required=("seconds",),
+    )(wait_action)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -100,12 +201,7 @@ def register_file_ops(registry: ActionRegistry, context: ActionContext) -> None:
 
 
 def _resolve_path(raw: str, work_dir: Path) -> Path:
-    """Resolve a user-supplied path to an absolute Path.
-
-    Absolute paths are returned as-is. Relative paths are resolved
-    against the work directory. ``..`` is allowed; the assistant is
-    trusted to stay within sensible bounds.
-    """
+    """Resolve a user-supplied path to an absolute Path."""
     if not isinstance(raw, str) or not raw.strip():
         raise AssistantError("path must be a non-empty string")
     candidate = Path(raw).expanduser()
@@ -132,10 +228,18 @@ def read_file(
     target = _resolve_path(path, context.work_dir)
     if not target.is_file():
         raise AssistantError(f"not a file: {target}")
+    # Check for binary files
+    try:
+        size = target.stat().st_size
+    except OSError as exc:
+        raise AssistantError(f"could not stat {target}: {exc}") from exc
+    if size > 10_000_000:
+        return f"فایل بزرگ است ({size / 1_000_000:.1f} مگابایت). از پارامتر start_line و max_lines برای خواندن بخشی استفاده کنید."
     try:
         text = target.read_text(encoding="utf-8")
-    except UnicodeDecodeError as exc:
-        raise AssistantError(f"file is not UTF-8: {exc}") from exc
+    except UnicodeDecodeError:
+        # Binary file
+        return f"فایل باینری است و نمی‌توان آن را به صورت متنی خواند. اندازه: {size} بایت."
     except OSError as exc:
         raise AssistantError(f"could not read {target}: {exc}") from exc
     lines = text.splitlines()
@@ -164,6 +268,47 @@ def write_file(
     except OSError as exc:
         raise AssistantError(f"could not write {target}: {exc}") from exc
     return f"wrote {len(content)} characters to {target}"
+
+
+@risk(Risk.DESTRUCTIVE)
+def append_file(
+    *,
+    path: str,
+    content: str,
+    context: ActionContext,
+) -> str:
+    target = _resolve_path(path, context.work_dir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with target.open("a", encoding="utf-8") as f:
+            f.write(content)
+    except OSError as exc:
+        raise AssistantError(f"could not append to {target}: {exc}") from exc
+    return f"appended {len(content)} characters to {target}"
+
+
+@risk(Risk.DESTRUCTIVE)
+def copy_path(
+    *,
+    source: str,
+    destination: str,
+    context: ActionContext,
+) -> str:
+    src = _resolve_path(source, context.work_dir)
+    dst = _resolve_path(destination, context.work_dir)
+    if not src.exists():
+        raise AssistantError(f"source does not exist: {src}")
+    if dst.exists():
+        raise AssistantError(f"destination already exists: {dst}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if src.is_dir():
+            shutil.copytree(str(src), str(dst))
+        else:
+            shutil.copy2(str(src), str(dst))
+    except OSError as exc:
+        raise AssistantError(f"copy failed: {exc}") from exc
+    return f"copied {src} -> {dst}"
 
 
 @risk(Risk.SAFE)
@@ -245,7 +390,6 @@ def search_files(
     limit = max(1, min(int(max_results or 50), 500))
     matches: list[str] = []
     for root, dirs, files in os.walk(target):
-        # Skip volatile / huge directories
         dirs[:] = [d for d in dirs if d not in {".git", "node_modules", "__pycache__", ".venv"}]
         for filename in files:
             full = Path(root) / filename
@@ -270,3 +414,116 @@ def search_files(
     if not matches:
         return f"no matches for {query!r} under {target}"
     return "\n".join(matches)
+
+
+@risk(Risk.SAFE)
+def zip_directory(
+    *,
+    source: str,
+    destination: str = "",
+    context: ActionContext,
+) -> str:
+    src = _resolve_path(source, context.work_dir)
+    if not src.is_dir():
+        raise AssistantError(f"not a directory: {src}")
+    if destination:
+        dst = _resolve_path(destination, context.work_dir)
+    else:
+        dst = src.with_suffix(".zip")
+    if dst.suffix.lower() != ".zip":
+        dst = dst.with_suffix(dst.suffix + ".zip")
+    try:
+        with zipfile.ZipFile(str(dst), "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(src):
+                for filename in files:
+                    full = Path(root) / filename
+                    arcname = full.relative_to(src)
+                    zf.write(str(full), str(arcname))
+    except OSError as exc:
+        raise AssistantError(f"zip failed: {exc}") from exc
+    size_mb = dst.stat().st_size / (1024 * 1024)
+    return f"created {dst} ({size_mb:.1f} MB)"
+
+
+@risk(Risk.SAFE)
+def unzip_file(
+    *,
+    source: str,
+    destination: str = "",
+    context: ActionContext,
+) -> str:
+    src = _resolve_path(source, context.work_dir)
+    if not src.is_file():
+        raise AssistantError(f"not a file: {src}")
+    if destination:
+        dst = _resolve_path(destination, context.work_dir)
+    else:
+        dst = src.with_suffix("")
+    dst.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(str(src), "r") as zf:
+            zf.extractall(str(dst))
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise AssistantError(f"unzip failed: {exc}") from exc
+    return f"extracted to {dst}"
+
+
+@risk(Risk.SAFE)
+def download_file(
+    *,
+    url: str,
+    path: str = "",
+    context: ActionContext,
+) -> str:
+    import requests
+
+    if not url or not isinstance(url, str):
+        raise AssistantError("url must be a non-empty string")
+    if not url.startswith(("http://", "https://")):
+        raise AssistantError("url must start with http:// or https://")
+    if path:
+        target = _resolve_path(path, context.work_dir)
+    else:
+        # Derive filename from URL
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        name = Path(parsed.path).name or "download"
+        target = context.work_dir / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        response = requests.get(url, stream=True, timeout=60)
+        response.raise_for_status()
+        with target.open("wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+    except requests.RequestException as exc:
+        raise AssistantError(f"download failed: {exc}") from exc
+    except OSError as exc:
+        raise AssistantError(f"could not save to {target}: {exc}") from exc
+    size_kb = target.stat().st_size / 1024
+    return f"downloaded {url} -> {target} ({size_kb:.1f} KB)"
+
+
+@risk(Risk.SAFE)
+def get_env(*, name: str, context: ActionContext) -> str:
+    if not isinstance(name, str) or not name.strip():
+        raise AssistantError("name must be a non-empty string")
+    return os.environ.get(name.strip(), "")
+
+
+@risk(Risk.DESTRUCTIVE)
+def set_env(*, name: str, value: str, context: ActionContext) -> str:
+    if not isinstance(name, str) or not name.strip():
+        raise AssistantError("name must be a non-empty string")
+    key = name.strip()
+    os.environ[key] = str(value)
+    return f"set {key}={value!r}"
+
+
+@risk(Risk.SAFE)
+def wait_action(*, seconds: float, context: ActionContext) -> str:
+    import time
+
+    duration = max(0.1, min(float(seconds), 60))
+    time.sleep(duration)
+    return f"waited {duration:.1f} seconds"
