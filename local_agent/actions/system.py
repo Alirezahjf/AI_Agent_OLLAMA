@@ -16,6 +16,7 @@ from typing import Any
 
 from ..core.errors import AssistantError
 from ..core.logging_setup import get_logger
+from ..utils.encoding import TEXT_IO, decode_output
 from ..utils.platform import is_linux, is_windows
 from .registry import ActionContext, ActionRegistry, risk, Risk
 
@@ -111,13 +112,14 @@ def run_shell(
 
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
 
     try:
         completed = subprocess.run(
             argv,
             cwd=str(cwd) if cwd else None,
             env=env,
-            text=True,
+            **TEXT_IO,
             capture_output=True,
             timeout=timeout,
             check=False,
@@ -129,7 +131,9 @@ def run_shell(
     except OSError as exc:
         raise AssistantError(f"shell error: {exc}") from exc
 
-    output = (completed.stdout or "") + (completed.stderr or "")
+    stdout = decode_output(completed.stdout)
+    stderr = decode_output(completed.stderr)
+    output = stdout + stderr
     snippet = output[: context.runtime.settings.llm.max_context_chars]
     return (
         f"$ {command}\n\n"

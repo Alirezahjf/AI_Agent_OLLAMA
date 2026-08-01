@@ -16,6 +16,7 @@ from typing import Any
 
 from ..core.errors import AssistantError, DependencyMissing
 from ..core.logging_setup import get_logger
+from ..utils.encoding import TEXT_IO, decode_output
 from ..utils.platform import (
     iter_windows_windows,
     is_linux,
@@ -101,7 +102,7 @@ def list_windows(*, filter: str = "", context: ActionContext) -> str:
         completed = subprocess.run(
             ["wmctrl", "-l"],
             capture_output=True,
-            text=True,
+            **TEXT_IO,
             timeout=10,
             check=False,
         )
@@ -109,7 +110,8 @@ def list_windows(*, filter: str = "", context: ActionContext) -> str:
         raise AssistantError(f"wmctrl failed: {exc}") from exc
     if completed.returncode != 0:
         return "no windows found (wmctrl returned an error)."
-    lines = completed.stdout.strip().splitlines()
+    stdout = decode_output(completed.stdout)
+    lines = stdout.strip().splitlines()
     titles = []
     for line in lines:
         # wmctrl output: <id> <desktop> <hostname> <title>
@@ -154,7 +156,7 @@ def move_window(
     gravity = 0
     args = ["wmctrl", "-r", title, "-e", f"{gravity},{x},{y},{width},{height}"]
     try:
-        subprocess.run(args, capture_output=True, text=True, timeout=5, check=False)
+        subprocess.run(args, capture_output=True, **TEXT_IO, timeout=5, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise AssistantError(f"wmctrl move failed: {exc}") from exc
     return f"moved {title!r} to ({x},{y},{width},{height})"
@@ -181,7 +183,7 @@ def minimize_window_action(*, title: str, context: ActionContext) -> str:
         completed = subprocess.run(
             ["xdotool", "search", "--name", title],
             capture_output=True,
-            text=True,
+            **TEXT_IO,
             timeout=5,
             check=False,
         )
@@ -214,7 +216,7 @@ def maximize_window_action(*, title: str, context: ActionContext) -> str:
         subprocess.run(
             ["wmctrl", "-r", title, "-b", "add,maximized_vert,maximized_horz"],
             capture_output=True,
-            text=True,
+            **TEXT_IO,
             timeout=5,
             check=False,
         )
@@ -251,7 +253,7 @@ def _focus_by_title(title: str) -> str | None:
             subprocess.run(
                 ["wmctrl", "-a", title],
                 capture_output=True,
-                text=True,
+                **TEXT_IO,
                 timeout=5,
                 check=False,
             )
@@ -259,7 +261,7 @@ def _focus_by_title(title: str) -> str | None:
             completed = subprocess.run(
                 ["wmctrl", "-l"],
                 capture_output=True,
-                text=True,
+                **TEXT_IO,
                 timeout=5,
                 check=False,
             )
@@ -287,7 +289,7 @@ def _wait_for_window(needle: str, deadline: float) -> str | None:
                     completed = subprocess.run(
                         ["wmctrl", "-l"],
                         capture_output=True,
-                        text=True,
+                        **TEXT_IO,
                         timeout=5,
                         check=False,
                     )

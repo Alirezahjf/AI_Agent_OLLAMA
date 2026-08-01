@@ -16,6 +16,7 @@ from typing import Any
 
 from ..core.errors import AssistantError, DependencyMissing
 from ..core.logging_setup import get_logger
+from ..utils.encoding import TEXT_IO, decode_output
 from ..utils.platform import is_linux, is_macos, is_windows
 from .registry import ActionContext, ActionRegistry, risk, Risk
 
@@ -105,11 +106,11 @@ def _read_clipboard_macos() -> str:
         completed = subprocess.run(
             ["pbpaste"],
             capture_output=True,
-            text=True,
+            **TEXT_IO,
             timeout=5,
             check=False,
         )
-        return completed.stdout or ""
+        return decode_output(completed.stdout)
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
@@ -121,11 +122,11 @@ def _read_clipboard_linux() -> str:
             completed = subprocess.run(
                 ["xclip", "-selection", "clipboard", "-o"],
                 capture_output=True,
-                text=True,
+                **TEXT_IO,
                 timeout=5,
                 check=False,
             )
-            return completed.stdout or ""
+            return decode_output(completed.stdout)
         except (OSError, subprocess.TimeoutExpired):
             pass
 
@@ -135,11 +136,11 @@ def _read_clipboard_linux() -> str:
             completed = subprocess.run(
                 ["xsel", "--clipboard", "--output"],
                 capture_output=True,
-                text=True,
+                **TEXT_IO,
                 timeout=5,
                 check=False,
             )
-            return completed.stdout or ""
+            return decode_output(completed.stdout)
         except (OSError, subprocess.TimeoutExpired):
             pass
 
@@ -222,8 +223,8 @@ def _write_clipboard_macos(text: str) -> None:
     try:
         subprocess.run(
             ["pbcopy"],
-            input=text,
-            text=True,
+            input=text.encode("utf-8"),
+            **TEXT_IO,
             timeout=5,
             check=True,
         )
@@ -237,8 +238,8 @@ def _write_clipboard_linux(text: str) -> None:
         try:
             subprocess.run(
                 ["xclip", "-selection", "clipboard"],
-                input=text,
-                text=True,
+                input=text.encode("utf-8"),
+                **TEXT_IO,
                 timeout=5,
                 check=True,
             )
@@ -251,8 +252,8 @@ def _write_clipboard_linux(text: str) -> None:
         try:
             subprocess.run(
                 ["xsel", "--clipboard", "--input"],
-                input=text,
-                text=True,
+                input=text.encode("utf-8"),
+                **TEXT_IO,
                 timeout=5,
                 check=True,
             )

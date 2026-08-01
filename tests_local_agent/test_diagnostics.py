@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from local_agent import diagnostics as dx
@@ -222,3 +223,97 @@ def test_dependency_check_groups_optional_extras(monkeypatch) -> None:  # noqa: 
     # The hint must be a runnable command naming every affected extra.
     assert result.hint.startswith("نصب کنید: pip install -e")
     assert "app" in result.hint
+
+
+# ---------------------------------------------------------------------------
+
+
+def test_check_interpreter_inside_venv(monkeypatch):
+    monkeypatch.setattr(dx.sys, "prefix", "/some/venv")
+    monkeypatch.setattr(dx.sys, "base_prefix", "/usr")
+    result = dx.check_interpreter()
+    assert result.status == dx.OK
+    assert result.data.get("venv") is True
+
+
+def test_check_interpreter_outside_venv_with_dotvenv(tmp_path, monkeypatch):
+    (tmp_path / ".venv").mkdir()
+    # make __file__ point inside the project so Path calculation works
+    monkeypatch.setattr(dx, "__file__", str(tmp_path / "local_agent" / "diagnostics.py"))
+    monkeypatch.setattr(dx.sys, "prefix", "/usr")
+    monkeypatch.setattr(dx.sys, "base_prefix", "/usr")
+    result = dx.check_interpreter()
+    assert result.status == dx.FAIL
+    assert "فعال نیست" in result.detail
+
+
+def test_check_interpreter_no_venv(monkeypatch):
+    monkeypatch.setattr(dx.sys, "prefix", "/usr")
+    monkeypatch.setattr(dx.sys, "base_prefix", "/usr")
+    result = dx.check_interpreter()
+    assert result.status == dx.WARN
+
+
+def test_check_dependencies_uses_sys_executable(monkeypatch):
+    import importlib.util
+    real = importlib.util.find_spec
+
+    def fake(name, *a, **k):
+        if name in {"requests"}:
+            return None
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake)
+    result = dx.check_dependencies()
+    assert result.status == dx.FAIL
+    assert sys.executable in result.hint or "python" in result.hint.lower()
+
+
+def test_check_port_our_server(monkeypatch):
+    def fake_is_our(port, timeout=1.5):
+        return True
+
+    monkeypatch.setattr(dx, "_is_our_web_server", fake_is_our)
+    # simulate bind failure
+    import socket as real_socket
+    class FakeSocket:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def bind(self, addr):
+            raise OSError("address in use")
+
+    monkeypatch.setattr(real_socket, "socket", lambda *a, **k: FakeSocket())
+    result = dx.check_port(_settings(tmp_path=Path("/tmp")), 7824)
+    assert result.status == dx.OK
+    assert result.data.get("ours") is True
+
+
+def test_check_port_other_program(monkeypatch):
+    def fake_is_our(port, timeout=1.5):
+        return False
+
+    monkeypatch.setattr(dx, "_is_our_web_server", fake_is_our)
+    import socket as real_socket
+    class FakeSocket:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def bind(self, addr):
+            raise OSError("address in use")
+
+    monkeypatch.setattr(real_socket, "socket", lambda *a, **k: FakeSocket())
+    result = dx.check_port(_settings(tmp_path=Path("/tmp")), 7824)
+    assert result.status == dx.WARN
+    assert result.data.get("ours") is False
+
+
+def test_check_encoding_utf8(monkeypatch):
+    monkeypatch.setattr(sys.stdout, "encoding", "utf-8")
+    result = dx.check_encoding()
+    assert result.status == dx.OK
+
+
+def test_check_encoding_cp720_warns(monkeypatch):
+    monkeypatch.setattr(sys.stdout, "encoding", "cp720")
+    result = dx.check_encoding()
+    assert result.status == dx.WARN
+    assert "OutputEncoding" in result.hint or "PowerShell" in result.hint
