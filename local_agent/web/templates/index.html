@@ -129,6 +129,15 @@
   <main class="chat" @scroll.passive="onScroll($event)" x-ref="chatScroll">
     <div class="chat__inner">
 
+      <!-- Provider warnings (Ollama down, missing API key, ...) -->
+      <template x-for="w in warnings" :key="w">
+        <div class="notice" role="status">
+          <span aria-hidden="true">⚠️</span>
+          <p x-text="w"></p>
+          <button class="btn btn--ghost btn--sm" @click="openSettings()">باز کردن تنظیمات</button>
+        </div>
+      </template>
+
       <!-- Empty state -->
       <template x-if="messages.length === 0 && !busy">
         <section class="empty">
@@ -372,6 +381,7 @@
       <div class="panel__row">
         <button class="btn btn--ghost btn--sm" @click="runQuickAction('screen_capture', { filename: 'ui-shot.png' })">📸 اسکرین‌شات</button>
         <button class="btn btn--ghost btn--sm" @click="runQuickAction('system_info', {})">🖥️ اطلاعات سیستم</button>
+        <button class="btn btn--ghost btn--sm" @click="openDoctor()">🩺 بررسی سلامت</button>
       </div>
     </section>
 
@@ -407,6 +417,41 @@
     </section>
   </aside>
 
+  <!-- ================= Health check modal ================= -->
+  <div class="modal" x-show="doctorOpen" x-transition.opacity x-cloak @click.self="doctorOpen = false">
+    <div class="modal__card" role="dialog" aria-modal="true" aria-label="بررسی سلامت">
+      <header class="modal__head">
+        <h2>🩺 بررسی سلامت</h2>
+        <button class="icon-btn" @click="doctorOpen = false" aria-label="بستن">
+          <svg viewBox="0 0 24 24" class="icon"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </header>
+      <div class="modal__body">
+        <div class="doctor__summary" x-show="doctor.summary">
+          <span class="doctor__verdict" :class="'doctor__verdict--' + doctor.status" x-text="doctorVerdict"></span>
+          <span x-text="doctor.summary"></span>
+        </div>
+        <p x-show="doctorLoading" x-cloak>در حال بررسی…</p>
+        <ul class="doctor__list">
+          <template x-for="r in (doctor.results || [])" :key="r.name">
+            <li class="doctor__item" :class="'doctor__item--' + r.status">
+              <div class="doctor__row">
+                <span class="doctor__icon" x-text="r.status === 'ok' ? '✅' : (r.status === 'warn' ? '⚠️' : '❌')"></span>
+                <strong x-text="r.title"></strong>
+                <span class="doctor__detail" dir="auto" x-text="r.detail"></span>
+              </div>
+              <p class="doctor__hint" x-show="r.hint" dir="auto" x-text="r.hint"></p>
+            </li>
+          </template>
+        </ul>
+      </div>
+      <footer class="modal__foot">
+        <button class="btn btn--ghost" @click="copyDoctor()">کپی گزارش</button>
+        <button class="btn btn--primary" @click="runDoctor()" :disabled="doctorLoading">بررسی دوباره</button>
+      </footer>
+    </div>
+  </div>
+
   <!-- ================= Settings modal ================= -->
   <div class="modal" x-show="settingsOpen" x-transition.opacity x-cloak @click.self="settingsOpen = false">
     <div class="modal__card" role="dialog" aria-modal="true" aria-label="تنظیمات">
@@ -417,6 +462,10 @@
         </button>
       </header>
       <div class="modal__body">
+        <div class="field">
+          <button class="btn btn--ghost btn--sm" @click="useAvalai()">اتصال سریع به AvalAI</button>
+          <p class="field__hint">ارائه‌دهنده را روی «سازگار با OpenAI» و آدرس را روی https://api.avalai.ir/v1 تنظیم می‌کند؛ فقط کلید API را وارد کنید.</p>
+        </div>
         <div class="field">
           <label for="set-provider">ارائه‌دهندهٔ مدل</label>
           <select id="set-provider" x-model="form.provider">

@@ -28,6 +28,7 @@ class Screenshot:
 
     image: Image.Image
     taken_at: float
+    backend: str = "unknown"  # mss | imagegrab | placeholder
 
     @property
     def width(self) -> int:
@@ -60,7 +61,7 @@ def take_screenshot(monitor: int = 0) -> Screenshot:
                 monitor = 0
             raw = grabber.grab(grabber.monitors[monitor])
             image = Image.frombytes("RGB", raw.size, raw.rgb)
-        return Screenshot(image=image, taken_at=time.time())
+        return Screenshot(image=image, taken_at=time.time(), backend="mss")
     except Exception:  # noqa: BLE001
         pass
 
@@ -68,8 +69,8 @@ def take_screenshot(monitor: int = 0) -> Screenshot:
         from PIL import ImageGrab
 
         image = ImageGrab.grab()
-        return Screenshot(image=image, taken_at=time.time())
+        return Screenshot(image=image, taken_at=time.time(), backend="imagegrab")
 
     # POSIX fallback (headless / tests): build a small grey image.
     image = Image.new("RGB", (1280, 720), (24, 24, 24))
-    return Screenshot(image=image, taken_at=time.time())
+    return Screenshot(image=image, taken_at=time.time(), backend="placeholder")

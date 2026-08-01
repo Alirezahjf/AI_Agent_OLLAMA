@@ -23,7 +23,7 @@ import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import requests
 
@@ -47,6 +47,7 @@ _TRANSIENT_STATUS = {408, 425, 429, 500, 502, 503, 504}
 class ToolCall:
     name: str
     arguments: dict[str, Any]
+    id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +126,25 @@ class LLMClient(ABC):
         if reply.content:
             yield ("assistant_delta", reply.content)
         yield ("done", "")
+
+    def complete_streaming(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[ToolDefinition],
+        on_delta: Callable[[str], None] | None = None,
+    ) -> ModelReply:
+        """Return a full :class:`ModelReply` while emitting text deltas.
+
+        This is what the agent loop wants: the incremental text for a
+        live-typing UI *and* the structured ``tool_calls`` needed to keep
+        the loop going.  The default implementation simply defers to
+        :meth:`complete`; providers that support Server-Sent Events
+        override it for real token-by-token output.
+        """
+        reply = self.complete(messages, tools)
+        if on_delta and reply.content:
+            on_delta(reply.content)
+        return reply
 
     @abstractmethod
     def list_models(self) -> list[str]:
@@ -223,6 +243,59 @@ class OllamaClient(LLMClient):
         except (requests.RequestException, ValueError) as exc:
             logger.warning("Ollama /api/tags failed: %s", exc)
             return []
+
+    def complete_streaming(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[ToolDefinition],
+        on_delta: Callable[[str], None] | None = None,
+    ) -> ModelReply:
+        """Stream Ollama's NDJSON response and rebuild the final reply."""
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+            "options": {"temperature": self._temperature, "num_ctx": 32768},
+        }
+        if tools:
+            payload["tools"] = [tool.to_openai() for tool in tools]
+
+        try:
+            response = requests.post(
+                f"{self._base}/api/chat", json=payload, timeout=self._timeout, stream=True
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            logger.warning("Ollama streaming unavailable (%s); falling back", exc)
+            return self.complete(messages, tools)
+
+        text_parts: list[str] = []
+        calls: list[ToolCall] = []
+        try:
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                message = data.get("message") or {}
+                piece = _delta_to_text(message.get("content"))
+                if piece:
+                    text_parts.append(piece)
+                    if on_delta:
+                        on_delta(piece)
+                if message.get("tool_calls"):
+                    calls.extend(_extract_tool_calls(message["tool_calls"]))
+                if data.get("done"):
+                    break
+        except requests.RequestException as exc:
+            logger.warning("Ollama stream interrupted (%s); falling back", exc)
+            return self.complete(messages, tools)
+
+        if not text_parts and not calls:
+            return self.complete(messages, tools)
+        return ModelReply(content="".join(text_parts).strip(), tool_calls=tuple(calls))
 
     def stream_complete(
         self,
@@ -414,6 +487,103 @@ class OpenAICompatibleClient(LLMClient):
             logger.warning("provider /models failed: %s", exc)
             return []
 
+    def complete_streaming(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[ToolDefinition],
+        on_delta: Callable[[str], None] | None = None,
+    ) -> ModelReply:
+        """Stream tokens over SSE and rebuild the final reply.
+
+        Tool calls arrive in fragments: the first chunk carries the ``id``
+        and function name, later chunks append to ``arguments`` one string
+        piece at a time.  We accumulate them by index and only parse the
+        JSON once the stream finishes, falling back to the blocking call
+        if anything about the stream looks wrong.
+        """
+        body: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": self._temperature,
+            "stream": True,
+        }
+        if tools:
+            body["tools"] = [tool.to_openai() for tool in tools]
+            body["tool_choice"] = "auto"
+
+        try:
+            response = requests.post(
+                f"{self._base}/chat/completions",
+                headers=self._headers,
+                json=body,
+                timeout=self._timeout,
+                stream=True,
+            )
+        except requests.RequestException as exc:
+            logger.warning("streaming unavailable (%s); falling back", exc)
+            return self.complete(messages, tools)
+
+        if response.status_code >= 400:
+            logger.warning("streaming rejected with HTTP %s; falling back", response.status_code)
+            return self.complete(messages, tools)
+
+        text_parts: list[str] = []
+        partial: dict[int, dict[str, Any]] = {}
+        try:
+            for line in response.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data: "):
+                    continue
+                chunk = line[6:].strip()
+                if chunk == "[DONE]":
+                    break
+                try:
+                    data = json.loads(chunk)
+                except json.JSONDecodeError:
+                    continue
+                choices = data.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                piece = _delta_to_text(delta.get("content"))
+                if piece:
+                    text_parts.append(piece)
+                    if on_delta:
+                        on_delta(piece)
+                for raw in delta.get("tool_calls") or []:
+                    if not isinstance(raw, dict):
+                        continue
+                    index = int(raw.get("index", 0))
+                    slot = partial.setdefault(index, {"id": None, "name": "", "arguments": ""})
+                    if raw.get("id"):
+                        slot["id"] = str(raw["id"])
+                    function = raw.get("function") or {}
+                    if function.get("name"):
+                        slot["name"] = str(function["name"])
+                    if function.get("arguments"):
+                        slot["arguments"] += str(function["arguments"])
+        except requests.RequestException as exc:
+            logger.warning("stream interrupted (%s); falling back", exc)
+            return self.complete(messages, tools)
+
+        calls: list[ToolCall] = []
+        for index in sorted(partial):
+            slot = partial[index]
+            if not slot["name"]:
+                continue
+            try:
+                arguments = json.loads(slot["arguments"] or "{}")
+            except json.JSONDecodeError:
+                logger.warning("could not parse streamed arguments for %s", slot["name"])
+                continue
+            if isinstance(arguments, dict):
+                calls.append(ToolCall(name=slot["name"], arguments=arguments, id=slot["id"]))
+
+        if not text_parts and not calls:
+            # An empty stream usually means the provider silently refused
+            # to stream; the blocking endpoint still works.
+            return self.complete(messages, tools)
+        return ModelReply(content="".join(text_parts).strip(), tool_calls=tuple(calls))
+
     def stream_complete(
         self,
         messages: list[dict[str, Any]],
@@ -526,6 +696,27 @@ def _clean_base_url(raw: str) -> str:
     return text.rstrip("/")
 
 
+def _delta_to_text(content: Any) -> str:
+    """Like :func:`_content_to_text` but keeps whitespace.
+
+    Streaming chunks arrive as ``"محتوای "``, ``"فایل "``, ...  Stripping
+    each one glues the words together, so deltas must never be trimmed.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text", "")
+                if text:
+                    parts.append(str(text))
+            elif item is not None:
+                parts.append(str(item))
+        return "".join(parts)
+    return ""
+
+
 def _content_to_text(content: Any) -> str:
     if isinstance(content, str):
         return content.strip()
@@ -559,6 +750,8 @@ def _extract_tool_calls(raw_calls: Any) -> Iterable[ToolCall]:
                 arguments = json.loads(arguments or "{}")
             except json.JSONDecodeError:
                 continue
+        raw_id = raw.get("id")
+        call_id = str(raw_id) if isinstance(raw_id, (str, int)) and str(raw_id) else None
         if isinstance(name, str) and isinstance(arguments, dict):
-            calls.append(ToolCall(name=name, arguments=arguments))
+            calls.append(ToolCall(name=name, arguments=arguments, id=call_id))
     return calls

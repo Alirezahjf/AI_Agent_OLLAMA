@@ -15,6 +15,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
+from urllib.parse import urlparse
 from typing import Any, Callable, Iterable
 
 from ...actions import build_default_registry, run_action, describe_action
@@ -130,6 +131,7 @@ class BridgeHandlers:
 
     @classmethod
     def build(cls, settings: AssistantSettings) -> "BridgeHandlers":
+        settings = _auto_select_provider(settings)
         runtime = RuntimeContext(settings)
         gate = ConfirmationGate(settings.safety)
         context = ActionContext(
@@ -138,8 +140,10 @@ class BridgeHandlers:
             work_dir=settings.work_dir,
         )
         registry = build_default_registry(context)
-        if is_gui_available():
-            register_gui(registry, context)
+        # ``register_gui`` always registers ``screen_capture`` (it works
+        # without pyautogui through the PIL/mss fallback); mouse/keyboard
+        # tools are registered only when a real desktop is attached.
+        register_gui(registry, context)
         telegram = None
         if settings.telegram.enabled:
             telegram = PersonalTelegram(
@@ -244,9 +248,29 @@ class BridgeHandlers:
                 "telegram_connected": bool(self.telegram and self.telegram.is_connected),
                 "confirm_mode": self.settings.safety.confirm_mode,
             },
+            "warnings": self._warnings(),
             "actions": [a.name for a in self.registry.all()],
             "history": self.runtime.stats(),
         }
+
+    def _warnings(self) -> list[str]:
+        """Human-readable (Persian) warnings shown as a banner in the UI."""
+        out: list[str] = []
+        llm = self.settings.llm
+        if llm.provider == "ollama" and not _ollama_reachable(llm.ollama_base_url):
+            if llm.openai_api_key:
+                out.append(
+                    "Ollama در دسترس نیست. کلید API شما ثبت شده است؛ "
+                    "در تنظیمات، ارائه‌دهنده را روی «سازگار با OpenAI» بگذارید."
+                )
+            else:
+                out.append(
+                    "Ollama در دسترس نیست. لطفاً در تنظیمات، ارائه‌دهنده را به "
+                    "«سازگار با OpenAI» تغییر دهید و کلید API (مثلاً AvalAI) را وارد کنید."
+                )
+        if llm.provider == "openai_compatible" and not llm.openai_api_key:
+            out.append("کلید API تنظیم نشده است. در تنظیمات، کلید AvalAI خود را وارد کنید.")
+        return out
 
     def _set_model(self, payload: dict[str, Any]) -> dict[str, Any]:
         provider = payload.get("provider")
@@ -261,8 +285,29 @@ class BridgeHandlers:
             llm_dict["openai_model"] = str(model)
         new_llm = type(self.settings.llm)(**llm_dict)
         self.settings = self.settings.with_overrides(llm=new_llm)
+        self._persist_settings()
         client = create_client(new_llm)
         return {"provider": new_llm.provider, "model": client.model_name}
+
+    def _persist_settings(self) -> bool:
+        """Write the current settings back to ``config.json``.
+
+        Without this, provider/model/API-key changes made from the web UI
+        are lost on the next restart.  Failures are logged, never raised:
+        a read-only config file must not break a running chat.
+        """
+        path = self.settings.config_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(self.settings.to_dict(), indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            self.runtime.settings = self.settings
+            return True
+        except OSError as exc:  # noqa: BLE001
+            logger.warning("could not persist settings to %s: %s", path, exc)
+            return False
 
     # ---------------------------------------------------------------- actions
 
@@ -364,8 +409,29 @@ class BridgeHandlers:
                 payload={"turn": turn + 1, "max_turns": max_turns},
                 run_id=run_id,
             ))
+            streamed = False
+
+            def emit_delta(piece: str) -> None:
+                """Push each token to the frontends as it arrives."""
+                nonlocal streamed
+                if stop_event.is_set() or not piece:
+                    return
+                streamed = True
+                self.event_bus.publish(Event(
+                    type=EventType.ASSISTANT_DELTA.value,
+                    payload={"text": piece},
+                    run_id=run_id,
+                ))
+
+            # ``complete_streaming`` is optional: any object exposing the
+            # plain ``complete`` method (including test doubles and third
+            # party clients) still works.
+            stream = getattr(client, "complete_streaming", None)
             try:
-                reply = client.complete(self._build_messages(), tools)
+                if callable(stream):
+                    reply = stream(self._build_messages(), tools, emit_delta)
+                else:
+                    reply = client.complete(self._build_messages(), tools)
             except Exception as exc:  # noqa: BLE001
                 self.event_bus.publish(Event(
                     type=EventType.CHAT_FAILED.value,
@@ -374,12 +440,14 @@ class BridgeHandlers:
                 ))
                 return
             if reply.content:
-                # Emit assistant_delta for streaming frontends
-                self.event_bus.publish(Event(
-                    type=EventType.ASSISTANT_DELTA.value,
-                    payload={"text": reply.content},
-                    run_id=run_id,
-                ))
+                if not streamed:
+                    # Provider did not stream; emit the text in one go so
+                    # frontends still receive a delta before the final.
+                    self.event_bus.publish(Event(
+                        type=EventType.ASSISTANT_DELTA.value,
+                        payload={"text": reply.content},
+                        run_id=run_id,
+                    ))
                 self.runtime.append(ConversationMessage(role="assistant", content=reply.content))
                 self.event_bus.publish(Event(
                     type=EventType.ASSISTANT_FINAL.value,
@@ -391,13 +459,31 @@ class BridgeHandlers:
                 self.event_bus.publish(Event(type=EventType.CHAT_DONE.value, payload={}, run_id=run_id))
                 return
 
+            # OpenAI-compatible providers (AvalAI, OpenAI, ...) require every
+            # ``tool`` message to follow a single ``assistant`` message that
+            # carries the matching ``tool_calls`` entries.
+            call_ids: list[str] = []
+            openai_tool_calls: list[dict[str, Any]] = []
             for call in reply.tool_calls:
+                call_id = call.id or f"call_{uuid.uuid4().hex[:12]}"
+                call_ids.append(call_id)
+                openai_tool_calls.append({
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": json.dumps(call.arguments, ensure_ascii=False),
+                    },
+                })
+            self.runtime.append(ConversationMessage(
+                role="assistant",
+                content="",
+                tool_calls=openai_tool_calls,
+            ))
+
+            for call, call_id in zip(reply.tool_calls, call_ids):
                 if stop_event.is_set():
                     return
-                self.runtime.append(ConversationMessage(
-                    role="assistant",
-                    content=f"[tool_call] {call.name}({_short(call.arguments)})",
-                ))
                 self.event_bus.publish(Event(
                     type=EventType.TOOL_PROPOSED.value,
                     payload={"name": call.name, "arguments": call.arguments},
@@ -413,7 +499,7 @@ class BridgeHandlers:
                 self.runtime.append(ConversationMessage(
                     role="tool",
                     name=call.name,
-                    tool_call_id=call.name,
+                    tool_call_id=call_id,
                     content=text,
                 ))
                 self.event_bus.publish(Event(
@@ -541,3 +627,34 @@ def _build_system_prompt(registry, settings, gui_available: bool, telegram_enabl
         gui_available=gui_available,
         telegram_enabled=telegram_enabled,
     )
+
+
+def _ollama_reachable(base_url: str, timeout: float = 1.5) -> bool:
+    """Cheap TCP probe so we never block startup on a dead Ollama."""
+    try:
+        parsed = urlparse(base_url if "://" in base_url else f"http://{base_url}")
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or (443 if parsed.scheme == "https" else 11434)
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _auto_select_provider(settings: AssistantSettings) -> AssistantSettings:
+    """Fall back to the OpenAI-compatible provider when Ollama is absent.
+
+    Users of hosted gateways (AvalAI) keep the default ``ollama`` provider
+    in their config and then hit connection errors on every request.  If a
+    key and base URL are configured and Ollama is not listening, switch.
+    """
+    llm = settings.llm
+    if llm.provider != "ollama":
+        return settings
+    if not (llm.openai_api_key and llm.openai_base_url):
+        return settings
+    if _ollama_reachable(llm.ollama_base_url):
+        return settings
+    logger.warning("Ollama unreachable; switching provider to openai_compatible")
+    new_llm = type(llm)(**{**llm.__dict__, "provider": "openai_compatible"})
+    return settings.with_overrides(llm=new_llm)

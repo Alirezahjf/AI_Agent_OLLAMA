@@ -64,10 +64,37 @@ python local_agent_setup.py install-all
 
 `install-all` همه چیز را نصب می‌کند:
 - runtime اصلی (requests, Pillow, dotenv, rich)
+- رابط وب (`fastapi`, `uvicorn`, `pydantic`)
 - mouse/keyboard automation (`pyautogui`, `mss`)
 - Telegram user client (`telethon`)
+- پنجرهٔ بومی و آیکون نوار وظیفه (`pywebview`, `pystray`)
 
 اگر فقط LLM و کارهای read-only می‌خواهید: `python local_agent_setup.py install`
+
+#### نصب دستی با pip (به‌جای اسکریپت)
+
+بسته‌های اختیاری به‌صورت **extra** گروه‌بندی شده‌اند و می‌توانید فقط آنچه لازم دارید را نصب کنید:
+
+| extra | چه چیزی می‌آورد | چه وقت لازم است |
+|---|---|---|
+| `web` | fastapi، uvicorn، pydantic | رابط وب و اپ دسکتاپ |
+| `desktop` | pyautogui، mss، telethon، rich، pyperclip، uiautomation | کنترل ماوس/کیبورد و تلگرام شخصی |
+| `app` | pywebview، pystray | پنجرهٔ بومی و آیکون کنار ساعت |
+| `all` | هر سهٔ بالا | حالت پیشنهادی برای کاربر ویندوز |
+| `dev` | pytest، ruff | توسعه و اجرای تست |
+
+```powershell
+pip install -e ".[all]"        # همه‌چیز (پیشنهادی)
+pip install -e ".[web]"        # فقط رابط وب
+pip install -e ".[all,dev]"    # همه‌چیز + ابزار تست
+```
+
+> **نکتهٔ PowerShell:** در PowerShell از **دابل‌کوت** استفاده کنید (`".[all]"`).
+> سینگل‌کوت (`'.[all]'`) که در مثال‌های Bash می‌بینید در PowerShell درست تفسیر نمی‌شود.
+
+اگر `pip install -e .` با خطای
+`Multiple top-level packages discovered in a flat-layout` شکست خورد، یعنی
+نسخهٔ قدیمی `pyproject.toml` را دارید؛ آخرین تغییرات را `git pull` کنید.
 
 **لینوکس — وابستگی‌های اضافی:**
 
@@ -83,11 +110,30 @@ sudo apt install xclip
 sudo apt install wmctrl xdotool
 ```
 
-### ۳) بررسی نصب
+### ۳) بررسی نصب (بررسی سلامت)
 
 ```powershell
 python local_agent_setup.py doctor
 ```
+
+این دستور یک گزارش کامل فارسی می‌دهد: نسخهٔ پایتون، وابستگی‌ها، دسترسی نوشتن
+به پوشه‌ها، درستی `config.json`، **اتصال واقعی به مدل** (AvalAI یا Ollama)،
+تعداد ابزارهای فعال، اسکرین‌شات، آزاد بودن پورت، آمادگی اپ دسکتاپ و امنیت ربات‌ها.
+هر مورد ناسالم یک راهنمای رفع اشکال کنارش دارد.
+
+گزینه‌های مفید:
+
+```powershell
+python local_agent_setup.py doctor --offline   # بدون بررسی شبکه
+python -m local_agent.diagnostics --json       # خروجی JSON برای اسکریپت
+python -m local_agent.desktop --doctor         # فقط بررسی، بدون باز کردن پنجره
+```
+
+همین گزارش از سه جای دیگر هم در دسترس است:
+
+* در رابط وب/دسکتاپ: دکمهٔ **🩺 بررسی سلامت** در پنل کناری (یا منوی راست‌کلیک آیکون نوار وظیفه)
+* در ربات تلگرام/بله: دستور `/doctor`
+* در CLI: دستور `/doctor`
 
 اگر همه چیز OK بود:
 
@@ -167,6 +213,7 @@ python -m local_agent
 |---|---|
 | `/help` | راهنما |
 | `/status` | مدل، provider، تعداد پیام‌ها |
+| `/doctor` | بررسی سلامت نصب و اتصال مدل |
 | `/actions` | لیست همهٔ ابزارهای موجود |
 | `/model NAME` | تغییر مدل (مثلاً `/model claude-sonnet-5`) |
 | `/provider NAME` | تغییر provider (ollama / openai_compatible / auto) |
@@ -226,6 +273,9 @@ python local_agent_setup.py web     # http://127.0.0.1:7824
 
 یک single-page app فارسی و RTL با حالت تاریک پیش‌فرض:
 
+* **پاسخ کلمه‌به‌کلمه (streaming)** — متن مدل همان‌طور که تولید می‌شود تایپ می‌شود
+* نوار هشدار فارسی وقتی Ollama بالا نیست یا کلید API وارد نشده
+* پنل **🩺 بررسی سلامت** با دکمهٔ «کپی گزارش» و دکمهٔ «اتصال سریع به AvalAI»
 * رندر Markdown با رنگ‌آمیزی کد و دکمهٔ کپی
 * کارت اجرای ابزار به‌صورت زنده (در انتظار / در حال اجرا / انجام شد / خطا)
 * دیالوگ تأیید با هایلایت خطر
@@ -257,7 +307,9 @@ python local_agent_setup.py desktop
 یک برنامهٔ بومی ویندوز (با pywebview روی Edge WebView2):
 
 * پنجرهٔ ۱۲۰۰×۸۰۰، قابل تغییر اندازه، عنوانش مسیر پوشهٔ کاری را نشان می‌دهد
-* **آیکون کنار ساعت** با منوی راست‌کلیک (نمایش، پوشهٔ کاری، تنظیمات، خروج)
+* **اندازهٔ پنجره به خاطر سپرده می‌شود** — دفعهٔ بعد با همان ابعاد باز می‌شود
+* **بررسی سلامت خودکار** هنگام اجرا؛ اگر ایرادی باشد یک اعلان بومی می‌بینید
+* **آیکون کنار ساعت** با منوی راست‌کلیک (نمایش، پوشهٔ کاری، تنظیمات، بررسی سلامت، خروج)
 * **کلید میان‌بر سراسری** <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>A</kbd> از هر جای ویندوز
 * **نوتیفیکیشن ویندوز** هنگام درخواست تأیید، پایان کار، یا خطا
 * دکمهٔ ✕ در tray پنهان می‌کند (نمی‌بندد)

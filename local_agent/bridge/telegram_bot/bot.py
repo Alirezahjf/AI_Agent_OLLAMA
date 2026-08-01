@@ -46,6 +46,17 @@ from ...bridge.protocol import ActionResult, Event
 logger = get_logger("bridge.bot")
 
 
+# Paths a tool mentions in its result text, e.g.
+#   "saved screenshot to C:\Users\me\.local_assistant\screenshots\screen.png"
+_ARTIFACT_RE = re.compile(
+    r"(?:[A-Za-z]:\\[^\s\"'<>|]+|/(?:[^\s\"'<>|]+/)*[^\s\"'<>|]+)"
+    r"\.(?:png|jpg|jpeg|gif|webp|bmp|pdf|txt|md|log|csv|json|zip|docx|xlsx)",
+    re.IGNORECASE,
+)
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+_MAX_UPLOAD_BYTES = 45 * 1024 * 1024  # Telegram bot API limit is 50 MB
+
+
 # ---------------------------------------------------------------------------
 # Markdown cleanup (Bale applies Markdown to all messages)
 # ---------------------------------------------------------------------------
@@ -180,6 +191,23 @@ class _BaseBot:
         for chunk in [text[i : i + 3500] for i in range(0, len(text), 3500)]:
             await update.effective_message.reply_text(chunk)
 
+    async def doctor_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Run the self-check remotely and report it in Persian."""
+        if await self.deny_if_needed(update):
+            return
+        from ...diagnostics import run_checks
+
+        note = await update.effective_message.reply_text("🩺 در حال بررسی سلامت…")
+        try:
+            report = await asyncio.to_thread(run_checks, self.settings)
+        except Exception as exc:  # noqa: BLE001
+            await note.edit_text(f"❌ بررسی ناموفق: {exc}")
+            return
+        text = report.render()
+        await note.edit_text(text[:4000])
+        for chunk in [text[i : i + 4000] for i in range(4000, len(text), 4000)]:
+            await update.effective_message.reply_text(chunk)
+
     async def reset_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await self.deny_if_needed(update):
             return
@@ -308,7 +336,9 @@ class _BaseBot:
             )
             return None
         elif event.type == EventType.TOOL_RESULT.value:
-            preview = str(event.payload.get("text", ""))[:400]
+            text = str(event.payload.get("text", ""))
+            await self._send_artifacts(status_msg, text)
+            preview = text[:400]
             new_text = f"🔧 {event.payload.get('name')}: {preview}"
         elif event.type == EventType.CHAT_DONE.value:
             return None
@@ -324,6 +354,33 @@ class _BaseBot:
         except Exception:  # noqa: BLE001 - Telegram may reject identical edits
             pass
         return new_text
+
+    async def _send_artifacts(self, message, text: str) -> None:
+        """Upload files a tool produced instead of just naming their path.
+
+        A screenshot is far more useful as a photo than as
+        ``saved screenshot to C:\\Users\\...\\screen.png``.  Images go up as
+        photos, everything else (small files) as documents; anything
+        missing or oversized is silently skipped.
+        """
+        for raw in _ARTIFACT_RE.findall(text or ""):
+            path = Path(raw.strip().strip('"').strip("'"))
+            try:
+                if not path.is_file():
+                    continue
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size <= 0 or size > _MAX_UPLOAD_BYTES:
+                continue
+            try:
+                with path.open("rb") as handle:
+                    if path.suffix.lower() in _IMAGE_SUFFIXES:
+                        await message.reply_photo(handle, caption=path.name)
+                    else:
+                        await message.reply_document(handle, filename=path.name)
+            except Exception as exc:  # noqa: BLE001 - upload is best-effort
+                logger.debug("could not upload %s: %s", path, exc)
 
     # ---------------------------------------------------------- callback
 
@@ -382,6 +439,8 @@ class _BaseBot:
             await update.callback_query.message.reply_text(
                 "🧹 حافظهٔ Bridge پاک شد.", reply_markup=self._menu()
             )
+        elif action == "doctor":
+            await self.doctor_cmd(update, context)
         elif action == "help":
             await update.callback_query.message.reply_text(
                 self._help_text(), reply_markup=self._menu()
@@ -409,6 +468,7 @@ class _BaseBot:
                     InlineKeyboardButton("🧹 پاک‌کردن حافظه", callback_data="menu:reset"),
                 ],
                 [
+                    InlineKeyboardButton("🩺 سلامت", callback_data="menu:doctor"),
                     InlineKeyboardButton("❓ راهنما", callback_data="menu:help"),
                 ],
             ]
@@ -436,6 +496,7 @@ class _BaseBot:
             "  /status — وضعیت مدل و پوشهٔ کاری\n"
             "  /actions — فهرست ابزارها\n"
             "  /history — آخرین پیام‌ها\n"
+            "  /doctor — بررسی سلامت نصب و اتصال مدل\n"
             "  /model NAME — تغییر مدل\n"
             "  /reset — پاک کردن حافظه\n\n"
             "کارهای خطرناک قبل از اجرا از شما تأیید می‌گیرند."
@@ -486,6 +547,7 @@ class BridgeTelegramBot(_BaseBot):
         app.add_handler(CommandHandler("reset", self.reset_cmd))
         app.add_handler(CommandHandler("model", self.set_model_cmd))
         app.add_handler(CommandHandler("history", self.history_cmd))
+        app.add_handler(CommandHandler("doctor", self.doctor_cmd))
         app.add_handler(CallbackQueryHandler(self.callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.text_handler))
         return app
@@ -510,6 +572,7 @@ class BridgeBaleBot(BridgeTelegramBot):
         app.add_handler(CommandHandler("reset", self.reset_cmd))
         app.add_handler(CommandHandler("model", self.set_model_cmd))
         app.add_handler(CommandHandler("history", self.history_cmd))
+        app.add_handler(CommandHandler("doctor", self.doctor_cmd))
         app.add_handler(CallbackQueryHandler(self.callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.text_handler))
         return app

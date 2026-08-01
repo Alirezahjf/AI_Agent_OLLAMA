@@ -22,6 +22,7 @@ if ``pystray`` is missing you lose the tray icon, not the app.
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -182,6 +183,9 @@ class DesktopApi:
     def check_updates(self) -> dict[str, Any]:
         return self._app.check_updates(force=True)
 
+    def run_doctor(self) -> dict[str, Any]:
+        return self._app.run_doctor()
+
 
 # ---------------------------------------------------------------------------
 # The application
@@ -226,16 +230,53 @@ class DesktopApp:
 
     # ------------------------------------------------------------ window
 
+    @property
+    def window_state_path(self) -> Path:
+        return self.settings.data_dir / "window.json"
+
+    def load_window_state(self) -> dict[str, Any]:
+        """Restore the last window size so the app reopens where you left it."""
+        try:
+            payload = json.loads(self.window_state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        state: dict[str, Any] = {}
+        width, height = payload.get("width"), payload.get("height")
+        if isinstance(width, int) and isinstance(height, int):
+            # Clamp to something sane: a stale state from a bigger monitor
+            # must not open the window off-screen.
+            state["width"] = max(self.config.min_width, min(int(width), 7680))
+            state["height"] = max(self.config.min_height, min(int(height), 4320))
+        return state
+
+    def save_window_state(self) -> bool:
+        if self.window is None:
+            return False
+        try:
+            payload = {"width": int(self.window.width), "height": int(self.window.height)}
+        except Exception:  # noqa: BLE001 - pywebview may be shutting down
+            return False
+        try:
+            self.window_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.window_state_path.write_text(json.dumps(payload), encoding="utf-8")
+            return True
+        except OSError as exc:
+            logger.debug("could not save window state: %s", exc)
+            return False
+
     def create_window(self, url: str) -> Any:
         """Create the pywebview window (without starting the GUI loop)."""
         import webview
 
         title = f"{APP_NAME} — {self.settings.work_dir}"
+        state = self.load_window_state()
         self.window = webview.create_window(
             title,
             url,
-            width=self.config.width,
-            height=self.config.height,
+            width=state.get("width", self.config.width),
+            height=state.get("height", self.config.height),
             min_size=(self.config.min_width, self.config.min_height),
             resizable=True,
             background_color="#070B18",
@@ -469,6 +510,44 @@ class DesktopApp:
             f"پوشهٔ کاری: {self.settings.work_dir}\nکلید میان‌بر: {self.config.hotkey}",
         )
 
+    def open_doctor(self) -> None:
+        """Bring the window forward with the health panel open."""
+        self.show_window()
+        if self.window is None:
+            return
+        try:
+            self.window.evaluate_js(
+                "window.Alpine && Alpine.$data(document.getElementById('app')).openDoctor()"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def run_doctor(self) -> dict[str, Any]:
+        """Run the self-check and surface failures as a native notification."""
+        from ..diagnostics import run_checks
+
+        report = run_checks(self.settings)
+        failures = [r for r in report.results if r.status == "fail"]
+        if failures:
+            self.notify(
+                "بررسی سلامت: مشکل پیدا شد",
+                failures[0].detail or failures[0].title,
+            )
+        return report.to_dict()
+
+    def _run_doctor_async(self) -> None:
+        """Health-check in the background so a bad config is caught early."""
+
+        def worker() -> None:
+            time.sleep(3)
+            try:
+                report = self.run_doctor()
+                logger.info("startup self-check: %s", report.get("summary"))
+            except Exception:  # noqa: BLE001
+                logger.debug("startup self-check failed", exc_info=True)
+
+        threading.Thread(target=worker, name="desktop-doctor", daemon=True).start()
+
     def open_settings(self) -> None:
         """Show the window and pop the settings modal in the UI."""
         self.show_window()
@@ -492,6 +571,7 @@ class DesktopApp:
                 on_open_workspace=self.open_workspace,
                 on_settings=self.open_settings,
                 on_check_updates=lambda: self.check_updates(force=True),
+                on_doctor=self.open_doctor,
                 on_about=self.show_about,
                 on_quit=self.quit,
             )
@@ -514,6 +594,7 @@ class DesktopApp:
             return
         self._quitting = True
         logger.info("shutting down the desktop app")
+        self.save_window_state()
         for closer in (
             lambda: self.hotkey and self.hotkey.stop(),
             lambda: self.tray and self.tray.stop(),
@@ -539,6 +620,7 @@ class DesktopApp:
         self.start_tray()
         self.start_hotkey()
         self._check_updates_async()
+        self._run_doctor_async()
 
         state = self.info()
         logger.info(
@@ -579,6 +661,11 @@ def run(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-updates", action="store_true", help="skip the update check")
     parser.add_argument("--debug", action="store_true", help="open the webview devtools")
     parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="فقط بررسی سلامت را اجرا کن و خارج شو",
+    )
+    parser.add_argument(
         "--browser",
         action="store_true",
         help="serve the UI and open the system browser instead of a native window",
@@ -588,6 +675,13 @@ def run(argv: list[str] | None = None) -> int:
     settings = load_settings()
     setup_logging(settings.data_dir)
     log_platform_summary()
+
+    if args.doctor:
+        from ..diagnostics import run_checks
+
+        report = run_checks(settings)
+        print(report.render())
+        return 0 if report.status != "fail" else 1
 
     config = DesktopConfig.from_env()
 
@@ -643,6 +737,16 @@ def run(argv: list[str] | None = None) -> int:
             app.start_tray()
         app.start_hotkey()
         print(f"UI: {url}")
+        try:
+            from ..diagnostics import run_checks
+
+            report = run_checks(app.settings)
+            print(f"🩺 بررسی سلامت: {report.summary}")
+            for result in report.results:
+                if result.status != "ok":
+                    print(f"   {result.icon} {result.title} — {result.detail}")
+        except Exception:  # noqa: BLE001
+            logger.debug("startup self-check failed", exc_info=True)
         try:
             webbrowser.open(url)
         except Exception:  # noqa: BLE001

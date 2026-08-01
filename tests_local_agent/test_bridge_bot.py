@@ -24,7 +24,8 @@ def test_menu_keyboard_layout() -> None:
     assert len(rows) == 3
     data = [button.callback_data for row in rows for button in row]
     assert data == [
-        "menu:status", "menu:actions", "menu:history", "menu:reset", "menu:help",
+        "menu:status", "menu:actions", "menu:history", "menu:reset",
+        "menu:doctor", "menu:help",
     ]
     labels = [button.text for row in rows for button in row]
     assert all(label.strip() for label in labels)
@@ -95,3 +96,86 @@ def test_settings_bot_tokens_serialize() -> None:
     assert d["telegram_token"] == "tg-123"
     assert d["bale_token"] == "bale-456"
     assert d["allowed_user_ids"] == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# Artifact uploads
+# ---------------------------------------------------------------------------
+
+
+class _RecordingMessage:
+    """Captures reply_photo / reply_document calls."""
+
+    def __init__(self) -> None:
+        self.photos: list[str] = []
+        self.documents: list[str] = []
+
+    async def reply_photo(self, handle, caption: str = "") -> None:  # noqa: ANN001
+        self.photos.append(caption)
+
+    async def reply_document(self, handle, filename: str = "") -> None:  # noqa: ANN001
+        self.documents.append(filename)
+
+
+def test_artifact_regex_matches_windows_and_posix_paths() -> None:
+    from local_agent.bridge.telegram_bot.bot import _ARTIFACT_RE
+
+    windows = r"saved screenshot to C:\Users\me\.local_assistant\screen.png"
+    assert _ARTIFACT_RE.findall(windows) == [r"C:\Users\me\.local_assistant\screen.png"]
+    assert _ARTIFACT_RE.findall("wrote /tmp/report.md now") == ["/tmp/report.md"]
+    assert _ARTIFACT_RE.findall("nothing to see here") == []
+
+
+def test_screenshot_result_is_uploaded_as_a_photo(tmp_path) -> None:  # noqa: ANN001
+    import asyncio
+
+    from PIL import Image
+
+    shot = tmp_path / "screen.png"
+    Image.new("RGB", (8, 8), (10, 10, 10)).save(shot, "PNG")
+
+    bot = _bot()
+    message = _RecordingMessage()
+    asyncio.run(bot._send_artifacts(message, f"saved screenshot to {shot}"))
+    assert message.photos == ["screen.png"]
+    assert message.documents == []
+
+
+def test_non_image_artifact_is_uploaded_as_a_document(tmp_path) -> None:  # noqa: ANN001
+    import asyncio
+
+    report = tmp_path / "report.md"
+    report.write_text("# سلام", encoding="utf-8")
+
+    message = _RecordingMessage()
+    asyncio.run(_bot()._send_artifacts(message, f"فایل نوشته شد: {report}"))
+    assert message.documents == ["report.md"]
+
+
+def test_missing_and_empty_artifacts_are_skipped(tmp_path) -> None:  # noqa: ANN001
+    import asyncio
+
+    empty = tmp_path / "empty.png"
+    empty.write_bytes(b"")
+    message = _RecordingMessage()
+    text = f"{empty} and {tmp_path / 'ghost.png'}"
+    asyncio.run(_bot()._send_artifacts(message, text))
+    assert message.photos == [] and message.documents == []
+
+
+def test_oversized_artifacts_are_skipped(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    import asyncio
+
+    from local_agent.bridge.telegram_bot import bot as bot_module
+
+    big = tmp_path / "big.png"
+    big.write_bytes(b"x" * 2048)
+    monkeypatch.setattr(bot_module, "_MAX_UPLOAD_BYTES", 1024)
+    message = _RecordingMessage()
+    asyncio.run(_bot()._send_artifacts(message, str(big)))
+    assert message.photos == []
+
+
+def test_doctor_command_is_registered() -> None:
+    assert hasattr(_bot(), "doctor_cmd")
+    assert "/doctor" in _bot()._help_text()

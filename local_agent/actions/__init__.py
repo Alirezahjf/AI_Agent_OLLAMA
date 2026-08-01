@@ -58,7 +58,7 @@ def build_default_registry(context: ActionContext) -> ActionRegistry:
     # Mark actions that cannot work in this environment
     if not caps.get("gui"):
         for name in ("list_windows", "move_window", "minimize_window",
-                     "maximize_window", "focus_window", "take_screenshot",
+                     "maximize_window", "focus_window",
                      "click_at", "type_text", "press_key", "drag_mouse",
                      "scroll_at"):
             action = registry._actions.get(name)

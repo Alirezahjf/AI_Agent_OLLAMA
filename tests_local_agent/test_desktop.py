@@ -615,3 +615,52 @@ def test_web_static_dir_uses_resource_root() -> None:
     static = web_static_dir()
     assert str(static).endswith("web/static")
     assert (static / "app.js").is_file()
+
+
+# ---------------------------------------------------------------------------
+# Window geometry persistence
+# ---------------------------------------------------------------------------
+
+
+class _FakeWindow:
+    def __init__(self, width: int, height: int) -> None:
+        self.width = width
+        self.height = height
+
+
+def _app(tmp_path):  # noqa: ANN001, ANN202
+    from local_agent.core.config import AssistantSettings
+    from local_agent.desktop.app import DesktopApp
+
+    return DesktopApp(settings=AssistantSettings(data_dir=tmp_path, work_dir=tmp_path))
+
+
+def test_window_state_round_trips(tmp_path) -> None:  # noqa: ANN001
+    app = _app(tmp_path)
+    app.window = _FakeWindow(1400, 900)
+    assert app.save_window_state() is True
+    assert _app(tmp_path).load_window_state() == {"width": 1400, "height": 900}
+
+
+def test_window_state_is_absent_on_first_run(tmp_path) -> None:  # noqa: ANN001
+    assert _app(tmp_path).load_window_state() == {}
+
+
+def test_window_state_ignores_corrupt_json(tmp_path) -> None:  # noqa: ANN001
+    app = _app(tmp_path)
+    app.window_state_path.write_text("{not json", encoding="utf-8")
+    assert app.load_window_state() == {}
+
+
+def test_window_state_is_clamped_to_sane_bounds(tmp_path) -> None:  # noqa: ANN001
+    import json as _json
+
+    app = _app(tmp_path)
+    app.window_state_path.write_text(_json.dumps({"width": 10, "height": 99999}), encoding="utf-8")
+    state = app.load_window_state()
+    assert state["width"] == app.config.min_width
+    assert state["height"] == 4320
+
+
+def test_saving_without_a_window_is_a_noop(tmp_path) -> None:  # noqa: ANN001
+    assert _app(tmp_path).save_window_state() is False

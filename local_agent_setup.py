@@ -79,13 +79,18 @@ def cmd_install(args: argparse.Namespace) -> int:
 
 
 def cmd_install_all(args: argparse.Namespace) -> int:
-    rc = cmd_install(args)
-    if rc != 0:
+    """Install every optional feature: web UI, automation, native window."""
+    _print_banner("installing Local Windows Assistant (full)")
+    # `.[all]` chains the web / desktop / app extras, so a single call gets
+    # uvicorn, pywebview and pystray -- the three packages most often
+    # missing when the web UI or the desktop app refuses to start.
+    rc = _pip("install", "-e", f"{ROOT}[all]")
+    if rc == 0:
         return rc
+    print("\n!! editable install failed; falling back to requirements-full.txt")
     if not REQUIREMENTS_FULL.is_file():
         print(f"!! requirements-full.txt not found at {REQUIREMENTS_FULL}")
         return 1
-    print("installing full feature set (browser automation, telegram, web UI, ...)...")
     return _pip("install", "-r", str(REQUIREMENTS_FULL))
 
 
@@ -123,6 +128,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"{label}: OK")
         except ImportError:
             print(f"{label}: MISSING")
+        except Exception as exc:  # noqa: BLE001
+            # Importing is not always safe: pyautogui raises KeyError on a
+            # headless box because it reads os.environ['DISPLAY'] at import
+            # time.  The package *is* installed, so say so and move on
+            # instead of killing the whole report.
+            print(f"{label}: installed but not usable here ({type(exc).__name__})")
 
     if platform.system() == "Windows":
         try:
@@ -131,6 +142,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print("uiautomation: OK")
         except ImportError:
             print("uiautomation: MISSING (run: pip install uiautomation)")
+        except Exception as exc:  # noqa: BLE001
+            print(f"uiautomation: installed but not usable here ({type(exc).__name__})")
+
+    # Full runtime report (config, model connectivity, tools, ports, ...)
+    try:
+        from local_agent.diagnostics import run_checks
+
+        print()
+        report = run_checks(network=not getattr(args, "offline", False))
+        print(report.render())
+        failed = report.status == "fail"
+    except Exception as exc:  # noqa: BLE001
+        print(f"\nfull self-check unavailable: {exc}")
+        failed = False
 
     print()
     print("After installing everything, you can:")
@@ -138,7 +163,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print("    python local_agent_setup.py web  # start the web UI on http://127.0.0.1:7824")
     print("    python local_agent_setup.py desktop  # start the native desktop app")
     print("    python local_agent_setup.py bot-telegram  # start the Telegram bot (needs TELEGRAM_BOT_TOKEN)")
-    return 0
+    return 1 if failed else 0
 
 
 def cmd_config(args: argparse.Namespace) -> int:
@@ -237,7 +262,7 @@ def build_parser() -> argparse.ArgumentParser:
             """\
             commands:
               install        install the minimum runtime requirements
-              install-all    install minimum + browser / telegram / web extras
+              install-all    install everything (web UI + automation + window)
               doctor         verify the install
               config         open the user config file
               uninstall      remove the package
@@ -254,7 +279,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("install").set_defaults(func=cmd_install)
     sub.add_parser("install-all").set_defaults(func=cmd_install_all)
-    sub.add_parser("doctor").set_defaults(func=cmd_doctor)
+    doctor = sub.add_parser("doctor", help="verify the install and the live config")
+    doctor.add_argument("--offline", action="store_true", help="skip network checks")
+    doctor.set_defaults(func=cmd_doctor)
     sub.add_parser("config").set_defaults(func=cmd_config)
     sub.add_parser("uninstall").set_defaults(func=cmd_uninstall)
     sub.add_parser("start").set_defaults(func=cmd_start)

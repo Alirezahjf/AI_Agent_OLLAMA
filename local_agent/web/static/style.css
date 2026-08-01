@@ -1212,3 +1212,42 @@ html[dir="ltr"] .switch:checked::after { transform: translateX(18px); }
   .chat { overflow: visible; padding: 0; }
   body { background: #fff; color: #000; overflow: visible; }
 }
+
+/* Provider warning banner ------------------------------------------------ */
+.notice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  margin-block-end: var(--space-3);
+  border-radius: var(--radius-md, 10px);
+  border-inline-start: 3px solid var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  font-size: 0.92rem;
+}
+.notice p { margin: 0; flex: 1; }
+
+/* Health-check (doctor) panel ------------------------------------------- */
+.doctor__summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-block-end: var(--space-3);
+  font-size: 0.95rem;
+}
+.doctor__verdict { font-weight: 600; }
+.doctor__verdict--ok { color: var(--success); }
+.doctor__verdict--warn { color: var(--warning); }
+.doctor__verdict--fail { color: var(--danger); }
+.doctor__list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+.doctor__item {
+  padding: var(--space-2) var(--space-3);
+  border-radius: 10px;
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  border-inline-start: 3px solid var(--success);
+}
+.doctor__item--warn { border-inline-start-color: var(--warning); }
+.doctor__item--fail { border-inline-start-color: var(--danger); }
+.doctor__row { display: flex; align-items: baseline; gap: var(--space-2); flex-wrap: wrap; }
+.doctor__detail { opacity: 0.8; font-size: 0.88rem; }
+.doctor__hint { margin: var(--space-1) 0 0; font-size: 0.84rem; opacity: 0.75; }

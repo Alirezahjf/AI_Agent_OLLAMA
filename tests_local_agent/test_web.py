@@ -276,3 +276,46 @@ def test_settings_endpoint_updates_the_model(web_server: WebServer) -> None:
     )
     assert r.status_code == 200
     assert r.json()["model"] == "llama3.1:8b"
+
+
+# ---------------------------------------------------------------------------
+# Health check endpoint + settings persistence
+# ---------------------------------------------------------------------------
+
+
+def test_api_doctor_returns_a_report(web_server: WebServer) -> None:
+    r = requests.get(f"http://127.0.0.1:{web_server.port}/api/doctor?offline=true", timeout=30)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] in {"ok", "warn", "fail"}
+    assert body["results"], "expected at least one check"
+    for result in body["results"]:
+        assert result["title"], "every check needs a Persian title"
+        assert result["status"] in {"ok", "warn", "fail"}
+
+
+def test_api_status_exposes_persian_warnings(web_server: WebServer) -> None:
+    r = requests.get(f"http://127.0.0.1:{web_server.port}/api/status", timeout=3)
+    warnings = r.json()["settings"]["warnings"]
+    assert isinstance(warnings, list)
+    # The default config points at a local Ollama that is not running here.
+    assert any("Ollama" in w for w in warnings)
+
+
+def test_api_settings_persists_to_disk(web_server: WebServer, tmp_path: Path) -> None:
+    import json
+
+    r = requests.post(
+        f"http://127.0.0.1:{web_server.port}/api/settings",
+        json={
+            "provider": "openai_compatible",
+            "model": "gpt-4o-mini",
+            "openai_base_url": "https://api.avalai.ir/v1",
+            "openai_api_key": "sk-persisted",
+        },
+        timeout=5,
+    )
+    assert r.status_code == 200
+    payload = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert payload["llm"]["openai_base_url"] == "https://api.avalai.ir/v1"
+    assert payload["llm"]["openai_api_key"] == "sk-persisted"
