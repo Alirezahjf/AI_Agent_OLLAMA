@@ -46,6 +46,17 @@ from ...bridge.protocol import ActionResult, Event
 logger = get_logger("bridge.bot")
 
 
+# Paths a tool mentions in its result text, e.g.
+#   "saved screenshot to C:\Users\me\.local_assistant\screenshots\screen.png"
+_ARTIFACT_RE = re.compile(
+    r"(?:[A-Za-z]:\\[^\s\"'<>|]+|/(?:[^\s\"'<>|]+/)*[^\s\"'<>|]+)"
+    r"\.(?:png|jpg|jpeg|gif|webp|bmp|pdf|txt|md|log|csv|json|zip|docx|xlsx)",
+    re.IGNORECASE,
+)
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+_MAX_UPLOAD_BYTES = 45 * 1024 * 1024  # Telegram bot API limit is 50 MB
+
+
 # ---------------------------------------------------------------------------
 # Markdown cleanup (Bale applies Markdown to all messages)
 # ---------------------------------------------------------------------------
@@ -325,7 +336,9 @@ class _BaseBot:
             )
             return None
         elif event.type == EventType.TOOL_RESULT.value:
-            preview = str(event.payload.get("text", ""))[:400]
+            text = str(event.payload.get("text", ""))
+            await self._send_artifacts(status_msg, text)
+            preview = text[:400]
             new_text = f"🔧 {event.payload.get('name')}: {preview}"
         elif event.type == EventType.CHAT_DONE.value:
             return None
@@ -341,6 +354,33 @@ class _BaseBot:
         except Exception:  # noqa: BLE001 - Telegram may reject identical edits
             pass
         return new_text
+
+    async def _send_artifacts(self, message, text: str) -> None:
+        """Upload files a tool produced instead of just naming their path.
+
+        A screenshot is far more useful as a photo than as
+        ``saved screenshot to C:\\Users\\...\\screen.png``.  Images go up as
+        photos, everything else (small files) as documents; anything
+        missing or oversized is silently skipped.
+        """
+        for raw in _ARTIFACT_RE.findall(text or ""):
+            path = Path(raw.strip().strip('"').strip("'"))
+            try:
+                if not path.is_file():
+                    continue
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size <= 0 or size > _MAX_UPLOAD_BYTES:
+                continue
+            try:
+                with path.open("rb") as handle:
+                    if path.suffix.lower() in _IMAGE_SUFFIXES:
+                        await message.reply_photo(handle, caption=path.name)
+                    else:
+                        await message.reply_document(handle, filename=path.name)
+            except Exception as exc:  # noqa: BLE001 - upload is best-effort
+                logger.debug("could not upload %s: %s", path, exc)
 
     # ---------------------------------------------------------- callback
 

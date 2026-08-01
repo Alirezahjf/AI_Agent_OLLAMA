@@ -22,6 +22,7 @@ if ``pystray`` is missing you lose the tray icon, not the app.
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -229,16 +230,53 @@ class DesktopApp:
 
     # ------------------------------------------------------------ window
 
+    @property
+    def window_state_path(self) -> Path:
+        return self.settings.data_dir / "window.json"
+
+    def load_window_state(self) -> dict[str, Any]:
+        """Restore the last window size so the app reopens where you left it."""
+        try:
+            payload = json.loads(self.window_state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        state: dict[str, Any] = {}
+        width, height = payload.get("width"), payload.get("height")
+        if isinstance(width, int) and isinstance(height, int):
+            # Clamp to something sane: a stale state from a bigger monitor
+            # must not open the window off-screen.
+            state["width"] = max(self.config.min_width, min(int(width), 7680))
+            state["height"] = max(self.config.min_height, min(int(height), 4320))
+        return state
+
+    def save_window_state(self) -> bool:
+        if self.window is None:
+            return False
+        try:
+            payload = {"width": int(self.window.width), "height": int(self.window.height)}
+        except Exception:  # noqa: BLE001 - pywebview may be shutting down
+            return False
+        try:
+            self.window_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.window_state_path.write_text(json.dumps(payload), encoding="utf-8")
+            return True
+        except OSError as exc:
+            logger.debug("could not save window state: %s", exc)
+            return False
+
     def create_window(self, url: str) -> Any:
         """Create the pywebview window (without starting the GUI loop)."""
         import webview
 
         title = f"{APP_NAME} — {self.settings.work_dir}"
+        state = self.load_window_state()
         self.window = webview.create_window(
             title,
             url,
-            width=self.config.width,
-            height=self.config.height,
+            width=state.get("width", self.config.width),
+            height=state.get("height", self.config.height),
             min_size=(self.config.min_width, self.config.min_height),
             resizable=True,
             background_color="#070B18",
@@ -556,6 +594,7 @@ class DesktopApp:
             return
         self._quitting = True
         logger.info("shutting down the desktop app")
+        self.save_window_state()
         for closer in (
             lambda: self.hotkey and self.hotkey.stop(),
             lambda: self.tray and self.tray.stop(),

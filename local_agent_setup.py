@@ -132,13 +132,25 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         except ImportError:
             print("uiautomation: MISSING (run: pip install uiautomation)")
 
+    # Full runtime report (config, model connectivity, tools, ports, ...)
+    try:
+        from local_agent.diagnostics import run_checks
+
+        print()
+        report = run_checks(network=not getattr(args, "offline", False))
+        print(report.render())
+        failed = report.status == "fail"
+    except Exception as exc:  # noqa: BLE001
+        print(f"\nfull self-check unavailable: {exc}")
+        failed = False
+
     print()
     print("After installing everything, you can:")
     print("    python -m local_agent            # start the local CLI (in-process bridge)")
     print("    python local_agent_setup.py web  # start the web UI on http://127.0.0.1:7824")
     print("    python local_agent_setup.py desktop  # start the native desktop app")
     print("    python local_agent_setup.py bot-telegram  # start the Telegram bot (needs TELEGRAM_BOT_TOKEN)")
-    return 0
+    return 1 if failed else 0
 
 
 def cmd_config(args: argparse.Namespace) -> int:
@@ -254,7 +266,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("install").set_defaults(func=cmd_install)
     sub.add_parser("install-all").set_defaults(func=cmd_install_all)
-    sub.add_parser("doctor").set_defaults(func=cmd_doctor)
+    doctor = sub.add_parser("doctor", help="verify the install and the live config")
+    doctor.add_argument("--offline", action="store_true", help="skip network checks")
+    doctor.set_defaults(func=cmd_doctor)
     sub.add_parser("config").set_defaults(func=cmd_config)
     sub.add_parser("uninstall").set_defaults(func=cmd_uninstall)
     sub.add_parser("start").set_defaults(func=cmd_start)
