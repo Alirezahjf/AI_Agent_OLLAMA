@@ -1,19 +1,20 @@
-# Local Windows Assistant
+# Local Assistant
 
-یک ایجنت محلی حرفه‌ای برای **دسکتاپ ویندوز شما** — برخلاف ربات تلگرام/بله
+یک ایجنت محلی حرفه‌ای برای **دسکتاپ شما** — برخلاف ربات تلگرام/بله
 که روی سرور اجرا می‌شود، این ایجنت مستقیماً روی لپ‌تاپ/کامپیوتر شما زندگی
 می‌کند و به همه چیز دسترسی دارد:
 
-* باز کردن هر برنامهٔ ویندوزی (Chrome، Telegram Desktop، Photoshop، VS Code، Task Manager و...)
+* باز کردن هر برنامه (Chrome، Telegram Desktop، Photoshop، VS Code، Task Manager و...) — **ویندوز و لینوکس**
 * کنترل GUI با ماوس و کیبورد (pyautogui) — drag & drop، کلیک، تایپ
 * ارسال پیام از **اکانت شخصی تلگرام شما** (Telethon user client)
 * خواندن/نوشتن فایل، اجرای shell command، جستجوی وب
+* **کراس‌پلتفرم**: ویندوز، لینوکس دسکتاپ، و سرور لینوکس بدون نمایشگر
 * حافظهٔ بلندمدت بین sessionها
 * تأیید هوشمند: کارهای امن (باز کردن برنامه، جستجو) مستقیم انجام می‌شود؛ کارهای
   مخرب (ارسال پیام، پاک کردن فایل، kill کردن پروسس) فقط با تأیید شما
 
 > ⚠️ **تفاوت با ربات تلگرام:** ربات تلگرام روی سرور اجرا می‌شود و به ماشین شما
-> دسترسی ندارد. این ایجنت روی **خود ویندوز شما** اجرا می‌شود و واقعاً تلگرام
+> دسترسی ندارد. این ایجنت روی **خود ماشین شما** اجرا می‌شود و واقعاً تلگرام
 > دسکتاپ/فتوشاپ/Task Manager شما را کنترل می‌کند.
 
 ## چهار راه استفاده
@@ -22,6 +23,7 @@
 |---|---|---|
 | 🖥️ **اپ دسکتاپ** | `python local_agent_setup.py desktop` | استفادهٔ روزمره — پنجرهٔ بومی + tray + هات‌کی |
 | 🌐 **رابط وب** | `python local_agent_setup.py web` | مرورگر، از موبایل هم قابل دسترس |
+| 🖧 **سرور** | `python local_agent_setup.py web --host 0.0.0.0` | سرور لینوکس بدون نمایشگر |
 | ⌨️ **CLI** | `python -m local_agent` | ترمینال، اسکریپت، سرعت |
 | ✈️ **ربات تلگرام/بله** | `python local_agent_setup.py bot-telegram` | کنترل از راه دور |
 
@@ -35,7 +37,7 @@
 
 ### ۱) پیش‌نیازها
 
-* **Windows 10/11** (روی Linux/macOS هم نصب می‌شود ولی فقط بخش‌های read-only کار می‌کنند)
+* **Windows 10/11** یا **Linux** (روی macOS هم نصب می‌شود ولی فقط بخش‌های محدود کار می‌کنند)
 * **Python 3.11+**
 * (اختیاری) **Ollama** برای اجرای محلی LLM: [ollama.com](https://ollama.com)
 * (اختیاری) **Git Bash** یا **PowerShell** (هر دو کار می‌کنند)
@@ -43,11 +45,20 @@
 ### ۲) نصب
 
 ```powershell
-# در PowerShell، داخل پوشهٔ پروژه:
+# در PowerShell (ویندوز)، داخل پوشهٔ پروژه:
 git clone https://github.com/Alirezahjf/AI_Agent_OLLAMA.git
 cd AI_Agent_OLLAMA
 python -m venv .venv
 .venv\Scripts\Activate.ps1
+python local_agent_setup.py install-all
+```
+
+```bash
+# در Bash (لینوکس):
+git clone https://github.com/Alirezahjf/AI_Agent_OLLAMA.git
+cd AI_Agent_OLLAMA
+python -m venv .venv
+source .venv/bin/activate
 python local_agent_setup.py install-all
 ```
 
@@ -57,6 +68,20 @@ python local_agent_setup.py install-all
 - Telegram user client (`telethon`)
 
 اگر فقط LLM و کارهای read-only می‌خواهید: `python local_agent_setup.py install`
+
+**لینوکس — وابستگی‌های اضافی:**
+
+```bash
+# برای اپ دسکتاپ (pywebview با GTK):
+sudo apt install python3-gi python3-gi-cairo gir1.2-webkit2-4.1
+pip install pywebview[gtk]
+
+# برای کلیپ‌بورد:
+sudo apt install xclip
+
+# برای ابزارهای پنجره:
+sudo apt install wmctrl xdotool
+```
 
 ### ۳) بررسی نصب
 
