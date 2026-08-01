@@ -212,6 +212,9 @@
 
       status: {},
       warnings: [],
+      doctor: {},
+      doctorOpen: false,
+      doctorLoading: false,
       toasts: [],
       attachments: [],
 
@@ -566,6 +569,44 @@
           this.toast("bad", "⚠️", "دریافت فهرست مدل‌ها ناموفق بود");
         } finally {
           this.modelsLoading = false;
+        }
+      },
+
+      get doctorVerdict() {
+        return { ok: "همه‌چیز سالم است", warn: "قابل استفاده، با چند هشدار", fail: "نیاز به رفع اشکال" }[this.doctor.status] || "";
+      },
+
+      openDoctor() {
+        this.doctorOpen = true;
+        if (!this.doctor.results) this.runDoctor();
+      },
+
+      async runDoctor() {
+        if (this.connection === "offline") {
+          this.toast("info", "ℹ️", "در حالت نمایش آفلاین بررسی سلامت در دسترس نیست");
+          return;
+        }
+        this.doctorLoading = true;
+        try {
+          this.doctor = await this.api("/api/doctor");
+        } catch (_) {
+          this.toast("bad", "❌", "بررسی سلامت ناموفق بود");
+        } finally {
+          this.doctorLoading = false;
+        }
+      },
+
+      copyDoctor() {
+        const lines = (this.doctor.results || []).map((r) => {
+          const icon = r.status === "ok" ? "OK  " : (r.status === "warn" ? "WARN" : "FAIL");
+          return `[${icon}] ${r.title} — ${r.detail}${r.hint ? "\n        ↳ " + r.hint : ""}`;
+        });
+        const text = "بررسی سلامت دستیار محلی\n" + lines.join("\n") + "\n" + (this.doctor.summary || "");
+        try {
+          navigator.clipboard.writeText(text);
+          this.toast("ok", "✅", "گزارش کپی شد");
+        } catch (_) {
+          this.toast("bad", "❌", "کپی ناموفق بود");
         }
       },
 

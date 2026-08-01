@@ -9,6 +9,7 @@ Endpoints
 
 ``GET  /``                    the single-page UI
 ``GET  /api/status``          bridge info + settings snapshot
+``GET  /api/doctor``          self-check health report
 ``GET  /api/actions``         action descriptions (legacy, plain strings)
 ``GET  /api/actions/detail``  structured actions (name / risk / args)
 ``GET  /api/models``          models exposed by the active provider
@@ -30,6 +31,7 @@ import binascii
 import json
 import mimetypes
 import re
+import sys
 import threading
 import time
 from pathlib import Path
@@ -157,6 +159,16 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
             "bridge": client.info.to_dict() if client.info else None,
             "settings": client.get_status(),
         }
+
+    @app.get("/api/doctor")
+    async def doctor(offline: bool = False) -> dict[str, Any]:
+        """Run the self-check and return a JSON health report."""
+        from ..diagnostics import run_checks
+
+        server = _server_of(client)
+        active = server.handlers.settings if server is not None else settings
+        report = await asyncio.to_thread(run_checks, active, network=not offline)
+        return report.to_dict()
 
     @app.get("/api/actions")
     async def actions() -> list[str]:

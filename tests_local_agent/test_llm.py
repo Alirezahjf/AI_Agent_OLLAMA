@@ -267,3 +267,147 @@ def test_openai_client_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     with pytest.raises(LLMTimeout):
         client.complete([{"role": "user", "content": "hi"}], [])
+
+
+# ---------------------------------------------------------------------------
+# Streaming (complete_streaming)
+# ---------------------------------------------------------------------------
+
+
+class _FakeStream:
+    """Minimal stand-in for a streamed ``requests`` response."""
+
+    def __init__(self, lines: list[str], *, status_code: int = 200) -> None:
+        self._lines = lines
+        self.status_code = status_code
+        self.headers = {}
+        self.text = ""
+
+    def iter_lines(self, decode_unicode: bool = False):  # noqa: ARG002
+        yield from self._lines
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            import requests
+
+            raise requests.HTTPError(f"HTTP {self.status_code}")
+
+    def json(self) -> dict[str, Any]:
+        return {}
+
+
+def _openai_client() -> OpenAICompatibleClient:
+    return OpenAICompatibleClient(
+        LLMSettings(
+            provider="openai_compatible",
+            openai_base_url="https://x.test/v1",
+            openai_api_key="key",
+        )
+    )
+
+
+def _sse(payload: dict[str, Any]) -> str:
+    return "data: " + json.dumps(payload)
+
+
+def test_streaming_emits_deltas_and_preserves_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lines = [
+        _sse({"choices": [{"delta": {"content": "سلام "}}]}),
+        _sse({"choices": [{"delta": {"content": "دنیا"}}]}),
+        "data: [DONE]",
+    ]
+    monkeypatch.setattr(
+        "local_agent.llm.client.requests.post", lambda *a, **k: _FakeStream(lines)
+    )
+    seen: list[str] = []
+    reply = _openai_client().complete_streaming([], [], seen.append)
+    assert seen == ["سلام ", "دنیا"]
+    assert reply.content == "سلام دنیا"
+
+
+def test_streaming_reassembles_fragmented_tool_call_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lines = [
+        _sse({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_1", "function": {"name": "read_file", "arguments": ""}}
+        ]}}]}),
+        _sse({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": '{"pa'}}
+        ]}}]}),
+        _sse({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": 'th": "a.txt"}'}}
+        ]}}]}),
+        "data: [DONE]",
+    ]
+    monkeypatch.setattr(
+        "local_agent.llm.client.requests.post", lambda *a, **k: _FakeStream(lines)
+    )
+    reply = _openai_client().complete_streaming([], [], None)
+    assert len(reply.tool_calls) == 1
+    call = reply.tool_calls[0]
+    assert call.name == "read_file"
+    assert call.arguments == {"path": "a.txt"}
+    assert call.id == "call_1"
+
+
+def test_streaming_handles_parallel_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    lines = [
+        _sse({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "a", "function": {"name": "one", "arguments": "{}"}},
+            {"index": 1, "id": "b", "function": {"name": "two", "arguments": "{}"}},
+        ]}}]}),
+        "data: [DONE]",
+    ]
+    monkeypatch.setattr(
+        "local_agent.llm.client.requests.post", lambda *a, **k: _FakeStream(lines)
+    )
+    reply = _openai_client().complete_streaming([], [], None)
+    assert [c.name for c in reply.tool_calls] == ["one", "two"]
+    assert [c.id for c in reply.tool_calls] == ["a", "b"]
+
+
+def test_streaming_falls_back_to_blocking_on_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[bool] = []
+
+    def fake_post(url: str, **kwargs: Any):
+        streaming = bool(kwargs.get("stream"))
+        calls.append(streaming)
+        if streaming:
+            return _FakeStream([], status_code=500)
+        return _FakeResponse({"choices": [{"message": {"content": "fallback"}}]})
+
+    monkeypatch.setattr("local_agent.llm.client.requests.post", fake_post)
+    reply = _openai_client().complete_streaming([], [], None)
+    assert reply.content == "fallback"
+    assert calls == [True, False]
+
+
+def test_streaming_falls_back_when_the_stream_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_post(url: str, **kwargs: Any):
+        if kwargs.get("stream"):
+            return _FakeStream(["data: [DONE]"])
+        return _FakeResponse({"choices": [{"message": {"content": "recovered"}}]})
+
+    monkeypatch.setattr("local_agent.llm.client.requests.post", fake_post)
+    assert _openai_client().complete_streaming([], [], None).content == "recovered"
+
+
+def test_streaming_ignores_malformed_sse_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    lines = [
+        "",
+        "event: ping",
+        "data: {not json",
+        _sse({"choices": [{"delta": {"content": "ok"}}]}),
+        "data: [DONE]",
+    ]
+    monkeypatch.setattr(
+        "local_agent.llm.client.requests.post", lambda *a, **k: _FakeStream(lines)
+    )
+    assert _openai_client().complete_streaming([], [], None).content == "ok"

@@ -48,6 +48,7 @@ Available commands (type /<command> or just chat normally):
 
   /help               show this help
   /status             show model, status, working directory
+  /doctor             run the installation self-check (بررسی سلامت)
   /actions            list every action the agent can call
   /model NAME         switch the model at runtime
   /provider NAME      switch provider (ollama | openai_compatible | auto)
@@ -184,6 +185,8 @@ class _REPL:
             self.renderer.print(HELP_TEXT.strip())
         elif cmd == "/status":
             self._cmd_status()
+        elif cmd == "/doctor":
+            self._cmd_doctor()
         elif cmd == "/actions":
             self._cmd_actions()
         elif cmd == "/model":
@@ -227,6 +230,17 @@ class _REPL:
             self.renderer.info(f"  history.{key}: {value}")
         if status.get("actions"):
             self.renderer.info(f"  actions: {len(status['actions'])} registered")
+
+    def _cmd_doctor(self) -> None:
+        from ..diagnostics import run_checks
+
+        self.renderer.info("در حال بررسی سلامت…")
+        try:
+            report = run_checks(self.settings)
+        except Exception as exc:  # noqa: BLE001
+            self.renderer.warn(f"self-check failed: {exc}")
+            return
+        self.renderer.print(report.render())
 
     def _cmd_actions(self) -> None:
         try:

@@ -180,6 +180,23 @@ class _BaseBot:
         for chunk in [text[i : i + 3500] for i in range(0, len(text), 3500)]:
             await update.effective_message.reply_text(chunk)
 
+    async def doctor_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Run the self-check remotely and report it in Persian."""
+        if await self.deny_if_needed(update):
+            return
+        from ...diagnostics import run_checks
+
+        note = await update.effective_message.reply_text("🩺 در حال بررسی سلامت…")
+        try:
+            report = await asyncio.to_thread(run_checks, self.settings)
+        except Exception as exc:  # noqa: BLE001
+            await note.edit_text(f"❌ بررسی ناموفق: {exc}")
+            return
+        text = report.render()
+        await note.edit_text(text[:4000])
+        for chunk in [text[i : i + 4000] for i in range(4000, len(text), 4000)]:
+            await update.effective_message.reply_text(chunk)
+
     async def reset_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if await self.deny_if_needed(update):
             return
@@ -382,6 +399,8 @@ class _BaseBot:
             await update.callback_query.message.reply_text(
                 "🧹 حافظهٔ Bridge پاک شد.", reply_markup=self._menu()
             )
+        elif action == "doctor":
+            await self.doctor_cmd(update, context)
         elif action == "help":
             await update.callback_query.message.reply_text(
                 self._help_text(), reply_markup=self._menu()
@@ -409,6 +428,7 @@ class _BaseBot:
                     InlineKeyboardButton("🧹 پاک‌کردن حافظه", callback_data="menu:reset"),
                 ],
                 [
+                    InlineKeyboardButton("🩺 سلامت", callback_data="menu:doctor"),
                     InlineKeyboardButton("❓ راهنما", callback_data="menu:help"),
                 ],
             ]
@@ -436,6 +456,7 @@ class _BaseBot:
             "  /status — وضعیت مدل و پوشهٔ کاری\n"
             "  /actions — فهرست ابزارها\n"
             "  /history — آخرین پیام‌ها\n"
+            "  /doctor — بررسی سلامت نصب و اتصال مدل\n"
             "  /model NAME — تغییر مدل\n"
             "  /reset — پاک کردن حافظه\n\n"
             "کارهای خطرناک قبل از اجرا از شما تأیید می‌گیرند."
@@ -486,6 +507,7 @@ class BridgeTelegramBot(_BaseBot):
         app.add_handler(CommandHandler("reset", self.reset_cmd))
         app.add_handler(CommandHandler("model", self.set_model_cmd))
         app.add_handler(CommandHandler("history", self.history_cmd))
+        app.add_handler(CommandHandler("doctor", self.doctor_cmd))
         app.add_handler(CallbackQueryHandler(self.callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.text_handler))
         return app
@@ -510,6 +532,7 @@ class BridgeBaleBot(BridgeTelegramBot):
         app.add_handler(CommandHandler("reset", self.reset_cmd))
         app.add_handler(CommandHandler("model", self.set_model_cmd))
         app.add_handler(CommandHandler("history", self.history_cmd))
+        app.add_handler(CommandHandler("doctor", self.doctor_cmd))
         app.add_handler(CallbackQueryHandler(self.callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.text_handler))
         return app

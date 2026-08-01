@@ -182,6 +182,9 @@ class DesktopApi:
     def check_updates(self) -> dict[str, Any]:
         return self._app.check_updates(force=True)
 
+    def run_doctor(self) -> dict[str, Any]:
+        return self._app.run_doctor()
+
 
 # ---------------------------------------------------------------------------
 # The application
@@ -469,6 +472,44 @@ class DesktopApp:
             f"پوشهٔ کاری: {self.settings.work_dir}\nکلید میان‌بر: {self.config.hotkey}",
         )
 
+    def open_doctor(self) -> None:
+        """Bring the window forward with the health panel open."""
+        self.show_window()
+        if self.window is None:
+            return
+        try:
+            self.window.evaluate_js(
+                "window.Alpine && Alpine.$data(document.getElementById('app')).openDoctor()"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def run_doctor(self) -> dict[str, Any]:
+        """Run the self-check and surface failures as a native notification."""
+        from ..diagnostics import run_checks
+
+        report = run_checks(self.settings)
+        failures = [r for r in report.results if r.status == "fail"]
+        if failures:
+            self.notify(
+                "بررسی سلامت: مشکل پیدا شد",
+                failures[0].detail or failures[0].title,
+            )
+        return report.to_dict()
+
+    def _run_doctor_async(self) -> None:
+        """Health-check in the background so a bad config is caught early."""
+
+        def worker() -> None:
+            time.sleep(3)
+            try:
+                report = self.run_doctor()
+                logger.info("startup self-check: %s", report.get("summary"))
+            except Exception:  # noqa: BLE001
+                logger.debug("startup self-check failed", exc_info=True)
+
+        threading.Thread(target=worker, name="desktop-doctor", daemon=True).start()
+
     def open_settings(self) -> None:
         """Show the window and pop the settings modal in the UI."""
         self.show_window()
@@ -492,6 +533,7 @@ class DesktopApp:
                 on_open_workspace=self.open_workspace,
                 on_settings=self.open_settings,
                 on_check_updates=lambda: self.check_updates(force=True),
+                on_doctor=self.open_doctor,
                 on_about=self.show_about,
                 on_quit=self.quit,
             )
@@ -539,6 +581,7 @@ class DesktopApp:
         self.start_tray()
         self.start_hotkey()
         self._check_updates_async()
+        self._run_doctor_async()
 
         state = self.info()
         logger.info(
@@ -579,6 +622,11 @@ def run(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-updates", action="store_true", help="skip the update check")
     parser.add_argument("--debug", action="store_true", help="open the webview devtools")
     parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="فقط بررسی سلامت را اجرا کن و خارج شو",
+    )
+    parser.add_argument(
         "--browser",
         action="store_true",
         help="serve the UI and open the system browser instead of a native window",
@@ -588,6 +636,13 @@ def run(argv: list[str] | None = None) -> int:
     settings = load_settings()
     setup_logging(settings.data_dir)
     log_platform_summary()
+
+    if args.doctor:
+        from ..diagnostics import run_checks
+
+        report = run_checks(settings)
+        print(report.render())
+        return 0 if report.status != "fail" else 1
 
     config = DesktopConfig.from_env()
 
@@ -643,6 +698,16 @@ def run(argv: list[str] | None = None) -> int:
             app.start_tray()
         app.start_hotkey()
         print(f"UI: {url}")
+        try:
+            from ..diagnostics import run_checks
+
+            report = run_checks(app.settings)
+            print(f"🩺 بررسی سلامت: {report.summary}")
+            for result in report.results:
+                if result.status != "ok":
+                    print(f"   {result.icon} {result.title} — {result.detail}")
+        except Exception:  # noqa: BLE001
+            logger.debug("startup self-check failed", exc_info=True)
         try:
             webbrowser.open(url)
         except Exception:  # noqa: BLE001

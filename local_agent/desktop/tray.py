@@ -107,6 +107,7 @@ class TrayCallbacks:
     on_open_workspace: Callable[[], None] | None = None
     on_settings: Callable[[], None] | None = None
     on_check_updates: Callable[[], None] | None = None
+    on_doctor: Callable[[], None] | None = None
     on_about: Callable[[], None] | None = None
     on_quit: Callable[[], None] | None = None
 
@@ -176,6 +177,7 @@ class TrayManager:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("باز کردن پوشهٔ کاری", wrap(cb.on_open_workspace)),
             pystray.MenuItem("تنظیمات", wrap(cb.on_settings)),
+            pystray.MenuItem("بررسی سلامت", wrap(cb.on_doctor)),
             pystray.MenuItem("بررسی به‌روزرسانی", wrap(cb.on_check_updates)),
             pystray.MenuItem("درباره", wrap(cb.on_about)),
             pystray.Menu.SEPARATOR,

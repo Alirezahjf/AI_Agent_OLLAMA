@@ -409,8 +409,29 @@ class BridgeHandlers:
                 payload={"turn": turn + 1, "max_turns": max_turns},
                 run_id=run_id,
             ))
+            streamed = False
+
+            def emit_delta(piece: str) -> None:
+                """Push each token to the frontends as it arrives."""
+                nonlocal streamed
+                if stop_event.is_set() or not piece:
+                    return
+                streamed = True
+                self.event_bus.publish(Event(
+                    type=EventType.ASSISTANT_DELTA.value,
+                    payload={"text": piece},
+                    run_id=run_id,
+                ))
+
+            # ``complete_streaming`` is optional: any object exposing the
+            # plain ``complete`` method (including test doubles and third
+            # party clients) still works.
+            stream = getattr(client, "complete_streaming", None)
             try:
-                reply = client.complete(self._build_messages(), tools)
+                if callable(stream):
+                    reply = stream(self._build_messages(), tools, emit_delta)
+                else:
+                    reply = client.complete(self._build_messages(), tools)
             except Exception as exc:  # noqa: BLE001
                 self.event_bus.publish(Event(
                     type=EventType.CHAT_FAILED.value,
@@ -419,12 +440,14 @@ class BridgeHandlers:
                 ))
                 return
             if reply.content:
-                # Emit assistant_delta for streaming frontends
-                self.event_bus.publish(Event(
-                    type=EventType.ASSISTANT_DELTA.value,
-                    payload={"text": reply.content},
-                    run_id=run_id,
-                ))
+                if not streamed:
+                    # Provider did not stream; emit the text in one go so
+                    # frontends still receive a delta before the final.
+                    self.event_bus.publish(Event(
+                        type=EventType.ASSISTANT_DELTA.value,
+                        payload={"text": reply.content},
+                        run_id=run_id,
+                    ))
                 self.runtime.append(ConversationMessage(role="assistant", content=reply.content))
                 self.event_bus.publish(Event(
                     type=EventType.ASSISTANT_FINAL.value,
