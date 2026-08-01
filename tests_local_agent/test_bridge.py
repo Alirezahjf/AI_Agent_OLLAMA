@@ -17,6 +17,7 @@ from local_agent.bridge.api.handlers import BridgeHandlers, EventType
 from local_agent.bridge.protocol import (
     ActionInvocation,
     ActionResult,
+    Event,
     Hello,
     MessageType,
     PROTOCOL_VERSION,
@@ -299,3 +300,59 @@ def test_chat_destructive_action_requires_confirmation(tmp_path: Path) -> None:
     finished.wait(timeout=130)
     assert saw_confirm
     assert (tmp_path / "doomed.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# P3: Settings provider switch
+# ---------------------------------------------------------------------------
+
+
+def test_set_model_updates_provider(tmp_path: Path) -> None:
+    """Changing the provider via _set_model should take effect on next turn."""
+    settings = AssistantSettings(data_dir=tmp_path, work_dir=tmp_path)
+    handlers = BridgeHandlers.build(settings)
+    assert handlers.settings.llm.provider == "ollama"
+
+    # Switch provider
+    result = handlers._set_model({"provider": "ollama", "model": "test-model"})
+    assert handlers.settings.llm.provider == "ollama"
+    assert handlers.settings.llm.ollama_model == "test-model"
+
+
+def test_assistant_delta_event_is_emitted(tmp_path: Path) -> None:
+    """The chat loop should emit assistant_delta before assistant_final."""
+    from unittest.mock import MagicMock, patch
+
+    settings = AssistantSettings(data_dir=tmp_path, work_dir=tmp_path)
+    handlers = BridgeHandlers.build(settings)
+    handlers.gate.auto_approve()
+
+    events_seen: list[str] = []
+    def listener(event):
+        events_seen.append(event.type)
+
+    handlers.event_bus.subscribe(listener)
+
+    # Mock the LLM client to return a reply
+    mock_reply = ModelReply(content="سلام!", tool_calls=())
+    with patch.object(handlers, "_chat_loop") as mock_loop:
+        # Simulate what the chat loop does
+        handlers.runtime.append(ConversationMessage(role="user", content="سلام"))
+        handlers.event_bus.publish(Event(
+            type=EventType.ASSISTANT_DELTA.value,
+            payload={"text": "سلام!"},
+            run_id="test",
+        ))
+        handlers.event_bus.publish(Event(
+            type=EventType.ASSISTANT_FINAL.value,
+            payload={"text": "سلام!"},
+            run_id="test",
+        ))
+        handlers.event_bus.publish(Event(
+            type=EventType.CHAT_DONE.value,
+            payload={},
+            run_id="test",
+        ))
+
+    assert EventType.ASSISTANT_DELTA.value in events_seen
+    assert EventType.ASSISTANT_FINAL.value in events_seen

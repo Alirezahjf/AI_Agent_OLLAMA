@@ -99,6 +99,11 @@ class AssistantSettings:
     llm: LLMSettings = field(default_factory=LLMSettings)
     telegram: TelegramSettings = field(default_factory=TelegramSettings)
     safety: SafetySettings = field(default_factory=SafetySettings)
+    # Bot tokens (used by the Telegram/Bale bot)
+    telegram_token: str = ""
+    bale_token: str = ""
+    bale_base_url: str = "https://tapi.bale.ai"
+    allowed_user_ids: frozenset[int] = field(default_factory=frozenset)
     extra: dict[str, str] = field(default_factory=dict)
 
     # ---- Convenience accessors -------------------------------------------
@@ -129,6 +134,9 @@ class AssistantSettings:
         payload = asdict(self)
         payload["data_dir"] = str(self.data_dir)
         payload["work_dir"] = str(self.work_dir)
+        # Convert frozenset to list for JSON serialization
+        if "allowed_user_ids" in payload and isinstance(payload["allowed_user_ids"], frozenset):
+            payload["allowed_user_ids"] = list(payload["allowed_user_ids"])
         return payload
 
     @classmethod
@@ -153,12 +161,22 @@ class AssistantSettings:
             data_dir = Path(payload.get("data_dir", _default_data_dir())).expanduser()
             work_dir = Path(payload.get("work_dir", str(Path.cwd()))).expanduser()
             extra = payload.get("extra") or {}
+            # Bot tokens
+            telegram_token = str(payload.get("telegram_token", ""))
+            bale_token = str(payload.get("bale_token", ""))
+            bale_base_url = str(payload.get("bale_base_url", "https://tapi.bale.ai"))
+            raw_ids = payload.get("allowed_user_ids") or []
+            allowed_ids = frozenset(int(i) for i in raw_ids if isinstance(i, (int, float)))
             return cls(
                 data_dir=data_dir,
                 work_dir=work_dir,
                 llm=llm,
                 telegram=tg,
                 safety=safety,
+                telegram_token=telegram_token,
+                bale_token=bale_token,
+                bale_base_url=bale_base_url,
+                allowed_user_ids=allowed_ids,
                 extra={str(k): str(v) for k, v in extra.items()},
             )
         except (TypeError, ValueError) as exc:
