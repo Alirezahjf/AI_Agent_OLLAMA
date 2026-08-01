@@ -43,14 +43,14 @@ from pydantic import BaseModel
 from ..bridge import BridgeClient
 from ..core.config import AssistantSettings
 from ..core.logging_setup import get_logger, setup_logging
+from ..utils.paths import web_static_dir, web_templates_dir
 
 
 logger = get_logger("web")
 
 
-HERE = Path(__file__).resolve().parent
-TEMPLATES = HERE / "templates"
-STATIC = HERE / "static"
+TEMPLATES = web_templates_dir()
+STATIC = web_static_dir()
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 

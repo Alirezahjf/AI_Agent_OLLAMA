@@ -466,7 +466,7 @@ def test_backend_boots_and_serves_the_ui(app: DesktopApp) -> None:
 def test_spec_contains_entry_point_and_assets() -> None:
     spec = build.build_spec(icon=None, onefile=True)
     assert "Analysis(" in spec and "EXE(" in spec
-    assert "__main__.py" in spec
+    assert "launcher.py" in spec
     assert "local_agent/web/templates" in spec
     assert "local_agent/web/static" in spec
     assert "webview" in spec and "pystray" in spec
@@ -497,3 +497,113 @@ def test_installer_script_is_well_formed() -> None:
         assert section in text
     assert "PersianLocalAssistant.exe" in text
     assert "WebView2" in text  # runtime check present
+
+
+# ---------------------------------------------------------------------------\n# P0-1: launcher.py and __main__.py entry points
+# ---------------------------------------------------------------------------
+
+
+def test_launcher_module_exists() -> None:
+    """The PyInstaller entry point must use absolute imports."""
+    root = Path(__file__).resolve().parents[1] / "local_agent" / "desktop"
+    launcher = root / "launcher.py"
+    assert launcher.is_file(), "launcher.py is missing"
+    source = launcher.read_text(encoding="utf-8")
+    # Must NOT use relative imports
+    assert "from .app import run" not in source
+    # Must use absolute import
+    assert "from local_agent.desktop.app import run" in source
+    # Must include freeze_support
+    assert "freeze_support" in source
+
+
+def test_spec_references_launcher_not_dunder_main() -> None:
+    """The generated spec must point at launcher.py, not __main__.py."""
+    spec = build.build_spec(icon=None, onefile=True)
+    assert "launcher.py" in spec
+    # __main__.py should NOT appear in the Analysis entry point
+    # (it may appear in datas, but not as the main script)
+    for line in spec.splitlines():
+        if line.strip().startswith("[") and "launcher.py" in line:
+            # Entry point line — should reference launcher.py
+            assert "__main__.py" not in line
+
+
+def test_desktop_dunder_main_works_as_script() -> None:
+    """``python local_agent/desktop/__main__.py --help`` must exit 0."""
+    import subprocess
+
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(root / "local_agent" / "desktop" / "__main__.py"), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, f"__main__.py --help failed: {result.stderr}"
+    assert "persian-local-desktop" in result.stdout.lower()
+
+
+def test_top_level_dunder_main_works_as_script() -> None:
+    """``python local_agent/__main__.py --help`` must exit 0."""
+    import subprocess
+
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(root / "local_agent" / "__main__.py"), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    # The CLI --help prints help and exits 0
+    assert result.returncode == 0, f"__main__.py --help failed: {result.stderr}"
+
+
+# ---------------------------------------------------------------------------\n# P0-2: resource_root / frozen path handling
+# ---------------------------------------------------------------------------
+
+
+def test_resource_root_returns_package_dir_in_source() -> None:
+    from local_agent.utils.paths import resource_root
+
+    root = resource_root()
+    assert root.is_dir()
+    # In source mode, it should be the local_agent/ package root
+    assert (root / "utils").is_dir()
+    assert (root / "web").is_dir()
+
+
+def test_resource_root_returns_meipass_when_frozen() -> None:
+    from local_agent.utils import paths
+
+    original = getattr(sys, "_MEIPASS", None)
+    try:
+        sys._MEIPASS = "/tmp/fake_meipass"  # type: ignore[attr-defined]
+        # Re-import to get the new value
+        import importlib
+
+        importlib.reload(paths)
+        root = paths.resource_root()
+        assert str(root) == "/tmp/fake_meipass"
+    finally:
+        if original is None:
+            del sys._MEIPASS  # type: ignore[attr-defined]
+        else:
+            sys._MEIPASS = original  # type: ignore[attr-defined]
+        importlib.reload(paths)
+
+
+def test_web_templates_dir_uses_resource_root() -> None:
+    from local_agent.utils.paths import web_templates_dir
+
+    templates = web_templates_dir()
+    assert str(templates).endswith("web/templates")
+    assert (templates / "index.html").is_file()
+
+
+def test_web_static_dir_uses_resource_root() -> None:
+    from local_agent.utils.paths import web_static_dir
+
+    static = web_static_dir()
+    assert str(static).endswith("web/static")
+    assert (static / "app.js").is_file()
