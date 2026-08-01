@@ -47,6 +47,7 @@ _TRANSIENT_STATUS = {408, 425, 429, 500, 502, 503, 504}
 class ToolCall:
     name: str
     arguments: dict[str, Any]
+    id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -559,6 +560,8 @@ def _extract_tool_calls(raw_calls: Any) -> Iterable[ToolCall]:
                 arguments = json.loads(arguments or "{}")
             except json.JSONDecodeError:
                 continue
+        raw_id = raw.get("id")
+        call_id = str(raw_id) if isinstance(raw_id, (str, int)) and str(raw_id) else None
         if isinstance(name, str) and isinstance(arguments, dict):
-            calls.append(ToolCall(name=name, arguments=arguments))
+            calls.append(ToolCall(name=name, arguments=arguments, id=call_id))
     return calls

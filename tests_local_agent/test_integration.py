@@ -183,3 +183,72 @@ def test_scenario_set_model_persists(tmp_path: Path) -> None:
     # scripted LLM that was injected for the chat loop has its own
     # model_name so we may see it instead.
     assert "model" in result
+
+
+def test_scenario_tool_messages_follow_assistant_tool_calls(tmp_path: Path) -> None:
+    """OpenAI-compatible providers reject a 'tool' message that is not
+    preceded by an assistant message carrying matching tool_calls."""
+    replies = [
+        ModelReply(content="", tool_calls=(ToolCall(name="read_file", arguments={"path": "a.txt"}),)),
+        ModelReply(content="done"),
+    ]
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+    client, handlers = _setup(tmp_path, replies)
+    _drain_chat(client, "read a.txt")
+
+    messages = handlers._build_messages()
+    tool_indexes = [i for i, m in enumerate(messages) if m["role"] == "tool"]
+    assert tool_indexes, "expected at least one tool message"
+    for idx in tool_indexes:
+        previous = messages[idx - 1]
+        assert previous["role"] == "assistant"
+        ids = [c["id"] for c in previous.get("tool_calls", [])]
+        assert messages[idx]["tool_call_id"] in ids
+        # arguments must be a JSON string, per the OpenAI schema
+        for call in previous["tool_calls"]:
+            assert isinstance(call["function"]["arguments"], str)
+    assert not any(m.get("content", "").startswith("[tool_call]") for m in messages)
+
+
+def test_scenario_repeated_tool_calls_get_unique_ids(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+    replies = [
+        ModelReply(content="", tool_calls=(
+            ToolCall(name="read_file", arguments={"path": "a.txt"}),
+            ToolCall(name="read_file", arguments={"path": "a.txt"}),
+        )),
+        ModelReply(content="done"),
+    ]
+    client, handlers = _setup(tmp_path, replies)
+    _drain_chat(client, "read it twice")
+    messages = handlers._build_messages()
+    ids = [m["tool_call_id"] for m in messages if m["role"] == "tool"]
+    assert len(ids) == 2 and len(set(ids)) == 2
+
+
+def test_scenario_screen_capture_is_always_registered(tmp_path: Path) -> None:
+    client, handlers = _setup(tmp_path, [])
+    assert "screen_capture" in [a.name for a in handlers.registry.all()]
+
+
+def test_scenario_set_model_writes_config_to_disk(tmp_path: Path) -> None:
+    import json
+
+    client, handlers = _setup(tmp_path, [])
+    client.set_model(provider="openai_compatible", model="claude-sonnet-5")
+    payload = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert payload["llm"]["provider"] == "openai_compatible"
+    assert payload["llm"]["openai_model"] == "claude-sonnet-5"
+
+
+def test_status_warns_when_ollama_is_unreachable(tmp_path: Path) -> None:
+    from local_agent.bridge.api import handlers as handlers_mod
+
+    original = handlers_mod._ollama_reachable
+    handlers_mod._ollama_reachable = lambda *a, **k: False  # type: ignore[assignment]
+    try:
+        client, _ = _setup(tmp_path, [])
+        warnings = client.get_status().get("warnings", [])
+    finally:
+        handlers_mod._ollama_reachable = original  # type: ignore[assignment]
+    assert any("Ollama" in w for w in warnings)

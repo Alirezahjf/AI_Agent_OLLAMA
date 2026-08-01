@@ -26,6 +26,7 @@ class ConversationMessage:
     content: str
     name: str | None = None  # tool name for tool messages
     tool_call_id: str | None = None  # for OpenAI-compatible providers
+    tool_calls: list[dict[str, Any]] | None = None  # assistant tool_calls (OpenAI shape)
     timestamp: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
@@ -34,6 +35,7 @@ class ConversationMessage:
             "content": self.content,
             "name": self.name,
             "tool_call_id": self.tool_call_id,
+            "tool_calls": self.tool_calls,
             "timestamp": self.timestamp,
         }
 
@@ -44,6 +46,7 @@ class ConversationMessage:
             content=str(payload.get("content", "")),
             name=payload.get("name"),
             tool_call_id=payload.get("tool_call_id"),
+            tool_calls=payload.get("tool_calls") or None,
             timestamp=float(payload.get("timestamp", time.time())),
         )
 
@@ -55,6 +58,15 @@ class ConversationMessage:
                 "content": self.content,
                 "tool_call_id": self.tool_call_id or "",
             }
+        if self.role == "assistant" and self.tool_calls:
+            out: dict[str, Any] = {
+                "role": "assistant",
+                "content": self.content or "",
+                "tool_calls": self.tool_calls,
+            }
+            if self.name:
+                out["name"] = self.name
+            return out
         if self.role == "assistant" and self.name:
             return {"role": "assistant", "content": self.content, "name": self.name}
         return {"role": self.role, "content": self.content}

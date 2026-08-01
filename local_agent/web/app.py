@@ -206,6 +206,7 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                     safety=type(handlers.settings.safety)(**safety)
                 )
             handlers.settings = new_settings
+            handlers._persist_settings()
         if not payload:
             return {"provider": req.provider or "", "model": req.model or ""}
         try:

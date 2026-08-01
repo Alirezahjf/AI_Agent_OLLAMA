@@ -211,6 +211,7 @@
       },
 
       status: {},
+      warnings: [],
       toasts: [],
       attachments: [],
 
@@ -523,6 +524,7 @@
         try {
           const data = await this.api("/api/status");
           this.status = data || {};
+          this.warnings = (data && data.settings && data.settings.warnings) || [];
           const s = (data && data.settings && data.settings.settings) || {};
           this.form.provider = s.llm_provider || this.form.provider;
           this.form.model = s.llm_model || this.form.model;
@@ -565,6 +567,13 @@
         } finally {
           this.modelsLoading = false;
         }
+      },
+
+      useAvalai() {
+        this.form.provider = "openai_compatible";
+        this.form.openai_base_url = this.form.openai_base_url || "https://api.avalai.ir/v1";
+        if (!this.form.model || this.form.model.indexOf(":") !== -1) this.form.model = "gpt-4o-mini";
+        this.toast("info", "ℹ️", "کلید API خود را وارد کنید و ذخیره بزنید");
       },
 
       openSettings() {

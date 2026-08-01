@@ -129,6 +129,15 @@
   <main class="chat" @scroll.passive="onScroll($event)" x-ref="chatScroll">
     <div class="chat__inner">
 
+      <!-- Provider warnings (Ollama down, missing API key, ...) -->
+      <template x-for="w in warnings" :key="w">
+        <div class="notice" role="status">
+          <span aria-hidden="true">⚠️</span>
+          <p x-text="w"></p>
+          <button class="btn btn--ghost btn--sm" @click="openSettings()">باز کردن تنظیمات</button>
+        </div>
+      </template>
+
       <!-- Empty state -->
       <template x-if="messages.length === 0 && !busy">
         <section class="empty">
@@ -417,6 +426,10 @@
         </button>
       </header>
       <div class="modal__body">
+        <div class="field">
+          <button class="btn btn--ghost btn--sm" @click="useAvalai()">اتصال سریع به AvalAI</button>
+          <p class="field__hint">ارائه‌دهنده را روی «سازگار با OpenAI» و آدرس را روی https://api.avalai.ir/v1 تنظیم می‌کند؛ فقط کلید API را وارد کنید.</p>
+        </div>
         <div class="field">
           <label for="set-provider">ارائه‌دهندهٔ مدل</label>
           <select id="set-provider" x-model="form.provider">
