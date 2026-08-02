@@ -295,7 +295,11 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                     queue = server.handlers.event_bus.create_run_queue(run_id)
                     try:
                         while True:
-                            event = await asyncio.to_thread(queue.get, timeout=600)
+                            try:
+                                event = await asyncio.to_thread(queue.get, timeout=600)
+                            except Exception:
+                                # queue.Empty or thread timeout - treat as end of stream
+                                break
                             if event is None:
                                 break
                             await websocket.send_text(json.dumps({

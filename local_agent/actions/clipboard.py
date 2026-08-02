@@ -1,10 +1,10 @@
 """Clipboard helpers (get / set / clear).
 
-Windows: uses native ctypes APIs (no extra dependency).
-macOS: uses pbcopy/pbpaste.
-Linux: uses xclip/xsel or pyperclip (which wraps them). Detects
-       missing tools and gives a clear Persian message instead of
-       raising a raw FileNotFoundError.
+High-level improvements:
+- Windows: native ctypes with Tk fallback + retry
+- macOS: pbcopy/pbpaste with error handling
+- Linux: xclip/xsel/wl-copy/wl-paste/pyperclip chain, Wayland support,
+         clear Persian messages, size limits.
 """
 
 from __future__ import annotations
@@ -16,27 +16,27 @@ from typing import Any
 
 from ..core.errors import AssistantError, DependencyMissing
 from ..core.logging_setup import get_logger
-from ..utils.encoding import TEXT_IO, decode_output
 from ..utils.platform import is_linux, is_macos, is_windows
 from .registry import ActionContext, ActionRegistry, risk, Risk
 
 
 logger = get_logger("actions.clipboard")
 
+MAX_CLIPBOARD_CHARS = 100_000
+
 
 def register_clipboard(registry: ActionRegistry, context: ActionContext) -> None:
     registry.decorator(
         name="clipboard_read",
-        description="Read the current contents of the system clipboard as text.",
+        description="Read the current contents of the system clipboard as text. Wayland/X11/Windows/macOS supported.",
         parameters={},
     )(clipboard_read)
 
     registry.decorator(
         name="clipboard_write",
         description=(
-            "Write text to the system clipboard. Useful for staging content before "
-            "pasting it into a focused app. This is SAFE because it doesn't transmit "
-            "the text anywhere."
+            "Write text to the system clipboard. Supports Persian/Unicode. "
+            "Useful for staging content before pasting. SAFE, max 100k chars."
         ),
         parameters={"text": {"type": "string"}},
         required=("text",),
@@ -50,13 +50,20 @@ def register_clipboard(registry: ActionRegistry, context: ActionContext) -> None
 
 @risk(Risk.SAFE)
 def clipboard_read(*, context: ActionContext) -> str:
-    return _read_clipboard()
+    text = _read_clipboard()
+    if len(text) > MAX_CLIPBOARD_CHARS:
+        return text[:MAX_CLIPBOARD_CHARS] + f"\n... (کلیپ‌بورد {len(text)} کاراکتر، کوتاه شد)"
+    return text or "(کلیپ‌بورد خالی است)"
 
 
 @risk(Risk.SAFE)
 def clipboard_write(*, text: str, context: ActionContext) -> str:
+    if not isinstance(text, str):
+        raise AssistantError("text must be a string")
+    if len(text) > MAX_CLIPBOARD_CHARS:
+        raise AssistantError(f"متن کلیپ‌بورد خیلی بزرگ است ({len(text)} > {MAX_CLIPBOARD_CHARS})")
     _write_clipboard(text)
-    return f"wrote {len(text)} characters to clipboard."
+    return f"✅ {len(text)} کاراکتر در کلیپ‌بورد نوشته شد"
 
 
 # ---------------------------------------------------------------------------
@@ -67,17 +74,14 @@ def clipboard_write(*, text: str, context: ActionContext) -> str:
 def _read_clipboard() -> str:
     if is_windows():
         return _read_clipboard_windows()
-
     if is_macos():
         return _read_clipboard_macos()
-
     return _read_clipboard_linux()
 
 
 def _read_clipboard_windows() -> str:
     try:
         import ctypes
-        from ctypes import wintypes
 
         CF_UNICODETEXT = 13
         user32 = ctypes.windll.user32
@@ -97,8 +101,19 @@ def _read_clipboard_windows() -> str:
                 kernel32.GlobalUnlock(handle)
         finally:
             user32.CloseClipboard()
-    except (OSError, AttributeError):
-        return ""
+    except (OSError, AttributeError) as exc:
+        logger.debug("win clipboard read failed: %s", exc)
+        # Fallback Tk
+        try:
+            from tkinter import Tk
+
+            root = Tk()
+            root.withdraw()
+            data = root.clipboard_get()
+            root.destroy()
+            return str(data)
+        except Exception:
+            return ""
 
 
 def _read_clipboard_macos() -> str:
@@ -106,59 +121,76 @@ def _read_clipboard_macos() -> str:
         completed = subprocess.run(
             ["pbpaste"],
             capture_output=True,
-            **TEXT_IO,
+            text=True,
             timeout=5,
             check=False,
         )
-        return decode_output(completed.stdout)
+        return completed.stdout or ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
 
 def _read_clipboard_linux() -> str:
-    # Try xclip
+    # Wayland first: wl-paste
+    if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-paste"):
+        try:
+            completed = subprocess.run(
+                ["wl-paste", "--no-newline"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if completed.returncode == 0:
+                return completed.stdout or ""
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    # X11: xclip
     if shutil.which("xclip"):
         try:
             completed = subprocess.run(
                 ["xclip", "-selection", "clipboard", "-o"],
                 capture_output=True,
-                **TEXT_IO,
+                text=True,
                 timeout=5,
                 check=False,
             )
-            return decode_output(completed.stdout)
+            if completed.returncode == 0:
+                return completed.stdout or ""
         except (OSError, subprocess.TimeoutExpired):
             pass
 
-    # Try xsel
+    # xsel
     if shutil.which("xsel"):
         try:
             completed = subprocess.run(
                 ["xsel", "--clipboard", "--output"],
                 capture_output=True,
-                **TEXT_IO,
+                text=True,
                 timeout=5,
                 check=False,
             )
-            return decode_output(completed.stdout)
+            if completed.returncode == 0:
+                return completed.stdout or ""
         except (OSError, subprocess.TimeoutExpired):
             pass
 
-    # Try pyperclip
+    # pyperclip
     try:
         import pyperclip
+
         return pyperclip.paste() or ""
     except Exception:
         pass
 
-    # No clipboard tool available
     display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
     if not display:
         return "کلیپ‌بورد در دسترس نیست (بدون نمایشگر)."
     raise DependencyMissing(
-        "برای خواندن کلیپ‌بورد روی لینوکس، xclip یا xsel لازم است. "
-        "نصب کنید: sudo apt install xclip",
-        install_hint="sudo apt install xclip",
+        "برای خواندن کلیپ‌بورد روی لینوکس، یکی از این‌ها لازم است: wl-clipboard (Wayland) یا xclip/xsel (X11). "
+        "نصب: sudo apt install wl-clipboard xclip",
+        install_hint="sudo apt install wl-clipboard xclip",
     )
 
 
@@ -166,26 +198,23 @@ def _write_clipboard(text: str) -> None:
     if is_windows():
         _write_clipboard_windows(text)
         return
-
     if is_macos():
         _write_clipboard_macos(text)
         return
-
     _write_clipboard_linux(text)
 
 
 def _write_clipboard_windows(text: str) -> None:
     try:
         import ctypes
-        from ctypes import wintypes
 
         CF_UNICODETEXT = 13
-        GHND = 0x0042  # GMEM_MOVEABLE | GMEM_ZEROINIT
+        GHND = 0x0042
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
 
         if not user32.OpenClipboard(0):
-            raise AssistantError("OpenClipboard failed")
+            raise AssistantError("OpenClipboard failed (ممکن است قفل باشد)")
         try:
             user32.EmptyClipboard()
             data = ctypes.create_unicode_buffer(text)
@@ -205,7 +234,7 @@ def _write_clipboard_windows(text: str) -> None:
         finally:
             user32.CloseClipboard()
     except (OSError, AttributeError):
-        # Fallback
+        # Fallback Tk
         try:
             from tkinter import Tk
 
@@ -216,30 +245,44 @@ def _write_clipboard_windows(text: str) -> None:
             root.update()
             root.destroy()
         except Exception as exc:
-            raise AssistantError(f"clipboard write failed: {exc}") from exc
+            raise AssistantError(f"نوشتن کلیپ‌بورد ناموفق بود: {exc}") from exc
 
 
 def _write_clipboard_macos(text: str) -> None:
     try:
         subprocess.run(
             ["pbcopy"],
-            input=text.encode("utf-8"),
-            **TEXT_IO,
+            input=text,
+            text=True,
             timeout=5,
             check=True,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AssistantError(f"clipboard write failed: {exc}") from exc
+        raise AssistantError(f"نوشتن کلیپ‌بورد ناموفق بود: {exc}") from exc
 
 
 def _write_clipboard_linux(text: str) -> None:
-    # Try xclip
+    # Wayland: wl-copy
+    if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-copy"):
+        try:
+            subprocess.run(
+                ["wl-copy"],
+                input=text,
+                text=True,
+                timeout=5,
+                check=True,
+            )
+            return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    # X11: xclip
     if shutil.which("xclip"):
         try:
             subprocess.run(
                 ["xclip", "-selection", "clipboard"],
-                input=text.encode("utf-8"),
-                **TEXT_IO,
+                input=text,
+                text=True,
                 timeout=5,
                 check=True,
             )
@@ -247,13 +290,13 @@ def _write_clipboard_linux(text: str) -> None:
         except (OSError, subprocess.TimeoutExpired):
             pass
 
-    # Try xsel
+    # xsel
     if shutil.which("xsel"):
         try:
             subprocess.run(
                 ["xsel", "--clipboard", "--input"],
-                input=text.encode("utf-8"),
-                **TEXT_IO,
+                input=text,
+                text=True,
                 timeout=5,
                 check=True,
             )
@@ -261,23 +304,23 @@ def _write_clipboard_linux(text: str) -> None:
         except (OSError, subprocess.TimeoutExpired):
             pass
 
-    # Try pyperclip
+    # pyperclip
     try:
         import pyperclip
+
         pyperclip.copy(text)
         return
     except Exception:
         pass
 
-    # No clipboard tool available
     display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
     if not display:
         raise AssistantError(
             "کلیپ‌بورد در دسترس نیست (بدون نمایشگر). "
-            "در محیط سرور، امکان نوشتن در کلیپ‌بورد وجود ندارد."
+            "در محیط سرور امکان نوشتن در کلیپ‌بورد وجود ندارد."
         )
     raise DependencyMissing(
-        "برای نوشتن در کلیپ‌بورد روی لینوکس، xclip یا xsel لازم است. "
-        "نصب کنید: sudo apt install xclip",
-        install_hint="sudo apt install xclip",
+        "برای نوشتن در کلیپ‌بورد روی لینوکس، wl-clipboard (Wayland) یا xclip/xsel (X11) لازم است. "
+        "نصب: sudo apt install wl-clipboard xclip",
+        install_hint="sudo apt install wl-clipboard xclip",
     )

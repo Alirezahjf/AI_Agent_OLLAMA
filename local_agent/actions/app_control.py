@@ -20,7 +20,6 @@ from typing import Any
 
 from ..core.errors import AssistantError, DependencyMissing
 from ..core.logging_setup import get_logger
-from ..utils.encoding import TEXT_IO, decode_output
 from ..utils.platform import (
     Platform,
     capabilities,
@@ -83,6 +82,24 @@ _LINUX_ALIASES: dict[str, str] = {
     "pycharm": "pycharm-community",
     "intellij": "idea",
     "docker desktop": "docker",
+    # Persian aliases
+    "کروم": "google-chrome",
+    "مرورگر": "firefox",
+    "فایرفاکس": "firefox",
+    "تلگرام": "telegram-desktop",
+    "ماشین حساب": "gnome-calculator",
+    "ماشین‌حساب": "gnome-calculator",
+    "حسابگر": "gnome-calculator",
+    "فایل منیجر": "nautilus",
+    "مدیریت فایل": "nautilus",
+    "ترمینال": "gnome-terminal",
+    "مدیر وظایف": "gnome-system-monitor",
+    "تسک منیجر": "gnome-system-monitor",
+    "نوت‌پد": "gedit",
+    "دفترچه یادداشت": "gedit",
+    "ویدیو": "vlc",
+    "پخش کننده": "vlc",
+    "کد ویژوال": "code",
 }
 
 
@@ -215,6 +232,23 @@ def _friendly_to_real(name: str) -> str:
         "intellij": "idea64",
         "android studio": "studio64",
         "docker desktop": "docker",
+        # Persian
+        "کروم": "chrome",
+        "مرورگر": "chrome",
+        "فایرفاکس": "firefox",
+        "تلگرام": "telegram",
+        "ماشین حساب": "calc",
+        "ماشین‌حساب": "calc",
+        "اکسپلورر": "explorer",
+        "مدیریت فایل": "explorer",
+        "تسک منیجر": "taskmgr",
+        "مدیر وظایف": "taskmgr",
+        "نوت‌پد": "notepad",
+        "ورد": "winword",
+        "اکسل": "excel",
+        "پاورپوینت": "powerpnt",
+        "نقاشی": "mspaint",
+        "پینت": "mspaint",
     }
 
     linux_aliases = _LINUX_ALIASES
@@ -333,7 +367,7 @@ def _close_windows(real: str, force: bool) -> str:
         cmd.insert(1, flag)
     try:
         completed = subprocess.run(
-            cmd, capture_output=True, **TEXT_IO, timeout=15, check=False
+            cmd, capture_output=True, text=True, timeout=15, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise AssistantError(f"taskkill failed: {exc}") from exc
@@ -368,7 +402,7 @@ def _close_linux(real: str, name: str, force: bool) -> str:
         if flag:
             cmd.append(flag)
         cmd.append(real)
-        subprocess.run(cmd, capture_output=True, **TEXT_IO, check=False, timeout=10)
+        subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=10)
     except OSError as exc:
         raise AssistantError(f"pkill failed: {exc}") from exc
     return f"pkill {real} dispatched (force={force})."
