@@ -25,7 +25,6 @@ from local_agent.core.cleanup import (
 )
 from local_agent.core.config import AssistantSettings
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

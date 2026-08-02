@@ -40,11 +40,11 @@ def shutdown_logging() -> None:
         root.removeHandler(handler)
         try:
             handler.flush()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             pass
         try:
             handler.close()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             pass
 
 

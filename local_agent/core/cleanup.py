@@ -24,19 +24,18 @@ values (filesystem root or the user's home) before deleting anything.
 
 from __future__ import annotations
 
-import logging
 import os
 import shutil
 import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .config import AssistantSettings
 from .logging_setup import get_logger, shutdown_logging
-
 
 logger = get_logger("core.cleanup")
 
@@ -337,9 +336,7 @@ def purge_all(
         except (OSError, ValueError):
             recorded = None
         if recorded and recorded > 0 and recorded != own_pid and _pid_alive(recorded):
-            if dry_run:
-                report["stopped_pids"].append(recorded)
-            elif _terminate_pid(recorded):
+            if dry_run or _terminate_pid(recorded):
                 report["stopped_pids"].append(recorded)
             else:
                 report["failed"].append(
@@ -388,11 +385,13 @@ def purge_all(
     report["ok"] = not report["failed"]
     report["message"] = _build_summary(report)
     try:
-        logging.getLogger("local_assistant.core.cleanup").debug(
+        logger.debug(
             "purge finished: ok=%s removed=%d failed=%d",
-            report["ok"], len(report["removed"]), len(report["failed"]),
+            report["ok"],
+            len(report["removed"]),
+            len(report["failed"]),
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, S110 - log stream may already be shut down
         pass
     return report
 

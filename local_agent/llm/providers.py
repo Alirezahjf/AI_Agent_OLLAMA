@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import requests
@@ -185,7 +185,7 @@ def _iso_datetime(value: Any) -> datetime | None:
         return None
     text = value.strip()
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))  # noqa: FURB162
     except ValueError:
         return None
 
@@ -305,7 +305,7 @@ def fetch_billing(base_url: str, api_key: str, *, provider_hint: str = "") -> di
             continue
         result = _normalise_billing(info, data)
         result["rate_limit"] = _rate_limit_payload(response.headers)
-        result["fetched_at"] = datetime.now(timezone.utc).isoformat()
+        result["fetched_at"] = datetime.now(UTC).isoformat()
         _enrich_usage_telemetry(info, headers, root, base, result)
         return result
     status = last_status if saw_response else None

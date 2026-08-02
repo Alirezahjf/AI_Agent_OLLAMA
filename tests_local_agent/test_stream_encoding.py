@@ -23,7 +23,7 @@ the other tests are meaningful).
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -65,7 +65,7 @@ class _CharsetLessStream:
         self.encoding = "ISO-8859-1"
         self.text = body.decode("utf-8", errors="replace")
 
-    def iter_lines(self, decode_unicode: bool = False):  # noqa: FBT002
+    def iter_lines(self, decode_unicode: bool = False):
         for line in self._lines:
             if decode_unicode:
                 # The historical bug: Latin-1 decoding of UTF-8 bytes.
@@ -227,7 +227,7 @@ def test_non_streaming_complete_still_decodes_persian(
 ) -> None:
     class _JsonResponse:
         status_code = 200
-        headers = {"Content-Type": "application/json"}
+        headers: ClassVar = {"Content-Type": "application/json"}
         text = ""
 
         def json(self) -> dict[str, Any]:
