@@ -87,6 +87,11 @@ class UploadRequest(BaseModel):
     content_base64: str = ""
 
 
+class DetectProviderRequest(BaseModel):
+    base_url: str = ""
+    api_key: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -209,6 +214,67 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
             return client.list_models()
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(502, f"could not list models: {exc}")
+
+    @app.post("/api/provider/detect")
+    async def detect_provider_endpoint(req: DetectProviderRequest) -> dict[str, Any]:
+        """Identify the gateway for a base URL + API key and validate it.
+
+        Uses the persisted config as fallback when either field is empty.
+        Returns the detected provider id/label, whether the key is valid,
+        and the real model list from ``/models``.
+        """
+        from dataclasses import replace
+
+        from ..llm.client import create_client
+        from ..llm.providers import detect_provider
+
+        server = _server_of(client)
+        current = server.handlers.settings.llm if server is not None else settings.llm
+        base_url = req.base_url.strip() or current.openai_base_url
+        api_key = req.api_key.strip() or current.openai_api_key
+        info = detect_provider(base_url, api_key)
+        models: list[str] = []
+        valid = False
+        error: str | None = None
+        if base_url and api_key:
+            try:
+                probe = replace(
+                    current,
+                    provider="openai_compatible",
+                    openai_base_url=base_url,
+                    openai_api_key=api_key,
+                )
+                models = create_client(probe).list_models()
+                valid = True
+            except Exception as exc:  # noqa: BLE001
+                error = str(exc)
+        return {
+            "provider": info.id,
+            "label": info.label,
+            "base_url": base_url or info.default_base_url,
+            "valid": valid,
+            "models": models,
+            "error": error,
+        }
+
+    @app.get("/api/billing")
+    async def billing() -> dict[str, Any]:
+        """Live credit / usage summary for the active cloud provider."""
+        from ..llm.providers import fetch_billing
+
+        server = _server_of(client)
+        llm = server.handlers.settings.llm if server is not None else settings.llm
+        if not llm.openai_base_url or not llm.openai_api_key:
+            return {
+                "provider": llm.provider,
+                "label": "",
+                "available": False,
+                "error": "درگاه مالی فقط برای ارائه‌دهندگان ابری با کلید API در دسترس است",
+            }
+        hint = llm.provider if llm.provider == "ollama" else ""
+        return await asyncio.to_thread(
+            fetch_billing, llm.openai_base_url, llm.openai_api_key, provider_hint=hint
+        )
 
     @app.get("/api/history")
     async def history(limit: int = 50) -> list[dict[str, Any]]:

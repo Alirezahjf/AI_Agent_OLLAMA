@@ -497,12 +497,21 @@
         </div>
         <div class="field" x-show="form.provider !== 'ollama'">
           <label for="set-base">آدرس پایهٔ API</label>
-          <input id="set-base" x-model="form.openai_base_url" placeholder="https://api.avalai.ir/v1" dir="ltr">
+          <div class="field__row">
+            <input id="set-base" x-model="form.openai_base_url" placeholder="https://api.avalai.ir/v1" dir="ltr">
+            <button class="btn btn--ghost btn--sm" type="button" @click="autoDetectProvider()" :disabled="detectingProvider">
+              <span x-show="!detectingProvider">🔍 تشخیص خودکار</span>
+              <span x-show="detectingProvider" x-cloak>در حال بررسی…</span>
+            </button>
+          </div>
         </div>
         <div class="field" x-show="form.provider !== 'ollama'">
           <label for="set-key">کلید API</label>
           <input id="set-key" type="password" x-model="form.openai_api_key" placeholder="••••••••" dir="ltr" autocomplete="off">
-          <p class="field__hint">کلید فقط روی همین دستگاه ذخیره می‌شود و هرگز به جایی ارسال نمی‌شود.</p>
+          <p class="field__hint">
+            کلید فقط روی همین دستگاه ذخیره می‌شود و هرگز به جایی ارسال نمی‌شود.
+            «تشخیص خودکار» کلید و آدرس را می‌خواند و ارائه‌دهنده (مثلاً AvalAI یا GapGPT) و لیست واقعی مدل‌ها را بازمی‌گرداند.
+          </p>
         </div>
         <div class="field">
           <label for="set-confirm">حالت تأیید</label>

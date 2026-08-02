@@ -251,6 +251,8 @@ class BridgeHandlers:
                 "work_dir": str(self.settings.work_dir),
                 "llm_provider": self.settings.llm.provider,
                 "llm_model": self.settings.llm.ollama_model or self.settings.llm.openai_model,
+                "openai_base_url": self.settings.llm.openai_base_url,
+                "openai_api_key_set": bool(self.settings.llm.openai_api_key),
                 "telegram_enabled": bool(self.telegram),
                 "telegram_connected": bool(self.telegram and self.telegram.is_connected),
                 "confirm_mode": self.settings.safety.confirm_mode,

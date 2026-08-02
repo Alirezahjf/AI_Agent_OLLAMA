@@ -201,6 +201,10 @@
 
       models: [],
       modelsLoading: false,
+      detectingProvider: false,
+      billingLoading: false,
+      billing: null,
+      billingOpen: false,
       form: {
         provider: "ollama",
         model: "",
@@ -639,6 +643,36 @@
         this.form.openai_base_url = this.form.openai_base_url || "https://api.avalai.ir/v1";
         if (!this.form.model || this.form.model.indexOf(":") !== -1) this.form.model = "gpt-4o-mini";
         this.toast("info", "ℹ️", "کلید API خود را وارد کنید و ذخیره بزنید");
+      },
+
+      async autoDetectProvider() {
+        if (this.connection === "offline") {
+          this.toast("info", "ℹ️", "در حالت نمایش آفلاین تشخیص خودکار در دسترس نیست");
+          return;
+        }
+        this.detectingProvider = true;
+        try {
+          const result = await this.api("/api/provider/detect", {
+            method: "POST",
+            body: JSON.stringify({
+              base_url: this.form.openai_base_url || "",
+              api_key: this.form.openai_api_key || "",
+            }),
+          });
+          this.form.provider = "openai_compatible";
+          if (result.base_url) this.form.openai_base_url = result.base_url;
+          this.form.model = (result.models && result.models[0]) || this.form.model;
+          if (result.models && result.models.length) this.models = result.models;
+          if (result.valid) {
+            this.toast("ok", "✅", "ارائه‌دهنده تشخیص داده شد: " + (result.label || result.provider));
+          } else {
+            this.toast("bad", "⚠️", "تشخیص خودکار ناموفق بود — " + (result.error || "کلید یا آدرس معتبر نیست"));
+          }
+        } catch (_) {
+          this.toast("bad", "❌", "تشخیص خودکار ناموفق بود");
+        } finally {
+          this.detectingProvider = false;
+        }
       },
 
       openSettings() {

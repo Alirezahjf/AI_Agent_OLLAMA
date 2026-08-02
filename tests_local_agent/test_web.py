@@ -291,6 +291,48 @@ def test_artifact_endpoint_serves_screenshots_and_workspace(tmp_path: Path, web_
     assert missing.status_code == 404
 
 
+def test_provider_detect_endpoint_detects_and_lists_models(web_server: WebServer, monkeypatch) -> None:
+    import local_agent.llm.client as llm_client
+
+    class _FakeClient:
+        def list_models(self):
+            return ["gpt-4o-mini", "claude-sonnet-4"]
+
+    monkeypatch.setattr(llm_client, "create_client", lambda settings: _FakeClient())
+    base = f"http://127.0.0.1:{web_server.port}"
+    r = requests.post(
+        base + "/api/provider/detect",
+        json={"base_url": "https://api.avalai.ir/v1", "api_key": "sk-test"},
+        timeout=5,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["provider"] == "avalai"
+    assert body["valid"] is True
+    assert "gpt-4o-mini" in body["models"]
+
+
+def test_provider_detect_endpoint_handles_missing_credentials(web_server: WebServer) -> None:
+    base = f"http://127.0.0.1:{web_server.port}"
+    r = requests.post(
+        base + "/api/provider/detect",
+        json={"base_url": "", "api_key": ""},
+        timeout=5,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["valid"] is False
+    assert body["models"] == []
+
+
+def test_billing_endpoint_returns_not_available_without_cloud_key(web_server: WebServer) -> None:
+    base = f"http://127.0.0.1:{web_server.port}"
+    r = requests.get(base + "/api/billing", timeout=5)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["available"] is False
+
+
 def test_settings_endpoint_updates_the_model(web_server: WebServer) -> None:
     r = requests.post(
         f"http://127.0.0.1:{web_server.port}/api/settings",
