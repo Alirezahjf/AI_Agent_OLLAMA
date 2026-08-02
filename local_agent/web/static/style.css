@@ -824,6 +824,28 @@ kbd {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
+/* Inline screenshot / image thumbnail ---------------------------------- */
+.file-thumb {
+  position: relative;
+  display: block;
+  width: 176px;
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  background: var(--bg-input);
+  transition: border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+.file-thumb:hover { border-color: var(--accent); transform: translateY(-1px); }
+.file-thumb img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 220px;
+  object-fit: cover;
+  object-position: top;
+}
+
 /* ------------------------------------------------------------- composer */
 .composer {
   grid-area: composer;

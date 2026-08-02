@@ -495,8 +495,17 @@
       },
 
       detectArtifacts(text) {
-        const matches = String(text).match(/[\w./\\-]+\.(?:png|jpe?g|gif|webp|md|txt|json|csv|log|pdf|zip)/gi);
-        return matches ? Array.from(new Set(matches)).slice(0, 6) : [];
+        // Match file tokens (relative or absolute Windows/POSIX paths). The
+        // backend normally sends structured artifacts; this is a safe fallback
+        // for older stored conversations.
+        const matches = String(text).match(/[^\s"'<>]+\.(?:png|jpe?g|gif|webp|bmp|md|txt|json|csv|log|pdf|zip)/gi);
+        const out = [];
+        for (const m of (matches || [])) {
+          const clean = String(m).replace(/[,;:)\]}]+$/g, "").trim();
+          if (clean && out.indexOf(clean) === -1) out.push(clean);
+          if (out.length >= 6) break;
+        }
+        return out;
       },
 
       renderMarkdown(text) {
@@ -870,6 +879,33 @@
         const name = String(path);
         for (const [pattern, icon] of FILE_ICONS) if (pattern.test(name)) return icon;
         return "📎";
+      },
+
+      /* -------------------------------------- artifacts (screenshots & files) */
+
+      artifactName(f) {
+        if (typeof f === "object" && f !== null) return f.name || f.path || "";
+        return this.baseName(f);
+      },
+
+      artifactPath(f) {
+        if (typeof f === "object" && f !== null) return f.path || f.name || "";
+        return String(f);
+      },
+
+      artifactUrl(f) {
+        if (this.connection === "offline") return "#";
+        const p = this.artifactPath(f);
+        return "/api/artifact?path=" + encodeURIComponent(p);
+      },
+
+      artifactIcon(f) { return this.fileIcon(this.artifactPath(f)); },
+
+      artifactKey(f) { return this.artifactPath(f) || this.artifactName(f) || "artifact"; },
+
+      isImageArtifact(f) {
+        if (typeof f === "object" && f !== null && f.kind) return f.kind === "image";
+        return /\.(png|jpe?g|gif|webp|bmp)$/i.test(String(f));
       },
 
       /* ----------------------------------------------------------- voice */

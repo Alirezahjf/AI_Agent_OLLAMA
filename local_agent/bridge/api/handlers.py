@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import socket
 import threading
 import time
@@ -319,7 +320,12 @@ class BridgeHandlers:
                 self.gate.auto_approve()
             try:
                 result_text = run_action(self.registry, inv.name, inv.arguments, self.context)
-                return ActionResult(name=inv.name, text=result_text, success=True)
+                return ActionResult(
+                    name=inv.name,
+                    text=result_text,
+                    success=True,
+                    artifacts=_collect_artifacts(result_text, self.settings),
+                )
             except ActionRefused as exc:
                 return ActionResult(
                     name=inv.name, text=str(exc), success=False, refused=True
@@ -490,7 +496,11 @@ class BridgeHandlers:
                     return
                 self.event_bus.publish(Event(
                     type=EventType.TOOL_PROPOSED.value,
-                    payload={"name": call.name, "arguments": call.arguments},
+                    payload={
+                        "name": call.name,
+                        "arguments": call.arguments,
+                        "call_id": call_id,
+                    },
                     run_id=run_id,
                 ))
                 result = self._invoke_with_bridge_confirmation(call.name, call.arguments, run_id)
@@ -500,6 +510,7 @@ class BridgeHandlers:
                     text = f"ERROR: {result.error or result.text}"
                 else:
                     text = result.text
+                artifacts = _collect_artifacts(text, self.settings) or list(result.artifacts)
                 self.runtime.append(ConversationMessage(
                     role="tool",
                     name=call.name,
@@ -508,7 +519,14 @@ class BridgeHandlers:
                 ))
                 self.event_bus.publish(Event(
                     type=EventType.TOOL_RESULT.value,
-                    payload={"name": call.name, "text": text, "success": result.success, "refused": result.refused},
+                    payload={
+                        "name": call.name,
+                        "text": text,
+                        "success": result.success,
+                        "refused": result.refused,
+                        "call_id": call_id,
+                        "artifacts": artifacts,
+                    },
                     run_id=run_id,
                 ))
         # Turn cap
@@ -602,6 +620,88 @@ class PendingConfirmation:
     arguments: dict[str, Any]
     approved: bool = False
     event: threading.Event = field(default_factory=threading.Event)
+
+
+_ARTIFACT_EXT = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
+    ".md", ".txt", ".json", ".csv", ".log", ".pdf", ".zip",
+}
+_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+_ARTIFACT_TOKEN_RE = re.compile(
+    r"[^\s\"'<>|;]+\.(?:png|jpe?g|gif|webp|bmp|md|txt|json|csv|log|pdf|zip)",
+    re.IGNORECASE,
+)
+
+
+def _collect_artifacts(text: str, settings: AssistantSettings) -> list[dict[str, Any]]:
+    """Extract existing, in-scope files referenced by an action result.
+
+    Tools like ``screen_capture`` save files (into ``data_dir/screenshots``)
+    and only report them in the human-readable text.  This walks that text
+    for ``*.png`` / ``*.md`` / ... tokens, checks each against the workspace
+    and data directories, and returns a list of artifact descriptors:
+
+    .. code-block:: json
+
+        [{"name": "shot.png", "path": "screenshots/shot.png", "kind": "image"}]
+
+    ``path`` is relative to the root it lives in so the web UI can serve it
+    through ``/api/artifact``.  Anything outside the workspace/data dirs is
+    ignored for safety.
+    """
+    if not text:
+        return []
+    work_dir = settings.work_dir.resolve()
+    data_dir = settings.data_dir.resolve()
+    screenshots = data_dir / "screenshots"
+    artifacts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for match in _ARTIFACT_TOKEN_RE.finditer(str(text)):
+        token = match.group(0).rstrip(",.;:)]}")
+        if token.lower() in seen:
+            continue
+        seen.add(token.lower())
+        candidate = Path(token)
+        roots_to_try: list[tuple[Path, str, bool]] = []
+        if candidate.is_absolute():
+            roots_to_try.append((candidate, "", False))
+        else:
+            roots_to_try.append((work_dir / candidate, "", False))
+            roots_to_try.append((data_dir / candidate, "", False))
+            roots_to_try.append((screenshots / candidate.name, "screenshots", False))
+        for raw, prefix, _relative in roots_to_try:
+            try:
+                resolved = raw.resolve()
+            except OSError:
+                continue
+            if not resolved.is_file():
+                continue
+            try:
+                resolved.relative_to(work_dir)
+                relative = str(resolved.relative_to(work_dir))
+            except ValueError:
+                pass
+            else:
+                suffix = resolved.suffix.lower()
+                artifacts.append({
+                    "name": resolved.name,
+                    "path": relative,
+                    "kind": "image" if suffix in _IMAGE_EXT else "file",
+                })
+                break
+            try:
+                resolved.relative_to(data_dir)
+                relative = str(resolved.relative_to(data_dir))
+            except ValueError:
+                continue
+            suffix = resolved.suffix.lower()
+            artifacts.append({
+                "name": resolved.name,
+                "path": relative,
+                "kind": "image" if suffix in _IMAGE_EXT else "file",
+            })
+            break
+    return artifacts
 
 
 def _short(value: Any, limit: int = 120) -> str:

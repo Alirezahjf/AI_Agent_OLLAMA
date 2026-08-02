@@ -237,14 +237,22 @@
                   <div class="tool__section">
                     <span class="tool__label">فایل‌ها</span>
                     <div class="files">
-                      <template x-for="f in m.artifacts" :key="f">
-                        <a class="file-card" :href="fileUrl(f)" target="_blank" rel="noopener">
-                          <span class="file-card__icon" x-text="fileIcon(f)" aria-hidden="true"></span>
-                          <span class="file-card__body">
-                            <span class="file-card__name" x-text="baseName(f)"></span>
-                            <span class="file-card__path" x-text="f"></span>
-                          </span>
-                        </a>
+                      <template x-for="f in m.artifacts" :key="artifactKey(f)">
+                        <template x-if="isImageArtifact(f)">
+                          <a class="file-thumb" :href="artifactUrl(f)" target="_blank" rel="noopener"
+                             :title="artifactName(f)">
+                            <img :src="artifactUrl(f)" :alt="artifactName(f)" loading="lazy">
+                          </a>
+                        </template>
+                        <template x-else>
+                          <a class="file-card" :href="artifactUrl(f)" target="_blank" rel="noopener">
+                            <span class="file-card__icon" x-text="artifactIcon(f)" aria-hidden="true"></span>
+                            <span class="file-card__body">
+                              <span class="file-card__name" x-text="artifactName(f)"></span>
+                              <span class="file-card__path" x-text="artifactPath(f)"></span>
+                            </span>
+                          </a>
+                        </template>
                       </template>
                     </div>
                   </div>

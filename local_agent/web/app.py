@@ -132,6 +132,30 @@ def safe_workspace_path(work_dir: Path, candidate: str) -> Path:
     return resolved
 
 
+def resolve_artifact_path(work_dir: Path, data_dir: Path, candidate: str) -> Path:
+    """Resolve a tool artifact against the workspace *or* the data dir.
+
+    Screenshots are saved under ``data_dir/screenshots`` while other tools
+    write into ``work_dir``, so an artifact's ``path`` (as reported by the
+    bridge) can live under either root.  Absolute paths inside either root
+    are also accepted.  Anything else raises 403/404.
+    """
+    if not candidate:
+        raise HTTPException(400, "empty path")
+    raw = Path(candidate)
+    roots = (work_dir.resolve(), data_dir.resolve())
+    targets = [raw] + ([work_dir / raw, data_dir / raw] if not raw.is_absolute() else [])
+    for target in targets:
+        try:
+            resolved = target.resolve()
+        except OSError as exc:  # pragma: no cover - depends on filesystem
+            raise HTTPException(400, f"bad path: {exc}") from exc
+        for root in roots:
+            if resolved == root or root in resolved.parents:
+                return resolved
+    raise HTTPException(403, "path is outside the workspace / data directory")
+
+
 def _server_of(client: BridgeClient) -> Any:
     backend = getattr(client, "_backend", None)
     return getattr(backend, "_server", None) if backend else None
@@ -264,6 +288,15 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
     @app.get("/api/file")
     async def get_file(path: str) -> FileResponse:
         target = safe_workspace_path(settings.work_dir, path)
+        if not target.is_file():
+            raise HTTPException(404, "file not found")
+        media_type, _ = mimetypes.guess_type(target.name)
+        return FileResponse(str(target), media_type=media_type or "application/octet-stream")
+
+    @app.get("/api/artifact")
+    async def get_artifact(path: str) -> FileResponse:
+        """Serve a tool artifact (screenshot, file) from the workspace or data dir."""
+        target = resolve_artifact_path(settings.work_dir, settings.data_dir, path)
         if not target.is_file():
             raise HTTPException(404, "file not found")
         media_type, _ = mimetypes.guess_type(target.name)
