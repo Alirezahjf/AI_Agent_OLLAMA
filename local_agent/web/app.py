@@ -20,6 +20,9 @@ Endpoints
 ``POST /api/settings``        update provider / model / confirm mode
 ``POST /api/upload``          drop a file into the workspace
 ``GET  /api/file``            fetch a workspace artifact
+``GET  /api/artifact``        fetch a tool artifact (workspace or data dir)
+``POST /api/provider/detect`` auto-detect provider from base URL + API key
+``GET  /api/billing``         live credit / usage for the cloud provider
 ``WS   /ws``                  chat + confirmation stream
 """
 
