@@ -375,7 +375,7 @@ class _REPL:
         self.renderer.warn("   و توکن‌ها حذف و ثبت «اجرای خودکار» لغو می‌شود. (کتابخانه‌ها باقی می‌مانند)")
         try:
             answer = self.renderer.prompt(
-                f"برای تأیید عبارت «{PURGE_CONFIRM_WORD}» را بنویسید (‌ برای لغو Enter)"
+                f"برای تأیید، عبارت «{PURGE_CONFIRM_WORD}» را بنویسید (Enter = لغو)"
             )
         except (EOFError, KeyboardInterrupt):
             self.renderer.info("لغو شد — چیزی پاک نشد.")
