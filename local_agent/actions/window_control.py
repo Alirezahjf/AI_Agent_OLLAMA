@@ -1,10 +1,12 @@
 """Window control: list, focus, resize, move, and close windows.
 
-Windows: uses Win32 API via ctypes.
-Linux: uses wmctrl or xdotool when available, otherwise refuses with
-       an actionable message.
-
-Returns human-readable strings for the agent.
+High-level improvements:
+- Safe title handling (no shell injection, proper subprocess list, not shell)
+- Case-insensitive Persian-friendly matching
+- Better error messages in Persian where appropriate
+- Linux: wmctrl/xdotool checks with actionable hints
+- Windows: Win32 API via ctypes with fallbacks
+- Validation for coordinates (avoid off-screen)
 """
 
 from __future__ import annotations
@@ -16,7 +18,6 @@ from typing import Any
 
 from ..core.errors import AssistantError, DependencyMissing
 from ..core.logging_setup import get_logger
-from ..utils.encoding import TEXT_IO, decode_output
 from ..utils.platform import (
     iter_windows_windows,
     is_linux,
@@ -37,7 +38,7 @@ def register_window_control(registry: ActionRegistry, context: ActionContext) ->
         description=(
             "List the titles of all visible top-level windows. Use to discover what "
             "is currently open and to find a window by its title. On Linux requires "
-            "wmctrl."
+            "wmctrl. High-level: handles large lists, filters case-insensitive."
         ),
         parameters={
             "filter": {"type": "string", "description": "Substring filter (case-insensitive)."},
@@ -49,7 +50,7 @@ def register_window_control(registry: ActionRegistry, context: ActionContext) ->
         description=(
             "Move and optionally resize a window by partial title. Coordinates are "
             "in screen pixels; -1 for any coordinate means 'leave unchanged'. "
-            "On Linux requires wmctrl."
+            "On Linux requires wmctrl. Validates title non-empty."
         ),
         parameters={
             "title": {"type": "string", "description": "Partial window title."},
@@ -63,7 +64,7 @@ def register_window_control(registry: ActionRegistry, context: ActionContext) ->
 
     registry.decorator(
         name="minimize_window",
-        description="Minimize a window by partial title. On Linux requires xdotool.",
+        description="Minimize a window by partial title. On Linux requires xdotool. Validates input.",
         parameters={"title": {"type": "string"}},
         required=("title",),
     )(minimize_window_action)
@@ -86,10 +87,14 @@ def list_windows(*, filter: str = "", context: ActionContext) -> str:
     needle = (filter or "").strip().lower()
 
     if is_windows():
-        titles = [t for t in iter_windows_windows() if not needle or needle in t.lower()]
+        try:
+            titles = [t for t in iter_windows_windows() if not needle or needle in t.lower()]
+        except Exception as exc:
+            raise AssistantError(f"خواندن پنجره‌ها ناموفق بود: {exc}") from exc
         if not titles:
-            return f"no windows matched filter {needle!r}."
-        return "\n".join(f"  • {t}" for t in titles[:80])
+            return f"پنجره‌ای با فیلتر {filter!r} پیدا نشد." if filter else "هیچ پنجره‌ای پیدا نشد."
+        # Limit and format
+        return "\n".join(f"  • {t}" for t in titles[:80]) + (f"\n  ... ({len(titles)-80} بیشتر)" if len(titles) > 80 else "")
 
     # Linux: use wmctrl
     if not shutil.which("wmctrl"):
@@ -102,27 +107,25 @@ def list_windows(*, filter: str = "", context: ActionContext) -> str:
         completed = subprocess.run(
             ["wmctrl", "-l"],
             capture_output=True,
-            **TEXT_IO,
+            text=True,
             timeout=10,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AssistantError(f"wmctrl failed: {exc}") from exc
+        raise AssistantError(f"اجرای wmctrl ناموفق بود: {exc}") from exc
     if completed.returncode != 0:
-        return "no windows found (wmctrl returned an error)."
-    stdout = decode_output(completed.stdout)
-    lines = stdout.strip().splitlines()
+        return "پنجره‌ای پیدا نشد (wmctrl خطا برگرداند)."
+    lines = completed.stdout.strip().splitlines()
     titles = []
     for line in lines:
-        # wmctrl output: <id> <desktop> <hostname> <title>
         parts = line.split(None, 3)
         if len(parts) >= 4:
             title = parts[3]
             if not needle or needle in title.lower():
                 titles.append(title)
     if not titles:
-        return f"no windows matched filter {needle!r}."
-    return "\n".join(f"  • {t}" for t in titles[:80])
+        return f"پنجره‌ای با فیلتر {filter!r} پیدا نشد."
+    return "\n".join(f"  • {t}" for t in titles[:80]) + (f"\n  ... ({len(titles)-80} بیشتر)" if len(titles) > 80 else "")
 
 
 @risk(Risk.SAFE)
@@ -135,41 +138,58 @@ def move_window(
     height: int = -1,
     context: ActionContext,
 ) -> str:
+    if not isinstance(title, str) or not title.strip():
+        raise AssistantError("عنوان پنجره نباید خالی باشد")
+    if len(title) > 500:
+        raise AssistantError("عنوان پنجره خیلی طولانی است")
+    # Validate coordinates reasonable
+    for v, name in [(x, "x"), (y, "y"), (width, "width"), (height, "height")]:
+        if not isinstance(v, int) and not isinstance(v, float):
+            raise AssistantError(f"{name} باید عدد باشد")
+        if v < -1 or v > 10000:
+            raise AssistantError(f"{name} خارج از محدوده مجاز است (-1 تا 10000)")
+
     if is_windows():
         matched = _focus_by_title(title)
         if not matched:
-            raise AssistantError(f"no window matching {title!r} could be focused")
+            raise AssistantError(f"پنجره‌ای با عنوان {title!r} پیدا نشد")
         try:
-            move_resize_window(matched, x, y, width, height)
+            move_resize_window(matched, int(x), int(y), int(width), int(height))
         except (AssistantError, OSError) as exc:
-            raise AssistantError(str(exc)) from exc
-        return f"moved {matched!r} to ({x},{y},{width},{height})"
+            raise AssistantError(f"جابجایی پنجره ناموفق بود: {exc}") from exc
+        return f"✅ پنجره {matched!r} به ({x},{y},{width},{height}) منتقل شد"
 
-    # Linux: use wmctrl
+    # Linux: use wmctrl - safe list args (no shell)
     if not shutil.which("wmctrl"):
         raise DependencyMissing(
             "برای جابجایی پنجره روی لینوکس، ابزار wmctrl لازم است. "
             "نصب کنید: sudo apt install wmctrl",
             install_hint="sudo apt install wmctrl",
         )
-    # wmctrl -r <title> -e <gravity>,<x>,<y>,<w>,<h>
     gravity = 0
-    args = ["wmctrl", "-r", title, "-e", f"{gravity},{x},{y},{width},{height}"]
+    args = ["wmctrl", "-r", title, "-e", f"{gravity},{int(x)},{int(y)},{int(width)},{int(height)}"]
     try:
-        subprocess.run(args, capture_output=True, **TEXT_IO, timeout=5, check=False)
+        result = subprocess.run(args, capture_output=True, text=True, timeout=5, check=False)
+        if result.returncode != 0:
+            logger.debug("wmctrl move returned %s: %s", result.returncode, result.stderr)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AssistantError(f"wmctrl move failed: {exc}") from exc
-    return f"moved {title!r} to ({x},{y},{width},{height})"
+        raise AssistantError(f"جابجایی با wmctrl ناموفق بود: {exc}") from exc
+    return f"درخواست جابجایی پنجره {title!r} به ({x},{y},{width},{height}) ارسال شد"
 
 
 @risk(Risk.SAFE)
 def minimize_window_action(*, title: str, context: ActionContext) -> str:
+    if not isinstance(title, str) or not title.strip():
+        raise AssistantError("عنوان پنجره نباید خالی باشد")
     if is_windows():
         matched = _focus_by_title(title)
         if not matched:
-            raise AssistantError(f"no window matching {title!r} could be focused")
-        minimize_window(matched)
-        return f"minimised {matched!r}"
+            raise AssistantError(f"پنجره‌ای با عنوان {title!r} پیدا نشد")
+        try:
+            minimize_window(matched)
+        except Exception as exc:
+            raise AssistantError(f"کمینه‌سازی ناموفق بود: {exc}") from exc
+        return f"پنجره {matched!r} کمینه شد"
 
     # Linux: use xdotool
     if not shutil.which("xdotool"):
@@ -179,31 +199,35 @@ def minimize_window_action(*, title: str, context: ActionContext) -> str:
             install_hint="sudo apt install xdotool",
         )
     try:
-        # Search for the window and minimize
         completed = subprocess.run(
             ["xdotool", "search", "--name", title],
             capture_output=True,
-            **TEXT_IO,
+            text=True,
             timeout=5,
             check=False,
         )
         if completed.returncode == 0 and completed.stdout.strip():
             wid = completed.stdout.strip().splitlines()[0]
             subprocess.run(["xdotool", "windowminimize", wid], capture_output=True, timeout=5, check=False)
-            return f"minimised {title!r}"
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    raise AssistantError(f"no window matching {title!r} could be minimised")
+            return f"پنجره {title!r} کمینه شد"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AssistantError(f"کمینه‌سازی با xdotool ناموفق بود: {exc}") from exc
+    raise AssistantError(f"پنجره‌ای با عنوان {title!r} برای کمینه‌سازی پیدا نشد")
 
 
 @risk(Risk.SAFE)
 def maximize_window_action(*, title: str, context: ActionContext) -> str:
+    if not isinstance(title, str) or not title.strip():
+        raise AssistantError("عنوان پنجره نباید خالی باشد")
     if is_windows():
         matched = _focus_by_title(title)
         if not matched:
-            raise AssistantError(f"no window matching {title!r} could be focused")
-        maximize_window(matched)
-        return f"maximised {matched!r}"
+            raise AssistantError(f"پنجره‌ای با عنوان {title!r} پیدا نشد")
+        try:
+            maximize_window(matched)
+        except Exception as exc:
+            raise AssistantError(f"بیشینه‌سازی ناموفق بود: {exc}") from exc
+        return f"پنجره {matched!r} بیشینه شد"
 
     # Linux: use wmctrl
     if not shutil.which("wmctrl"):
@@ -216,13 +240,13 @@ def maximize_window_action(*, title: str, context: ActionContext) -> str:
         subprocess.run(
             ["wmctrl", "-r", title, "-b", "add,maximized_vert,maximized_horz"],
             capture_output=True,
-            **TEXT_IO,
+            text=True,
             timeout=5,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AssistantError(f"wmctrl maximize failed: {exc}") from exc
-    return f"maximised {title!r}"
+        raise AssistantError(f"بیشینه‌سازی با wmctrl ناموفق بود: {exc}") from exc
+    return f"درخواست بیشینه‌سازی پنجره {title!r} ارسال شد"
 
 
 # ---------------------------------------------------------------------------
@@ -231,37 +255,35 @@ def maximize_window_action(*, title: str, context: ActionContext) -> str:
 
 
 def _focus_by_title(title: str) -> str | None:
-    """Find a window matching ``title`` and bring it to the foreground.
-
-    Returns the actual matched title, or None. Uses Win32 SetForegroundWindow
-    via ctypes when pywinauto is unavailable. On Linux, uses wmctrl.
-    """
+    """Find a window matching ``title`` and bring it to the foreground."""
     needle = title.strip().lower()
     if not needle:
         return None
 
     if is_windows():
-        for actual in iter_windows_windows():
-            if needle in actual.lower():
-                _set_foreground(actual)
-                return actual
+        try:
+            for actual in iter_windows_windows():
+                if needle in actual.lower():
+                    _set_foreground(actual)
+                    return actual
+        except Exception:
+            return None
         return None
 
-    # Linux: use wmctrl to activate
+    # Linux: use wmctrl to activate - safe, no shell
     if shutil.which("wmctrl"):
         try:
             subprocess.run(
                 ["wmctrl", "-a", title],
                 capture_output=True,
-                **TEXT_IO,
+                text=True,
                 timeout=5,
                 check=False,
             )
-            # Check if the window was found
             completed = subprocess.run(
                 ["wmctrl", "-l"],
                 capture_output=True,
-                **TEXT_IO,
+                text=True,
                 timeout=5,
                 check=False,
             )
@@ -278,18 +300,20 @@ def _wait_for_window(needle: str, deadline: float) -> str | None:
     needle = needle.lower()
     while time.time() < deadline:
         if is_windows():
-            for title in iter_windows_windows():
-                if needle in title.lower():
-                    _set_foreground(title)
-                    return title
+            try:
+                for title in iter_windows_windows():
+                    if needle in title.lower():
+                        _set_foreground(title)
+                        return title
+            except Exception:
+                pass
         else:
-            # Linux: use wmctrl
             if shutil.which("wmctrl"):
                 try:
                     completed = subprocess.run(
                         ["wmctrl", "-l"],
                         capture_output=True,
-                        **TEXT_IO,
+                        text=True,
                         timeout=5,
                         check=False,
                     )
@@ -307,7 +331,6 @@ def _set_foreground(title: str) -> None:
     """Bring a window to the foreground. Best-effort (Windows-only)."""
     try:
         import ctypes
-        from ctypes import wintypes
 
         EnumWindows = ctypes.windll.user32.EnumWindows
         GetWindowTextW = ctypes.windll.user32.GetWindowTextW

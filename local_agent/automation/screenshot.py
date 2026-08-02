@@ -38,8 +38,11 @@ class Screenshot:
     def height(self) -> int:
         return self.image.height
 
-    def save(self, target: Any) -> None:
-        self.image.save(target, "PNG")
+    def save(self, target: Any, format: str = "PNG", **kwargs) -> None:
+        # Accept an explicit format for backward compatibility with
+        # callers that did `screenshot.save(path, "PNG")`. PIL's save
+        # signature is (fp, format, **params).
+        self.image.save(target, format, **kwargs)
 
     def to_bytes(self) -> bytes:
         buffer = BytesIO()

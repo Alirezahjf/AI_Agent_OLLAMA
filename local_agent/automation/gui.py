@@ -1,14 +1,17 @@
 """Mouse / keyboard automation via pyautogui.
 
-The helpers in this module are exposed to the LLM through a separate
-``register_gui`` entry point because they are only useful on a real
-desktop session.  pyautogui itself is optional; the module degrades
-gracefully when it is not installed.
+High-level improvements:
+- Coordinate validation against screen size (prevents off-screen clicks)
+- Failsafe handling for pyautogui
+- Unicode/Persian typing via clipboard fallback when direct typing fails
+- Safe filename sanitization for screenshots
+- Detailed Persian error messages
 """
 
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any
 
 from ..core.errors import AssistantError, DependencyMissing
@@ -34,6 +37,38 @@ def is_gui_available() -> bool:
     return size.width > 0 and size.height > 0
 
 
+def _get_screen_size_safe() -> tuple[int, int]:
+    try:
+        import pyautogui
+
+        s = pyautogui.size()
+        return int(s.width), int(s.height)
+    except Exception:
+        return 1920, 1080
+
+
+def _validate_coords(x: int, y: int) -> None:
+    w, h = _get_screen_size_safe()
+    # Allow small overflow (multi-monitor) but warn if way off
+    if x < -10000 or y < -10000 or x > w + 10000 or y > h + 10000:
+        raise AssistantError(f"مختصات خارج از محدوده است: ({x},{y}) در برابر صفحه {w}x{h}")
+    if x < 0 or y < 0 or x > w or y > h:
+        logger.warning("coordinate (%s,%s) outside primary screen %sx%s", x, y, w, h)
+
+
+def _sanitize_filename(name: str) -> str:
+    # Keep only safe chars
+    safe = "".join(c for c in name if c.isalnum() or c in "._-")
+    safe = safe[:128] or "screen.png"
+    if not safe.lower().endswith(".png"):
+        # Force png extension for screenshots
+        if "." in safe:
+            safe = safe.rsplit(".", 1)[0] + ".png"
+        else:
+            safe += ".png"
+    return safe
+
+
 def register_gui(registry: ActionRegistry, context: ActionContext) -> None:
     """Register mouse / keyboard / screenshot tools.
 
@@ -49,7 +84,7 @@ def register_gui(registry: ActionRegistry, context: ActionContext) -> None:
         description=(
             "Take a PNG screenshot of the full primary screen and return the path. "
             "The image is saved into the assistant's data directory so the LLM can "
-            "read it back. Always safe."
+            "read it back. Always safe. Filename is sanitized and forced to .png."
         ),
         parameters={
             "filename": {"type": "string", "description": "Output filename (default screen.png)."},
@@ -61,7 +96,7 @@ def register_gui(registry: ActionRegistry, context: ActionContext) -> None:
 
     registry.decorator(
         name="mouse_move",
-        description="Move the mouse cursor to absolute screen coordinates (x, y).",
+        description="Move the mouse cursor to absolute screen coordinates (x, y). Validates bounds.",
         parameters={
             "x": {"type": "integer"},
             "y": {"type": "integer"},
@@ -74,7 +109,7 @@ def register_gui(registry: ActionRegistry, context: ActionContext) -> None:
         name="mouse_click",
         description=(
             "Click the mouse at (x, y). button: 'left' (default), 'right', 'middle'. "
-            "clicks: how many times (default 1). Use to interact with native UIs."
+            "clicks: how many times (default 1). Validates coordinates."
         ),
         parameters={
             "x": {"type": "integer"},
@@ -87,7 +122,7 @@ def register_gui(registry: ActionRegistry, context: ActionContext) -> None:
 
     registry.decorator(
         name="mouse_double_click",
-        description="Double-click at (x, y).",
+        description="Double-click at (x, y). Validates coordinates.",
         parameters={"x": {"type": "integer"}, "y": {"type": "integer"}},
         required=("x", "y"),
     )(mouse_double_click)
@@ -96,11 +131,13 @@ def register_gui(registry: ActionRegistry, context: ActionContext) -> None:
         name="type_text",
         description=(
             "Type a string into the currently focused window via the keyboard. "
-            "Use ``interval`` between keystrokes (helps some apps catch up)."
+            "Supports Persian/Unicode via clipboard fallback. "
+            "Use interval between keystrokes (helps some apps catch up)."
         ),
         parameters={
             "text": {"type": "string"},
             "interval": {"type": "number", "description": "Seconds between keys (default 0)."},
+            "use_clipboard": {"type": "boolean", "description": "Force clipboard paste for Unicode (default auto)."},
         },
         required=("text",),
     )(type_text)
@@ -118,7 +155,7 @@ def register_gui(registry: ActionRegistry, context: ActionContext) -> None:
     registry.decorator(
         name="hotkey",
         description=(
-            "Press a chord of keys. Example: ['ctrl', 'shift', 'esc']."
+            "Press a chord of keys. Example: ['ctrl', 'shift', 'esc']. Validates non-empty."
         ),
         parameters={"keys": {"type": "array", "items": {"type": "string"}}},
         required=("keys",),
@@ -126,7 +163,7 @@ def register_gui(registry: ActionRegistry, context: ActionContext) -> None:
 
     registry.decorator(
         name="scroll",
-        description="Scroll the mouse wheel by ``amount`` clicks at (x, y).",
+        description="Scroll the mouse wheel by ``amount`` clicks at (x, y). Validates coords.",
         parameters={
             "x": {"type": "integer"},
             "y": {"type": "integer"},
@@ -139,7 +176,7 @@ def register_gui(registry: ActionRegistry, context: ActionContext) -> None:
         name="drag_to",
         description=(
             "Press the mouse at (from_x, from_y), move to (to_x, to_y), and release. "
-            "Useful for drag-and-drop in Photoshop, file managers, etc."
+            "Useful for drag-and-drop in Photoshop, file managers, etc. Validates bounds."
         ),
         parameters={
             "from_x": {"type": "integer"},
@@ -181,21 +218,33 @@ def _pyautogui():
 def screen_capture(*, filename: str = "screen.png", context: ActionContext) -> str:
     from .screenshot import take_screenshot
 
+    safe_name = _sanitize_filename(filename or "screen.png")
     image = take_screenshot()
     target = context.runtime.settings.data_dir / "screenshots"
     target.mkdir(parents=True, exist_ok=True)
-    final = target / filename
-    image.save(final, "PNG")
-    return f"saved screenshot to {final}"
+    final = target / safe_name
+    # Use flexible save that accepts format
+    try:
+        image.save(final)
+    except Exception as exc:
+        raise AssistantError(f"ذخیره اسکرین‌شات ممکن نشد: {exc}") from exc
+    return f"✅ اسکرین‌شات ذخیره شد: {final} ({image.width}x{image.height}, {image.backend})"
 
 
 @risk(Risk.SAFE)
 def mouse_move(
     *, x: int, y: int, duration: float = 0.0, context: ActionContext
 ) -> str:
+    _validate_coords(int(x), int(y))
     pg = _pyautogui()
-    pg.moveTo(int(x), int(y), duration=max(0.0, float(duration or 0.0)))
-    return f"mouse moved to ({x},{y})"
+    try:
+        pg.moveTo(int(x), int(y), duration=max(0.0, float(duration or 0.0)))
+    except Exception as exc:
+        # pyautogui raises FailSafeException when mouse in corner
+        if "fail-safe" in str(exc).lower():
+            raise AssistantError("حرکت ماوس به‌دلیل فعال شدن FailSafe متوقف شد (ماوس گوشه صفحه)") from exc
+        raise
+    return f"ماوس به ({x},{y}) منتقل شد"
 
 
 @risk(Risk.SAFE)
@@ -207,61 +256,127 @@ def mouse_click(
     clicks: int = 1,
     context: ActionContext,
 ) -> str:
+    _validate_coords(int(x), int(y))
     pg = _pyautogui()
-    pg.click(int(x), int(y), button=button or "left", clicks=max(1, int(clicks or 1)))
-    return f"clicked {button} {clicks}x at ({x},{y})"
+    btn = button or "left"
+    if btn not in {"left", "right", "middle"}:
+        raise AssistantError(f"دکمه نامعتبر: {btn}")
+    try:
+        pg.click(int(x), int(y), button=btn, clicks=max(1, int(clicks or 1)))
+    except Exception as exc:
+        if "fail-safe" in str(exc).lower():
+            raise AssistantError("کلیک به‌دلیل FailSafe متوقف شد") from exc
+        raise AssistantError(f"کلیک ناموفق بود: {exc}") from exc
+    return f"کلیک {btn} {clicks}× در ({x},{y}) انجام شد"
 
 
 @risk(Risk.SAFE)
 def mouse_double_click(
     *, x: int, y: int, context: ActionContext
 ) -> str:
+    _validate_coords(int(x), int(y))
     pg = _pyautogui()
-    pg.doubleClick(int(x), int(y))
-    return f"double-clicked at ({x},{y})"
+    try:
+        pg.doubleClick(int(x), int(y))
+    except Exception as exc:
+        raise AssistantError(f"دابل‌کلیک ناموفق بود: {exc}") from exc
+    return f"دابل‌کلیک در ({x},{y})"
 
 
 @risk(Risk.SAFE)
 def type_text(
-    *, text: str, interval: float = 0.0, context: ActionContext
+    *, text: str, interval: float = 0.0, context: ActionContext, use_clipboard: bool = False
 ) -> str:
     if not isinstance(text, str):
         raise AssistantError("text must be a string")
+    if len(text) > 5000:
+        raise AssistantError("متن خیلی طولانی است (max 5000)")
     pg = _pyautogui()
     safe_interval = max(0.0, float(interval or 0.0))
-    if safe_interval > 0:
-        pg.typewrite(text, interval=safe_interval)  # ASCII only when interval>0
-    else:
-        # write supports unicode via pyperclip-style paste; pyautogui.write is
-        # already unicode-aware on modern versions.
-        pg.write(text, interval=0.0)
-    return f"typed {len(text)} characters"
+
+    # Heuristic: if text contains non-ASCII (Persian, etc.) or user forces clipboard, use clipboard paste
+    needs_unicode = any(ord(c) > 127 for c in text)
+    if use_clipboard or (needs_unicode and len(text) > 2):
+        try:
+            # Try clipboard method
+            import pyperclip
+
+            pyperclip.copy(text)
+            # Paste via ctrl+v / cmd+v
+            import platform as plat
+
+            if plat.system() == "Darwin":
+                pg.hotkey("command", "v")
+            else:
+                pg.hotkey("ctrl", "v")
+            time.sleep(0.15)
+            return f"متن {len(text)} کاراکتری از طریق کلیپ‌بورد تایپ شد (Unicode)"
+        except Exception as exc:
+            logger.debug("clipboard typing failed, falling back to direct: %s", exc)
+            # Fall back to direct
+
+    try:
+        if safe_interval > 0:
+            pg.typewrite(text, interval=safe_interval)
+        else:
+            pg.write(text, interval=0.0)
+    except Exception as exc:
+        raise AssistantError(f"تایپ ناموفق بود: {exc}") from exc
+    return f"تایپ شد: {len(text)} کاراکتر"
 
 
 @risk(Risk.SAFE)
 def key_press(*, key: str, context: ActionContext) -> str:
+    if not isinstance(key, str) or not key.strip():
+        raise AssistantError("key must be a non-empty string")
     pg = _pyautogui()
-    pg.press(key)
-    return f"pressed {key}"
+    # Normalize
+    k = key.strip().lower()
+    # Allow chords like ctrl+c in key_press too
+    if "+" in k or "-" in k:
+        # treat as hotkey
+        parts = [p.strip() for p in k.replace("-", "+").split("+") if p.strip()]
+        if len(parts) > 1:
+            pg.hotkey(*parts)
+            return f"کلید ترکیبی {key} فشرده شد"
+    try:
+        pg.press(k)
+    except Exception as exc:
+        raise AssistantError(f"فشردن کلید {key} ناموفق بود: {exc}") from exc
+    return f"کلید {key} فشرده شد"
 
 
 @risk(Risk.SAFE)
 def hotkey(*, keys: list[str], context: ActionContext) -> str:
     if not isinstance(keys, list) or not keys:
         raise AssistantError("keys must be a non-empty list")
+    if len(keys) > 6:
+        raise AssistantError("تعداد کلیدهای ترکیبی بیش از حد است (max 6)")
+    cleaned = [str(k).strip().lower() for k in keys if str(k).strip()]
+    if not cleaned:
+        raise AssistantError("لیست کلیدها خالی است")
     pg = _pyautogui()
-    pg.hotkey(*keys)
-    return f"pressed {'+'.join(keys)}"
+    try:
+        pg.hotkey(*cleaned)
+    except Exception as exc:
+        raise AssistantError(f"hotkey {'+'.join(cleaned)} ناموفق بود: {exc}") from exc
+    return f"کلیدهای {'+'.join(cleaned)} فشرده شد"
 
 
 @risk(Risk.SAFE)
 def scroll(
     *, x: int, y: int, amount: int, context: ActionContext
 ) -> str:
+    _validate_coords(int(x), int(y))
+    if abs(int(amount)) > 100:
+        raise AssistantError("مقدار اسکرول بیش از حد است (max 100)")
     pg = _pyautogui()
-    pg.moveTo(int(x), int(y))
-    pg.scroll(int(amount))
-    return f"scrolled {amount} at ({x},{y})"
+    try:
+        pg.moveTo(int(x), int(y))
+        pg.scroll(int(amount))
+    except Exception as exc:
+        raise AssistantError(f"اسکرول ناموفق بود: {exc}") from exc
+    return f"اسکرول {amount} در ({x},{y})"
 
 
 @risk(Risk.SAFE)
@@ -274,25 +389,38 @@ def drag_to(
     duration: float = 0.4,
     context: ActionContext,
 ) -> str:
+    _validate_coords(int(from_x), int(from_y))
+    _validate_coords(int(to_x), int(to_y))
     pg = _pyautogui()
-    pg.moveTo(int(from_x), int(from_y))
-    pg.dragTo(
-        int(to_x), int(to_y),
-        duration=max(0.05, float(duration or 0.4)),
-        button="left",
-    )
-    return f"dragged ({from_x},{from_y}) -> ({to_x},{to_y})"
+    dur = max(0.05, min(float(duration or 0.4), 5.0))
+    try:
+        pg.moveTo(int(from_x), int(from_y))
+        pg.dragTo(
+            int(to_x),
+            int(to_y),
+            duration=dur,
+            button="left",
+        )
+    except Exception as exc:
+        raise AssistantError(f"drag ناموفق بود: {exc}") from exc
+    return f"درگ از ({from_x},{from_y}) به ({to_x},{to_y}) در {dur} ثانیه"
 
 
 @risk(Risk.SAFE)
 def get_mouse_position(*, context: ActionContext) -> str:
     pg = _pyautogui()
-    pos = pg.position()
+    try:
+        pos = pg.position()
+    except Exception as exc:
+        raise AssistantError(f"خواندن موقعیت ماوس ناموفق بود: {exc}") from exc
     return f"x={pos.x}, y={pos.y}"
 
 
 @risk(Risk.SAFE)
 def get_screen_size(*, context: ActionContext) -> str:
     pg = _pyautogui()
-    size = pg.size()
-    return f"width={size.width}, height={size.height}"
+    try:
+        size = pg.size()
+    except Exception as exc:
+        raise AssistantError(f"خواندن اندازه صفحه ناموفق بود: {exc}") from exc
+    return f"width={size.width}, height={size.height} (primary)"

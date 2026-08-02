@@ -439,16 +439,16 @@ class BridgeHandlers:
                     run_id=run_id,
                 ))
                 return
+            # --- UI streaming for assistant text (even when tool calls follow)
+            if reply.content and not streamed:
+                # Provider did not stream; emit the text in one go so
+                # frontends still receive a delta before the final.
+                self.event_bus.publish(Event(
+                    type=EventType.ASSISTANT_DELTA.value,
+                    payload={"text": reply.content},
+                    run_id=run_id,
+                ))
             if reply.content:
-                if not streamed:
-                    # Provider did not stream; emit the text in one go so
-                    # frontends still receive a delta before the final.
-                    self.event_bus.publish(Event(
-                        type=EventType.ASSISTANT_DELTA.value,
-                        payload={"text": reply.content},
-                        run_id=run_id,
-                    ))
-                self.runtime.append(ConversationMessage(role="assistant", content=reply.content))
                 self.event_bus.publish(Event(
                     type=EventType.ASSISTANT_FINAL.value,
                     payload={"text": reply.content},
@@ -456,12 +456,16 @@ class BridgeHandlers:
                 ))
 
             if not reply.has_tool_calls:
+                if reply.content:
+                    self.runtime.append(ConversationMessage(role="assistant", content=reply.content))
                 self.event_bus.publish(Event(type=EventType.CHAT_DONE.value, payload={}, run_id=run_id))
                 return
 
             # OpenAI-compatible providers (AvalAI, OpenAI, ...) require every
             # ``tool`` message to follow a single ``assistant`` message that
             # carries the matching ``tool_calls`` entries.
+            # Combine assistant text + tool_calls in ONE message to keep the
+            # conversation valid (assistant -> tool -> assistant ...).
             call_ids: list[str] = []
             openai_tool_calls: list[dict[str, Any]] = []
             for call in reply.tool_calls:
@@ -477,7 +481,7 @@ class BridgeHandlers:
                 })
             self.runtime.append(ConversationMessage(
                 role="assistant",
-                content="",
+                content=reply.content or "",
                 tool_calls=openai_tool_calls,
             ))
 

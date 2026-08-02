@@ -166,6 +166,9 @@ class OllamaClient(LLMClient):
         self._retries = settings.max_retries
         self._temperature = settings.temperature
         self.model_name = self._model
+        # Session reuse for connection pooling and lower latency
+        self._session = requests.Session()
+        self._session.headers.update({"Content-Type": "application/json"})
 
     def complete(
         self,
@@ -184,7 +187,7 @@ class OllamaClient(LLMClient):
         last_exc: Exception | None = None
         for attempt in range(self._retries + 1):
             try:
-                response = requests.post(
+                response = self._session.post(
                     f"{self._base}/api/chat",
                     json=payload,
                     timeout=self._timeout,
@@ -207,6 +210,7 @@ class OllamaClient(LLMClient):
             # strict-JSON fallback protocol.
             if response.status_code in {400, 422} and tools:
                 payload.pop("tools", None)
+                # Retry without tools via same session
                 continue
 
             if response.status_code in _TRANSIENT_STATUS:
@@ -237,7 +241,7 @@ class OllamaClient(LLMClient):
 
     def list_models(self) -> list[str]:
         try:
-            response = requests.get(f"{self._base}/api/tags", timeout=min(20, self._timeout))
+            response = self._session.get(f"{self._base}/api/tags", timeout=min(20, self._timeout))
             response.raise_for_status()
             return [str(item["name"]) for item in response.json().get("models", []) if item.get("name")]
         except (requests.RequestException, ValueError) as exc:
@@ -261,7 +265,7 @@ class OllamaClient(LLMClient):
             payload["tools"] = [tool.to_openai() for tool in tools]
 
         try:
-            response = requests.post(
+            response = self._session.post(
                 f"{self._base}/api/chat", json=payload, timeout=self._timeout, stream=True
             )
             response.raise_for_status()
@@ -313,7 +317,7 @@ class OllamaClient(LLMClient):
             payload["tools"] = [tool.to_openai() for tool in tools]
 
         try:
-            response = requests.post(
+            response = self._session.post(
                 f"{self._base}/api/chat",
                 json=payload,
                 timeout=self._timeout,
@@ -380,6 +384,9 @@ class OpenAICompatibleClient(LLMClient):
         self._retries = settings.max_retries
         self._temperature = settings.temperature
         self.model_name = self._model
+        # Session for pooling + keep-alive
+        self._session = requests.Session()
+        self._session.headers.update(self._headers)
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -734,6 +741,7 @@ def _content_to_text(content: Any) -> str:
 
 
 def _extract_tool_calls(raw_calls: Any) -> Iterable[ToolCall]:
+    """Robust extraction handling string/dict args, int ids, and nested shapes."""
     if not isinstance(raw_calls, list):
         return ()
     calls: list[ToolCall] = []
@@ -745,13 +753,35 @@ def _extract_tool_calls(raw_calls: Any) -> Iterable[ToolCall]:
             continue
         name = function.get("name")
         arguments = function.get("arguments", {})
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments or "{}")
-            except json.JSONDecodeError:
-                continue
+        # Handle arguments as JSON string, dict, or None
+        if arguments is None:
+            arguments = {}
+        elif isinstance(arguments, str):
+            s = arguments.strip()
+            if not s:
+                arguments = {}
+            else:
+                try:
+                    arguments = json.loads(s)
+                except json.JSONDecodeError:
+                    # Try to fix single quotes or trailing commas
+                    try:
+                        # Replace single quotes with double (naive but helps some models)
+                        fixed = s.replace("'", '"')
+                        arguments = json.loads(fixed)
+                    except Exception:
+                        logger.warning("failed to parse tool arguments for %s: %s", name, s[:200])
+                        continue
+        if not isinstance(arguments, dict):
+            continue
         raw_id = raw.get("id")
-        call_id = str(raw_id) if isinstance(raw_id, (str, int)) and str(raw_id) else None
-        if isinstance(name, str) and isinstance(arguments, dict):
-            calls.append(ToolCall(name=name, arguments=arguments, id=call_id))
+        # id can be int, str, or missing
+        call_id = None
+        if raw_id is not None:
+            try:
+                call_id = str(raw_id).strip() or None
+            except Exception:
+                call_id = None
+        if isinstance(name, str) and name.strip() and isinstance(arguments, dict):
+            calls.append(ToolCall(name=name.strip(), arguments=arguments, id=call_id))
     return calls

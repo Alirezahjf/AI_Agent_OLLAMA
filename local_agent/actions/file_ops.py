@@ -200,15 +200,55 @@ def register_file_ops(registry: ActionRegistry, context: ActionContext) -> None:
 # ---------------------------------------------------------------------------
 
 
+SENSITIVE_NAMES = {
+    ".env", ".envrc", "id_rsa", "id_ed25519", "credentials",
+    "credentials.json", ".netrc", ".git-credentials"
+}
+SENSITIVE_PARTS = {".ssh", ".gnupg", ".aws", ".config/gcloud", ".docker"}
+
+
+def _assert_not_sensitive(path: Path, work_dir: Path) -> None:
+    """Block access to secret or credential files even inside workspace."""
+    try:
+        rel = path.resolve().relative_to(work_dir.resolve())
+        parts = rel.parts
+    except (ValueError, OSError):
+        # Outside workspace is already blocked by _resolve_path, but keep safe
+        parts = path.parts
+    lower_parts = {p.lower() for p in parts}
+    # Check for sensitive directories in path
+    for sensitive in SENSITIVE_PARTS:
+        if any(sensitive.lower() in part for part in lower_parts) or sensitive.lower() in str(path).lower().replace("\\", "/"):
+            # More precise: check if any part matches
+            if sensitive.split("/")[-1].lower() in lower_parts:
+                raise AssistantError(f"دسترسی به مسیر حساس مسدود شد: {sensitive}")
+    name = path.name.lower()
+    if name in SENSITIVE_NAMES or name.startswith(".env.") or "credential" in name:
+        raise AssistantError(f"فایل محرمانه محافظت شده است: {path.name}")
+
+
 def _resolve_path(raw: str, work_dir: Path) -> Path:
-    """Resolve a user-supplied path to an absolute Path."""
+    """Resolve a user-supplied path to an absolute Path, sandboxed to work_dir."""
     if not isinstance(raw, str) or not raw.strip():
         raise AssistantError("path must be a non-empty string")
+    if len(raw) > 1024:
+        raise AssistantError("مسیر بیش از حد طولانی است")
     candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
         candidate = (work_dir / candidate).resolve()
     else:
         candidate = candidate.resolve()
+    # Enforce sandbox: resolved path must be inside work_dir (or work_dir itself)
+    try:
+        work_resolved = work_dir.resolve()
+        # allow the work_dir itself
+        if candidate != work_resolved:
+            candidate.relative_to(work_resolved)
+    except ValueError:
+        raise AssistantError(f"مسیر خارج از فضای کاری است: {raw!r} — فقط داخل workspace مجاز است")
+    except OSError as exc:
+        raise AssistantError(f"خواندن مسیر ممکن نشد {raw!r}: {exc}") from exc
+    _assert_not_sensitive(candidate, work_dir)
     return candidate
 
 
@@ -383,16 +423,31 @@ def search_files(
 ) -> str:
     if not isinstance(query, str) or not query.strip():
         raise AssistantError("query must be a non-empty string")
+    if len(query) > 500:
+        raise AssistantError("عبارت جستجو خیلی طولانی است")
     target = _resolve_path(path or ".", context.work_dir)
     if not target.is_dir():
-        raise AssistantError(f"not a directory: {target}")
+        raise AssistantError(f"مسیر پوشه نیست: {target}")
     needle = query
     limit = max(1, min(int(max_results or 50), 500))
     matches: list[str] = []
+    work_root = context.work_dir.resolve()
     for root, dirs, files in os.walk(target):
-        dirs[:] = [d for d in dirs if d not in {".git", "node_modules", "__pycache__", ".venv"}]
+        dirs[:] = [d for d in dirs if d not in {".git", "node_modules", "__pycache__", ".venv", ".mypy_cache", "dist", "build"}]
         for filename in files:
+            # Skip sensitive files
+            if filename.lower() in SENSITIVE_NAMES:
+                continue
             full = Path(root) / filename
+            try:
+                # Skip hidden sensitive parts
+                rel_for_check = full.resolve().relative_to(work_root)
+                if any(part.lower() in SENSITIVE_PARTS or part.startswith(".") and part in {".ssh", ".gnupg"} for part in rel_for_check.parts):
+                    # allow dotfiles but block .ssh etc
+                    if ".ssh" in rel_for_check.parts or ".gnupg" in rel_for_check.parts:
+                        continue
+            except ValueError:
+                continue
             try:
                 if full.stat().st_size > 1_000_000:
                     continue
@@ -402,7 +457,11 @@ def search_files(
                 with full.open("r", encoding="utf-8", errors="ignore") as handle:
                     for line_number, line in enumerate(handle, 1):
                         if needle in line:
-                            matches.append(f"{full}:{line_number}: {line.rstrip()[:200]}")
+                            try:
+                                rel = full.resolve().relative_to(work_root)
+                            except ValueError:
+                                rel = full
+                            matches.append(f"{rel}:{line_number}: {line.rstrip()[:200]}")
                             if len(matches) >= limit:
                                 break
             except OSError:
@@ -412,8 +471,9 @@ def search_files(
         if len(matches) >= limit:
             break
     if not matches:
-        return f"no matches for {query!r} under {target}"
-    return "\n".join(matches)
+        return f"موردی برای {query!r} در {target.relative_to(work_root) if target.resolve() != work_root else '.'} پیدا نشد"
+    header = f"جستجو: {query} | مسیر: {target.resolve().relative_to(work_root) if target.resolve() != work_root else '.'} | نتایج: {len(matches)}"
+    return header + "\n" + "\n".join(matches)
 
 
 @risk(Risk.SAFE)
@@ -479,6 +539,8 @@ def download_file(
 
     if not url or not isinstance(url, str):
         raise AssistantError("url must be a non-empty string")
+    if len(url) > 2048:
+        raise AssistantError("URL بیش از حد طولانی است")
     if not url.startswith(("http://", "https://")):
         raise AssistantError("url must start with http:// or https://")
     if path:
@@ -488,20 +550,56 @@ def download_file(
         from urllib.parse import urlparse
         parsed = urlparse(url)
         name = Path(parsed.path).name or "download"
+        # Sanitize filename
+        name = "".join(c for c in name if c.isalnum() or c in "._-")[:128] or "download"
         target = context.work_dir / name
+        # Ensure still inside workspace
+        target = _resolve_path(str(target), context.work_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
+
+    max_bytes = 100 * 1024 * 1024  # 100 MB limit
     try:
-        response = requests.get(url, stream=True, timeout=60)
+        response = requests.get(
+            url,
+            stream=True,
+            timeout=60,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; LocalAssistant/2.0)"},
+        )
         response.raise_for_status()
+        # Check content-length if provided
+        clen = response.headers.get("Content-Length")
+        if clen:
+            try:
+                if int(clen) > max_bytes:
+                    raise AssistantError(f"فایل خیلی بزرگ است ({int(clen)//1024//1024} MB > 100 MB)")
+            except ValueError:
+                pass
+        downloaded = 0
         with target.open("wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
+                if not chunk:
+                    continue
+                downloaded += len(chunk)
+                if downloaded > max_bytes:
+                    f.close()
+                    target.unlink(missing_ok=True)
+                    raise AssistantError("دانلود بیش از 100 MB شد و متوقف شد")
                 f.write(chunk)
     except requests.RequestException as exc:
-        raise AssistantError(f"download failed: {exc}") from exc
+        # Clean partial file on failure
+        if target.exists():
+            try:
+                target.unlink()
+            except OSError:
+                pass
+        raise AssistantError(f"دانلود ناموفق بود: {exc}") from exc
     except OSError as exc:
-        raise AssistantError(f"could not save to {target}: {exc}") from exc
-    size_kb = target.stat().st_size / 1024
-    return f"downloaded {url} -> {target} ({size_kb:.1f} KB)"
+        raise AssistantError(f"ذخیره در {target} ممکن نشد: {exc}") from exc
+    try:
+        size_kb = target.stat().st_size / 1024
+    except OSError:
+        size_kb = 0
+    return f"دانلود شد: {url} -> {target} ({size_kb:.1f} KB)"
 
 
 @risk(Risk.SAFE)
