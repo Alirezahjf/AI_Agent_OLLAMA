@@ -74,10 +74,16 @@ class EventBus:
                 self._listeners.remove(callback)
 
     def create_run_queue(self, run_id: str) -> Queue[Event | None]:
-        q: Queue[Event | None] = Queue()
         with self._lock:
+            existing = self._run_queues.get(run_id)
+            if existing is not None:
+                # The chat worker already created this queue when it started;
+                # returning a *new* one would silently drop events published
+                # between start and subscription.
+                return existing
+            q: Queue[Event | None] = Queue()
             self._run_queues[run_id] = q
-        return q
+            return q
 
     def destroy_run_queue(self, run_id: str) -> None:
         with self._lock:

@@ -35,6 +35,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from queue import Empty
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -327,12 +328,23 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                     run_id = server.handlers._start_chat_run(message)
                     queue = server.handlers.event_bus.create_run_queue(run_id)
                     try:
+                        idle_ticks = 0
                         while True:
                             try:
-                                event = await asyncio.to_thread(queue.get, timeout=600)
-                            except Exception:
-                                # queue.Empty or thread timeout - treat as end of stream
-                                break
+                                event = await asyncio.to_thread(queue.get, timeout=20)
+                            except Empty:
+                                # The run is alive but idle right now (e.g. a
+                                # long-running tool). Keep the socket warm and
+                                # keep polling instead of treating a quiet gap
+                                # as the end of the stream.
+                                idle_ticks += 1
+                                if idle_ticks > 500:  # safety net (~2.5h idle)
+                                    break
+                                await websocket.send_text(json.dumps(
+                                    {"type": "pong", "ts": time.time()}
+                                ))
+                                continue
+                            idle_ticks = 0
                             if event is None:
                                 break
                             await websocket.send_text(json.dumps({

@@ -354,6 +354,7 @@
             this.pushMessage({
               role: "tool", name: p.name, status: "running", expanded: false,
               arguments: p.arguments || {}, output: "", artifacts: [], risk: p.risk || "safe",
+              call_id: p.call_id,
             });
             break;
           case "tool_confirm_requested":
@@ -366,7 +367,12 @@
             this.beep("warn");
             break;
           case "tool_result": {
-            const card = this.lastToolCard(p.name);
+            // Prefer a call_id match so a card updates live even when the
+            // same tool name runs several times in one turn; fall back to
+            // the most recent running card with that name.
+            const card = p.call_id
+              ? this.lastToolCard(p.name, p.call_id)
+              : this.lastToolCard(p.name);
             const ok = p.success !== false && !p.refused;
             if (card) {
               card.status = ok ? "done" : "error";
@@ -486,10 +492,19 @@
         this.pushMessage({ role: role === "error" ? "error" : "system", content });
       },
 
-      lastToolCard(name) {
+      lastToolCard(name, callId) {
         for (let i = this.messages.length - 1; i >= 0; i -= 1) {
           const m = this.messages[i];
-          if (m.role === "tool" && m.name === name && m.status === "running") return m;
+          if (m.role !== "tool" || m.name !== name || m.status !== "running") continue;
+          if (callId && m.call_id && m.call_id === callId) return m;
+          if (!callId) return m;
+        }
+        // call_id requested but not found on a running card — fall back to name
+        if (callId) {
+          for (let i = this.messages.length - 1; i >= 0; i -= 1) {
+            const m = this.messages[i];
+            if (m.role === "tool" && m.name === name && m.status === "running") return m;
+          }
         }
         return null;
       },
