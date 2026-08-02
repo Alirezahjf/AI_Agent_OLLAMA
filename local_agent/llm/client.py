@@ -276,7 +276,7 @@ class OllamaClient(LLMClient):
         text_parts: list[str] = []
         calls: list[ToolCall] = []
         try:
-            for line in response.iter_lines(decode_unicode=True):
+            for line in _iter_stream_lines(response):
                 if not line:
                     continue
                 try:
@@ -333,7 +333,7 @@ class OllamaClient(LLMClient):
             return
 
         content_parts: list[str] = []
-        for line in response.iter_lines(decode_unicode=True):
+        for line in _iter_stream_lines(response):
             if not line:
                 continue
             try:
@@ -537,7 +537,7 @@ class OpenAICompatibleClient(LLMClient):
         text_parts: list[str] = []
         partial: dict[int, dict[str, Any]] = {}
         try:
-            for line in response.iter_lines(decode_unicode=True):
+            for line in _iter_stream_lines(response):
                 if not line or not line.startswith("data: "):
                     continue
                 chunk = line[6:].strip()
@@ -624,7 +624,7 @@ class OpenAICompatibleClient(LLMClient):
             yield ("done", "")
             return
 
-        for line in response.iter_lines(decode_unicode=True):
+        for line in _iter_stream_lines(response):
             if not line:
                 continue
             if not line.startswith("data: "):
@@ -682,6 +682,35 @@ def create_client(settings: LLMSettings) -> LLMClient:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _iter_stream_lines(response: requests.Response) -> Iterable[str]:
+    """Yield decoded text lines from a streamed HTTP response, strictly as UTF-8.
+
+    ``response.iter_lines(decode_unicode=True)`` decodes the body with the
+    encoding advertised in the ``Content-Type`` header — and when the header
+    carries **no charset** (extremely common for SSE from AvalAI / GapGPT /
+    Gemini-style gateways), ``requests`` falls back to **ISO-8859-1**, so
+    every UTF-8 Persian byte sequence turns into mojibake
+    (``"لیست فایل‌ها"`` → ``"Ù\x84Û\x8cØ³Øª Ù\x81Ø§Û\x8cÙ\x84\xe2\x80\x8cÙ\x87Ø§"``).
+
+    Requesting the raw byte lines (``decode_unicode=False``) and decoding
+    them ourselves with UTF-8 makes the stream header-independent.  Two
+    defensive details:
+
+    * ``errors="replace"`` — one corrupt chunk must not kill the stream;
+    * ``str`` lines are passed through untouched — the real ``requests``
+      always yields ``bytes`` here, but simple test doubles may not.
+
+    Splitting on ``\\n`` is safe for UTF-8: newline bytes (`0x0A`/`0x0D`)
+    can never appear inside a multi-byte sequence, so no character is ever
+    cut in half at a line boundary.
+    """
+    for raw in response.iter_lines(decode_unicode=False):
+        if isinstance(raw, bytes):
+            yield raw.decode("utf-8", errors="replace")
+        else:
+            yield str(raw)
 
 
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\[\]]{1,500})\]\((?:https?://)?[^\s()\[\]]{1,800}\)")
