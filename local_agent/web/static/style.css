@@ -824,6 +824,28 @@ kbd {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
+/* Inline screenshot / image thumbnail ---------------------------------- */
+.file-thumb {
+  position: relative;
+  display: block;
+  width: 176px;
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  background: var(--bg-input);
+  transition: border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+.file-thumb:hover { border-color: var(--accent); transform: translateY(-1px); }
+.file-thumb img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 220px;
+  object-fit: cover;
+  object-position: top;
+}
+
 /* ------------------------------------------------------------- composer */
 .composer {
   grid-area: composer;
@@ -1047,6 +1069,24 @@ kbd {
 .field__row { display: flex; gap: 6px; align-items: center; }
 .field__row input { flex: 1; min-width: 0; }
 .field__hint { margin: 0; font-size: 11px; color: var(--text-faint); }
+
+/* Billing / token tab --------------------------------------------------- */
+.billing {
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  padding: var(--space-3);
+  margin-top: 2px;
+}
+.billing__empty { margin: 0; font-size: 12px; color: var(--text-muted); }
+.billing__grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+.billing__item { display: flex; flex-direction: column; gap: 2px; }
+.billing__label { font-size: 11px; color: var(--text-faint); }
+.billing__value {
+  font-size: 14px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.billing__value small { font-size: 10px; color: var(--text-faint); font-weight: 400; }
 .field--switch { flex-direction: row; align-items: center; justify-content: space-between; }
 
 .switch {

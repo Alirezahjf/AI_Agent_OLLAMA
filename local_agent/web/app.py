@@ -20,6 +20,9 @@ Endpoints
 ``POST /api/settings``        update provider / model / confirm mode
 ``POST /api/upload``          drop a file into the workspace
 ``GET  /api/file``            fetch a workspace artifact
+``GET  /api/artifact``        fetch a tool artifact (workspace or data dir)
+``POST /api/provider/detect`` auto-detect provider from base URL + API key
+``GET  /api/billing``         live credit / usage for the cloud provider
 ``WS   /ws``                  chat + confirmation stream
 """
 
@@ -35,6 +38,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from queue import Empty
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -86,6 +90,11 @@ class UploadRequest(BaseModel):
     content_base64: str = ""
 
 
+class DetectProviderRequest(BaseModel):
+    base_url: str = ""
+    api_key: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -130,6 +139,30 @@ def safe_workspace_path(work_dir: Path, candidate: str) -> Path:
     if resolved != root and root not in resolved.parents:
         raise HTTPException(403, "path is outside the workspace")
     return resolved
+
+
+def resolve_artifact_path(work_dir: Path, data_dir: Path, candidate: str) -> Path:
+    """Resolve a tool artifact against the workspace *or* the data dir.
+
+    Screenshots are saved under ``data_dir/screenshots`` while other tools
+    write into ``work_dir``, so an artifact's ``path`` (as reported by the
+    bridge) can live under either root.  Absolute paths inside either root
+    are also accepted.  Anything else raises 403/404.
+    """
+    if not candidate:
+        raise HTTPException(400, "empty path")
+    raw = Path(candidate)
+    roots = (work_dir.resolve(), data_dir.resolve())
+    targets = [raw] + ([work_dir / raw, data_dir / raw] if not raw.is_absolute() else [])
+    for target in targets:
+        try:
+            resolved = target.resolve()
+        except OSError as exc:  # pragma: no cover - depends on filesystem
+            raise HTTPException(400, f"bad path: {exc}") from exc
+        for root in roots:
+            if resolved == root or root in resolved.parents:
+                return resolved
+    raise HTTPException(403, "path is outside the workspace / data directory")
 
 
 def _server_of(client: BridgeClient) -> Any:
@@ -184,6 +217,67 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
             return client.list_models()
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(502, f"could not list models: {exc}")
+
+    @app.post("/api/provider/detect")
+    async def detect_provider_endpoint(req: DetectProviderRequest) -> dict[str, Any]:
+        """Identify the gateway for a base URL + API key and validate it.
+
+        Uses the persisted config as fallback when either field is empty.
+        Returns the detected provider id/label, whether the key is valid,
+        and the real model list from ``/models``.
+        """
+        from dataclasses import replace
+
+        from ..llm.client import create_client
+        from ..llm.providers import detect_provider
+
+        server = _server_of(client)
+        current = server.handlers.settings.llm if server is not None else settings.llm
+        base_url = req.base_url.strip() or current.openai_base_url
+        api_key = req.api_key.strip() or current.openai_api_key
+        info = detect_provider(base_url, api_key)
+        models: list[str] = []
+        valid = False
+        error: str | None = None
+        if base_url and api_key:
+            try:
+                probe = replace(
+                    current,
+                    provider="openai_compatible",
+                    openai_base_url=base_url,
+                    openai_api_key=api_key,
+                )
+                models = create_client(probe).list_models()
+                valid = True
+            except Exception as exc:  # noqa: BLE001
+                error = str(exc)
+        return {
+            "provider": info.id,
+            "label": info.label,
+            "base_url": base_url or info.default_base_url,
+            "valid": valid,
+            "models": models,
+            "error": error,
+        }
+
+    @app.get("/api/billing")
+    async def billing() -> dict[str, Any]:
+        """Live credit / usage summary for the active cloud provider."""
+        from ..llm.providers import fetch_billing
+
+        server = _server_of(client)
+        llm = server.handlers.settings.llm if server is not None else settings.llm
+        if not llm.openai_base_url or not llm.openai_api_key:
+            return {
+                "provider": llm.provider,
+                "label": "",
+                "available": False,
+                "error": "درگاه مالی فقط برای ارائه‌دهندگان ابری با کلید API در دسترس است",
+            }
+        hint = llm.provider if llm.provider == "ollama" else ""
+        return await asyncio.to_thread(
+            fetch_billing, llm.openai_base_url, llm.openai_api_key, provider_hint=hint
+        )
 
     @app.get("/api/history")
     async def history(limit: int = 50) -> list[dict[str, Any]]:
@@ -269,6 +363,15 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         media_type, _ = mimetypes.guess_type(target.name)
         return FileResponse(str(target), media_type=media_type or "application/octet-stream")
 
+    @app.get("/api/artifact")
+    async def get_artifact(path: str) -> FileResponse:
+        """Serve a tool artifact (screenshot, file) from the workspace or data dir."""
+        target = resolve_artifact_path(settings.work_dir, settings.data_dir, path)
+        if not target.is_file():
+            raise HTTPException(404, "file not found")
+        media_type, _ = mimetypes.guess_type(target.name)
+        return FileResponse(str(target), media_type=media_type or "application/octet-stream")
+
     @app.websocket("/ws")
     async def ws(websocket: WebSocket) -> None:
         await websocket.accept()
@@ -294,12 +397,23 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                     run_id = server.handlers._start_chat_run(message)
                     queue = server.handlers.event_bus.create_run_queue(run_id)
                     try:
+                        idle_ticks = 0
                         while True:
                             try:
-                                event = await asyncio.to_thread(queue.get, timeout=600)
-                            except Exception:
-                                # queue.Empty or thread timeout - treat as end of stream
-                                break
+                                event = await asyncio.to_thread(queue.get, timeout=20)
+                            except Empty:
+                                # The run is alive but idle right now (e.g. a
+                                # long-running tool). Keep the socket warm and
+                                # keep polling instead of treating a quiet gap
+                                # as the end of the stream.
+                                idle_ticks += 1
+                                if idle_ticks > 500:  # safety net (~2.5h idle)
+                                    break
+                                await websocket.send_text(json.dumps(
+                                    {"type": "pong", "ts": time.time()}
+                                ))
+                                continue
+                            idle_ticks = 0
                             if event is None:
                                 break
                             await websocket.send_text(json.dumps({
@@ -404,7 +518,10 @@ def run_web(argv: list[str] | None = None) -> int:
     import os
 
     from ..core.config import load_settings
+    from ..utils.encoding import ensure_utf8_stdio
     from ..utils.platform import log_platform_summary
+
+    ensure_utf8_stdio()
 
     parser = argparse.ArgumentParser(
         prog="persian-local-web",

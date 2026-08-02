@@ -199,6 +199,39 @@ def _patch_llm(handlers: BridgeHandlers, scripted: _ScriptedLLM) -> None:
     bridge_api.handlers.create_client = lambda settings: scripted  # type: ignore[assignment]
 
 
+def test_collect_artifacts_finds_screenshots_and_workspace_files(tmp_path: Path) -> None:
+    from local_agent.bridge.api.handlers import _collect_artifacts
+    from local_agent.core.config import AssistantSettings
+
+    settings = AssistantSettings(data_dir=tmp_path, work_dir=tmp_path)
+    shot = tmp_path / "screenshots" / "desktop.png"
+    shot.parent.mkdir(parents=True)
+    shot.write_bytes(b"fake-png")
+    report = tmp_path / "windows.md"
+    report.write_text("# hi", encoding="utf-8")
+
+    out = _collect_artifacts(
+        f"اسکرین‌شات ذخیره شد: {shot} (1920x1080)\nفایل نوشته شد: {report}",
+        settings,
+    )
+    paths = {a["path"] for a in out}
+    kinds = {a["name"]: a["kind"] for a in out}
+    assert "screenshots/desktop.png" in paths
+    assert "windows.md" in paths
+    assert kinds["desktop.png"] == "image"
+    assert kinds["windows.md"] == "file"
+
+
+def test_collect_artifacts_ignores_out_of_scope_paths(tmp_path: Path) -> None:
+    from local_agent.bridge.api.handlers import _collect_artifacts
+    from local_agent.core.config import AssistantSettings
+
+    settings = AssistantSettings(data_dir=tmp_path, work_dir=tmp_path)
+    outside = tmp_path.parent / "outside.png"
+    outside.write_bytes(b"x")
+    assert _collect_artifacts(f"saved {outside}", settings) == []
+
+
 def test_chat_stream_emits_events(tmp_path: Path) -> None:
     settings = _make_settings(tmp_path)
     handlers = BridgeHandlers.build(settings)

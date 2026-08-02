@@ -13,3 +13,4 @@ build/
 dist/
 *.spec
 !local_agent/desktop/installer.iss
+.venv_test/

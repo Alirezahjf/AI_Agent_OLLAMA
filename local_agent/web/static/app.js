@@ -201,6 +201,10 @@
 
       models: [],
       modelsLoading: false,
+      detectingProvider: false,
+      billingLoading: false,
+      billing: null,
+      billingOpen: false,
       form: {
         provider: "ollama",
         model: "",
@@ -354,6 +358,7 @@
             this.pushMessage({
               role: "tool", name: p.name, status: "running", expanded: false,
               arguments: p.arguments || {}, output: "", artifacts: [], risk: p.risk || "safe",
+              call_id: p.call_id,
             });
             break;
           case "tool_confirm_requested":
@@ -366,7 +371,12 @@
             this.beep("warn");
             break;
           case "tool_result": {
-            const card = this.lastToolCard(p.name);
+            // Prefer a call_id match so a card updates live even when the
+            // same tool name runs several times in one turn; fall back to
+            // the most recent running card with that name.
+            const card = p.call_id
+              ? this.lastToolCard(p.name, p.call_id)
+              : this.lastToolCard(p.name);
             const ok = p.success !== false && !p.refused;
             if (card) {
               card.status = ok ? "done" : "error";
@@ -486,17 +496,35 @@
         this.pushMessage({ role: role === "error" ? "error" : "system", content });
       },
 
-      lastToolCard(name) {
+      lastToolCard(name, callId) {
         for (let i = this.messages.length - 1; i >= 0; i -= 1) {
           const m = this.messages[i];
-          if (m.role === "tool" && m.name === name && m.status === "running") return m;
+          if (m.role !== "tool" || m.name !== name || m.status !== "running") continue;
+          if (callId && m.call_id && m.call_id === callId) return m;
+          if (!callId) return m;
+        }
+        // call_id requested but not found on a running card — fall back to name
+        if (callId) {
+          for (let i = this.messages.length - 1; i >= 0; i -= 1) {
+            const m = this.messages[i];
+            if (m.role === "tool" && m.name === name && m.status === "running") return m;
+          }
         }
         return null;
       },
 
       detectArtifacts(text) {
-        const matches = String(text).match(/[\w./\\-]+\.(?:png|jpe?g|gif|webp|md|txt|json|csv|log|pdf|zip)/gi);
-        return matches ? Array.from(new Set(matches)).slice(0, 6) : [];
+        // Match file tokens (relative or absolute Windows/POSIX paths). The
+        // backend normally sends structured artifacts; this is a safe fallback
+        // for older stored conversations.
+        const matches = String(text).match(/[^\s"'<>]+\.(?:png|jpe?g|gif|webp|bmp|md|txt|json|csv|log|pdf|zip)/gi);
+        const out = [];
+        for (const m of (matches || [])) {
+          const clean = String(m).replace(/[,;:)\]}]+$/g, "").trim();
+          if (clean && out.indexOf(clean) === -1) out.push(clean);
+          if (out.length >= 6) break;
+        }
+        return out;
       },
 
       renderMarkdown(text) {
@@ -617,9 +645,83 @@
         this.toast("info", "ℹ️", "کلید API خود را وارد کنید و ذخیره بزنید");
       },
 
+      async autoDetectProvider() {
+        if (this.connection === "offline") {
+          this.toast("info", "ℹ️", "در حالت نمایش آفلاین تشخیص خودکار در دسترس نیست");
+          return;
+        }
+        this.detectingProvider = true;
+        try {
+          const result = await this.api("/api/provider/detect", {
+            method: "POST",
+            body: JSON.stringify({
+              base_url: this.form.openai_base_url || "",
+              api_key: this.form.openai_api_key || "",
+            }),
+          });
+          this.form.provider = "openai_compatible";
+          if (result.base_url) this.form.openai_base_url = result.base_url;
+          this.form.model = (result.models && result.models[0]) || this.form.model;
+          if (result.models && result.models.length) this.models = result.models;
+          if (result.valid) {
+            this.toast("ok", "✅", "ارائه‌دهنده تشخیص داده شد: " + (result.label || result.provider));
+          } else {
+            this.toast("bad", "⚠️", "تشخیص خودکار ناموفق بود — " + (result.error || "کلید یا آدرس معتبر نیست"));
+          }
+        } catch (_) {
+          this.toast("bad", "❌", "تشخیص خودکار ناموفق بود");
+        } finally {
+          this.detectingProvider = false;
+        }
+      },
+
       openSettings() {
         this.settingsOpen = true;
         if (this.models.length === 0) this.refreshModels();
+      },
+
+      /* ------------------------------------------------ billing / tokens */
+
+      async openBilling() {
+        this.billingOpen = true;
+        this.loadBilling();
+      },
+
+      async loadBilling() {
+        if (this.connection === "offline") {
+          this.billing = { available: false, error: "در حالت نمایش آفلاین در دسترس نیست" };
+          return;
+        }
+        this.billingLoading = true;
+        try {
+          this.billing = await this.api("/api/billing");
+        } catch (_) {
+          this.billing = { available: false, error: "دریافت اطلاعات مالی ناموفق بود" };
+        } finally {
+          this.billingLoading = false;
+        }
+      },
+
+      formatAmount(value) {
+        if (value === null || value === undefined || value === "") return "—";
+        const num = Number(value);
+        if (!Number.isFinite(num)) return String(value);
+        try {
+          return new Intl.NumberFormat("fa-IR").format(num);
+        } catch (_) {
+          return String(num);
+        }
+      },
+
+      formatExpiry(value) {
+        if (!value) return "—";
+        const d = new Date(value);
+        if (Number.isNaN(d.getTime())) return String(value);
+        try {
+          return new Intl.DateTimeFormat("fa-IR", { year: "numeric", month: "long", day: "numeric" }).format(d);
+        } catch (_) {
+          return String(value);
+        }
       },
 
       async saveSettings() {
@@ -870,6 +972,33 @@
         const name = String(path);
         for (const [pattern, icon] of FILE_ICONS) if (pattern.test(name)) return icon;
         return "📎";
+      },
+
+      /* -------------------------------------- artifacts (screenshots & files) */
+
+      artifactName(f) {
+        if (typeof f === "object" && f !== null) return f.name || f.path || "";
+        return this.baseName(f);
+      },
+
+      artifactPath(f) {
+        if (typeof f === "object" && f !== null) return f.path || f.name || "";
+        return String(f);
+      },
+
+      artifactUrl(f) {
+        if (this.connection === "offline") return "#";
+        const p = this.artifactPath(f);
+        return "/api/artifact?path=" + encodeURIComponent(p);
+      },
+
+      artifactIcon(f) { return this.fileIcon(this.artifactPath(f)); },
+
+      artifactKey(f) { return this.artifactPath(f) || this.artifactName(f) || "artifact"; },
+
+      isImageArtifact(f) {
+        if (typeof f === "object" && f !== null && f.kind) return f.kind === "image";
+        return /\.(png|jpe?g|gif|webp|bmp)$/i.test(String(f));
       },
 
       /* ----------------------------------------------------------- voice */

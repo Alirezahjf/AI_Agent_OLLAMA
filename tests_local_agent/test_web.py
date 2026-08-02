@@ -268,6 +268,71 @@ def test_file_endpoint_serves_and_guards(web_server: WebServer, tmp_path: Path) 
     assert missing.status_code == 404
 
 
+def test_artifact_endpoint_serves_screenshots_and_workspace(tmp_path: Path, web_server: WebServer) -> None:
+    (tmp_path / "screenshot.png").write_bytes(b"png")
+    (tmp_path / "screenshots").mkdir(exist_ok=True)
+    (tmp_path / "screenshots" / "desktop.png").write_bytes(b"png")
+    (tmp_path / "report.md").write_text("# سلام", encoding="utf-8")
+    base = f"http://127.0.0.1:{web_server.port}"
+
+    ok = requests.get(base + "/api/artifact", params={"path": "report.md"}, timeout=3)
+    assert ok.status_code == 200
+    assert "# سلام" in ok.text
+
+    ok2 = requests.get(base + "/api/artifact", params={"path": "screenshots/desktop.png"}, timeout=3)
+    assert ok2.status_code == 200
+    assert ok2.content == b"png"
+
+    for escape in ("../../etc/passwd", "/etc/passwd"):
+        blocked = requests.get(base + "/api/artifact", params={"path": escape}, timeout=3)
+        assert blocked.status_code in {403, 404}
+
+    missing = requests.get(base + "/api/artifact", params={"path": "nope.png"}, timeout=3)
+    assert missing.status_code == 404
+
+
+def test_provider_detect_endpoint_detects_and_lists_models(web_server: WebServer, monkeypatch) -> None:
+    import local_agent.llm.client as llm_client
+
+    class _FakeClient:
+        def list_models(self):
+            return ["gpt-4o-mini", "claude-sonnet-4"]
+
+    monkeypatch.setattr(llm_client, "create_client", lambda settings: _FakeClient())
+    base = f"http://127.0.0.1:{web_server.port}"
+    r = requests.post(
+        base + "/api/provider/detect",
+        json={"base_url": "https://api.avalai.ir/v1", "api_key": "sk-test"},
+        timeout=5,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["provider"] == "avalai"
+    assert body["valid"] is True
+    assert "gpt-4o-mini" in body["models"]
+
+
+def test_provider_detect_endpoint_handles_missing_credentials(web_server: WebServer) -> None:
+    base = f"http://127.0.0.1:{web_server.port}"
+    r = requests.post(
+        base + "/api/provider/detect",
+        json={"base_url": "", "api_key": ""},
+        timeout=5,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["valid"] is False
+    assert body["models"] == []
+
+
+def test_billing_endpoint_returns_not_available_without_cloud_key(web_server: WebServer) -> None:
+    base = f"http://127.0.0.1:{web_server.port}"
+    r = requests.get(base + "/api/billing", timeout=5)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["available"] is False
+
+
 def test_settings_endpoint_updates_the_model(web_server: WebServer) -> None:
     r = requests.post(
         f"http://127.0.0.1:{web_server.port}/api/settings",

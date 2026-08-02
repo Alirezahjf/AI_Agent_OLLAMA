@@ -108,6 +108,8 @@ def list_windows(*, filter: str = "", context: ActionContext) -> str:
             ["wmctrl", "-l"],
             capture_output=True,
             text=True,
+                encoding="utf-8",
+                errors="replace",
             timeout=10,
             check=False,
         )
@@ -169,7 +171,9 @@ def move_window(
     gravity = 0
     args = ["wmctrl", "-r", title, "-e", f"{gravity},{int(x)},{int(y)},{int(width)},{int(height)}"]
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=5, check=False)
+        result = subprocess.run(args, capture_output=True, text=True,
+                encoding="utf-8",
+                errors="replace", timeout=5, check=False)
         if result.returncode != 0:
             logger.debug("wmctrl move returned %s: %s", result.returncode, result.stderr)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -203,6 +207,8 @@ def minimize_window_action(*, title: str, context: ActionContext) -> str:
             ["xdotool", "search", "--name", title],
             capture_output=True,
             text=True,
+                encoding="utf-8",
+                errors="replace",
             timeout=5,
             check=False,
         )
@@ -241,6 +247,8 @@ def maximize_window_action(*, title: str, context: ActionContext) -> str:
             ["wmctrl", "-r", title, "-b", "add,maximized_vert,maximized_horz"],
             capture_output=True,
             text=True,
+                encoding="utf-8",
+                errors="replace",
             timeout=5,
             check=False,
         )
@@ -277,6 +285,8 @@ def _focus_by_title(title: str) -> str | None:
                 ["wmctrl", "-a", title],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
                 check=False,
             )
@@ -284,6 +294,8 @@ def _focus_by_title(title: str) -> str | None:
                 ["wmctrl", "-l"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
                 check=False,
             )
@@ -314,6 +326,8 @@ def _wait_for_window(needle: str, deadline: float) -> str | None:
                         ["wmctrl", "-l"],
                         capture_output=True,
                         text=True,
+                encoding="utf-8",
+                errors="replace",
                         timeout=5,
                         check=False,
                     )

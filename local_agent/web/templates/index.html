@@ -237,14 +237,22 @@
                   <div class="tool__section">
                     <span class="tool__label">فایل‌ها</span>
                     <div class="files">
-                      <template x-for="f in m.artifacts" :key="f">
-                        <a class="file-card" :href="fileUrl(f)" target="_blank" rel="noopener">
-                          <span class="file-card__icon" x-text="fileIcon(f)" aria-hidden="true"></span>
-                          <span class="file-card__body">
-                            <span class="file-card__name" x-text="baseName(f)"></span>
-                            <span class="file-card__path" x-text="f"></span>
-                          </span>
-                        </a>
+                      <template x-for="f in m.artifacts" :key="artifactKey(f)">
+                        <template x-if="isImageArtifact(f)">
+                          <a class="file-thumb" :href="artifactUrl(f)" target="_blank" rel="noopener"
+                             :title="artifactName(f)">
+                            <img :src="artifactUrl(f)" :alt="artifactName(f)" loading="lazy">
+                          </a>
+                        </template>
+                        <template x-else>
+                          <a class="file-card" :href="artifactUrl(f)" target="_blank" rel="noopener">
+                            <span class="file-card__icon" x-text="artifactIcon(f)" aria-hidden="true"></span>
+                            <span class="file-card__body">
+                              <span class="file-card__name" x-text="artifactName(f)"></span>
+                              <span class="file-card__path" x-text="artifactPath(f)"></span>
+                            </span>
+                          </a>
+                        </template>
                       </template>
                     </div>
                   </div>
@@ -489,12 +497,58 @@
         </div>
         <div class="field" x-show="form.provider !== 'ollama'">
           <label for="set-base">آدرس پایهٔ API</label>
-          <input id="set-base" x-model="form.openai_base_url" placeholder="https://api.avalai.ir/v1" dir="ltr">
+          <div class="field__row">
+            <input id="set-base" x-model="form.openai_base_url" placeholder="https://api.avalai.ir/v1" dir="ltr">
+            <button class="btn btn--ghost btn--sm" type="button" @click="autoDetectProvider()" :disabled="detectingProvider">
+              <span x-show="!detectingProvider">🔍 تشخیص خودکار</span>
+              <span x-show="detectingProvider" x-cloak>در حال بررسی…</span>
+            </button>
+          </div>
         </div>
         <div class="field" x-show="form.provider !== 'ollama'">
           <label for="set-key">کلید API</label>
           <input id="set-key" type="password" x-model="form.openai_api_key" placeholder="••••••••" dir="ltr" autocomplete="off">
-          <p class="field__hint">کلید فقط روی همین دستگاه ذخیره می‌شود و هرگز به جایی ارسال نمی‌شود.</p>
+          <p class="field__hint">
+            کلید فقط روی همین دستگاه ذخیره می‌شود و هرگز به جایی ارسال نمی‌شود.
+            «تشخیص خودکار» کلید و آدرس را می‌خواند و ارائه‌دهنده (مثلاً AvalAI یا GapGPT) و لیست واقعی مدل‌ها را بازمی‌گرداند.
+          </p>
+        </div>
+        <div class="field" x-show="form.provider !== 'ollama'">
+          <label>💰 مالی و توکن</label>
+          <div class="field__row">
+            <button class="btn btn--ghost btn--sm" type="button" @click="loadBilling()" :disabled="billingLoading">
+              <span x-show="!billingLoading">به‌روزرسانی موجودی</span>
+              <span x-show="billingLoading" x-cloak>در حال دریافت…</span>
+            </button>
+          </div>
+          <div class="billing" x-show="billing" x-cloak>
+            <p x-show="billing && billing.available === false" class="billing__empty">
+              {{ billing && billing.error ? billing.error : "درگاه مالی در دسترس نیست." }}
+            </p>
+            <template x-if="billing && billing.available">
+              <div class="billing__grid">
+                <div class="billing__item">
+                  <span class="billing__label">موجودی</span>
+                  <strong class="billing__value" dir="ltr">
+                    {{ formatAmount(billing.balance) }} <small x-text="billing.currency || ''"></small>
+                  </strong>
+                </div>
+                <div class="billing__item">
+                  <span class="billing__label">مصرف (unit)</span>
+                  <strong class="billing__value" dir="ltr">{{ formatAmount(billing.usage) }}</strong>
+                </div>
+                <div class="billing__item">
+                  <span class="billing__label">تاریخ انقضا</span>
+                  <strong class="billing__value">{{ formatExpiry(billing.expires) }}</strong>
+                </div>
+                <div class="billing__item">
+                  <span class="billing__label">ارائه‌دهنده</span>
+                  <strong class="billing__value" x-text="billing.label || billing.provider || '—'"></strong>
+                </div>
+              </div>
+            </template>
+          </div>
+          <p class="field__hint">موجودی و مصرف بر اساس مستندات ارائه‌دهنده (AvalAI / GapGPT / OpenAI) بازیابی می‌شود.</p>
         </div>
         <div class="field">
           <label for="set-confirm">حالت تأیید</label>
