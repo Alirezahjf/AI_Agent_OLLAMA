@@ -517,7 +517,8 @@
           <label>💰 مالی و توکن</label>
           <div class="field__row">
             <button class="btn btn--ghost btn--sm" type="button" @click="loadBilling()" :disabled="billingLoading">
-              <span x-show="!billingLoading">به‌روزرسانی موجودی</span>
+              <span x-show="!billingLoading && !billing">نمایش موجودی</span>
+              <span x-show="!billingLoading && billing">به‌روزرسانی موجودی</span>
               <span x-show="billingLoading" x-cloak>در حال دریافت…</span>
             </button>
           </div>
@@ -526,29 +527,96 @@
               {{ billing && billing.error ? billing.error : "درگاه مالی در دسترس نیست." }}
             </p>
             <template x-if="billing && billing.available">
-              <div class="billing__grid">
-                <div class="billing__item">
-                  <span class="billing__label">موجودی</span>
-                  <strong class="billing__value" dir="ltr">
-                    {{ formatAmount(billing.balance) }} <small x-text="billing.currency || ''"></small>
-                  </strong>
+              <div class="billing__content">
+                <div class="billing__grid">
+                  <div class="billing__item">
+                    <span class="billing__label">موجودی (تومان)</span>
+                    <strong class="billing__value">
+                      {{ formatAmount(billing.balance) }}
+                      <small x-show="billing.balance_unit !== null && billing.balance_unit !== undefined"
+                             dir="ltr" x-text="'≈ ' + formatFineAmount(billing.balance_unit) + ' یونیت'"></small>
+                    </strong>
+                  </div>
+                  <div class="billing__item" x-show="billing.usage_24h">
+                    <span class="billing__label">مصرف ۲۴ ساعت اخیر</span>
+                    <strong class="billing__value">
+                      {{ billing.usage_24h ? formatAmount(billing.usage_24h.tokens_total) + ' توکن' : '—' }}
+                      <small x-text="billing.usage_24h ? formatAmount(billing.usage_24h.transactions) + ' تراکنش' : ''"></small>
+                    </strong>
+                  </div>
+                  <div class="billing__item" x-show="billing.usage_24h">
+                    <span class="billing__label">هزینهٔ ۲۴ ساعت اخیر</span>
+                    <strong class="billing__value">
+                      {{ billing.usage_24h ? formatFineAmount(billing.usage_24h.cost_unit) + ' یونیت' : '—' }}
+                      <small x-show="billing.usage_24h && billing.usage_24h.cost_paid_irt !== null"
+                             x-text="billing.usage_24h ? formatAmount(billing.usage_24h.cost_paid_irt) + ' تومان' : ''"></small>
+                    </strong>
+                  </div>
+                  <div class="billing__item">
+                    <span class="billing__label">نزدیک‌ترین تاریخ انقضا</span>
+                    <strong class="billing__value">{{ formatExpiry(billing.expires) }}</strong>
+                  </div>
+                  <div class="billing__item" x-show="billing.limit !== null && billing.limit !== undefined">
+                    <span class="billing__label">سقف اعتبار (تومان)</span>
+                    <strong class="billing__value">{{ formatAmount(billing.limit) }}</strong>
+                  </div>
+                  <div class="billing__item" x-show="billing.exchange_rate !== null && billing.exchange_rate !== undefined">
+                    <span class="billing__label">نرخ تبدیل (تومان)</span>
+                    <strong class="billing__value">{{ formatAmount(billing.exchange_rate) }}</strong>
+                  </div>
+                  <div class="billing__item" x-show="billing.account_tier !== null && billing.account_tier !== undefined">
+                    <span class="billing__label">ردهٔ حساب</span>
+                    <strong class="billing__value">{{ formatAmount(billing.account_tier) }}</strong>
+                  </div>
+                  <div class="billing__item">
+                    <span class="billing__label">ارائه‌دهنده</span>
+                    <strong class="billing__value" x-text="billing.label || billing.provider || '—'"></strong>
+                  </div>
                 </div>
-                <div class="billing__item">
-                  <span class="billing__label">مصرف (unit)</span>
-                  <strong class="billing__value" dir="ltr">{{ formatAmount(billing.usage) }}</strong>
-                </div>
-                <div class="billing__item">
-                  <span class="billing__label">تاریخ انقضا</span>
-                  <strong class="billing__value">{{ formatExpiry(billing.expires) }}</strong>
-                </div>
-                <div class="billing__item">
-                  <span class="billing__label">ارائه‌دهنده</span>
-                  <strong class="billing__value" x-text="billing.label || billing.provider || '—'"></strong>
-                </div>
+
+                <template x-if="billingCreditSources().length">
+                  <div class="billing__section">
+                    <span class="billing__label">بسته‌ها و اعتبارهای فعال</span>
+                    <ul class="billing__list">
+                      <template x-for="src in billingCreditSources()" :key="(src.kind || '') + (src.id || src.name)">
+                        <li>
+                          <span class="billing__src-name" dir="auto" :title="src.description || ''" x-text="(src.kind === 'grant' ? '🎁 ' : '📦 ') + (src.name || '—')"></span>
+                          <span>
+                            {{ formatAmount(src.remaining_irt) }} تومان
+                            <small class="billing__src-expiry" x-text="src.end_date ? ('تا ' + formatExpiry(src.end_date)) : ''"></small>
+                          </span>
+                        </li>
+                      </template>
+                    </ul>
+                  </div>
+                </template>
+
+                <template x-if="billingTransactions().length">
+                  <div class="billing__section">
+                    <span class="billing__label" x-text="'تراکنش‌های اخیر (۲۴ ساعت گذشته' + (billing.transactions_total ? ' — مجموعاً ' + formatAmount(billing.transactions_total) : '') + ')'"></span>
+                    <div class="billing__tx">
+                      <template x-for="tx in billingTransactions()" :key="tx.id">
+                        <div class="billing__txrow">
+                          <span class="billing__txmodel" dir="ltr" x-text="tx.model || '—'"></span>
+                          <span class="billing__txtokens" x-text="formatAmount(tx.tokens_total) + ' توکن'"></span>
+                          <span class="billing__txstatus"
+                                :class="'billing__txstatus--' + ((tx.status_code || 0) < 400 ? 'ok' : 'bad')"
+                                x-text="tx.status_code || '?'"></span>
+                          <span class="billing__txtime" x-text="formatIsoTime(tx.created_at)"></span>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+
+                <p class="billing__fetched" x-show="billing.fetched_at" x-text="'به‌روزرسانی: ' + formatIsoTime(billing.fetched_at)"></p>
               </div>
             </template>
           </div>
-          <p class="field__hint">موجودی و مصرف بر اساس مستندات ارائه‌دهنده (AvalAI / GapGPT / OpenAI) بازیابی می‌شود.</p>
+          <p class="field__hint">
+            موجودی، بسته‌ها، مصرف ۲۴ ساعت و تراکنش‌های اخیر بر اساس User API رسمی ارائه‌دهنده
+            (برای AvalAI: <code dir="ltr">api.avalai.ir/user/v1</code>) خوانده می‌شود.
+          </p>
         </div>
         <div class="field">
           <label for="set-confirm">حالت تأیید</label>

@@ -724,6 +724,41 @@
         }
       },
 
+      formatIsoTime(value) {
+        // Short fa-IR timestamp for ISO strings (transactions, fetched_at).
+        if (!value) return "—";
+        const d = new Date(value);
+        if (Number.isNaN(d.getTime())) return String(value);
+        try {
+          return new Intl.DateTimeFormat("fa-IR", {
+            month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+          }).format(d);
+        } catch (_) {
+          return String(value);
+        }
+      },
+
+      formatFineAmount(value) {
+        // Tiny unit costs (0.0146689) need fraction digits, unlike IRT.
+        if (value === null || value === undefined || value === "") return "—";
+        const num = Number(value);
+        if (!Number.isFinite(num)) return String(value);
+        try {
+          return new Intl.NumberFormat("fa-IR", { maximumFractionDigits: 6 }).format(num);
+        } catch (_) {
+          return String(num);
+        }
+      },
+
+      billingCreditSources() {
+        const b = this.billing || {};
+        return [...(b.packages || []), ...(b.grants || [])];
+      },
+
+      billingTransactions() {
+        return (this.billing && this.billing.transactions) || [];
+      },
+
       async saveSettings() {
         if (this.connection === "offline") {
           this.settingsOpen = false;
