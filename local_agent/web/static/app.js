@@ -680,6 +680,50 @@
         if (this.models.length === 0) this.refreshModels();
       },
 
+      /* ------------------------------------------------ billing / tokens */
+
+      async openBilling() {
+        this.billingOpen = true;
+        this.loadBilling();
+      },
+
+      async loadBilling() {
+        if (this.connection === "offline") {
+          this.billing = { available: false, error: "در حالت نمایش آفلاین در دسترس نیست" };
+          return;
+        }
+        this.billingLoading = true;
+        try {
+          this.billing = await this.api("/api/billing");
+        } catch (_) {
+          this.billing = { available: false, error: "دریافت اطلاعات مالی ناموفق بود" };
+        } finally {
+          this.billingLoading = false;
+        }
+      },
+
+      formatAmount(value) {
+        if (value === null || value === undefined || value === "") return "—";
+        const num = Number(value);
+        if (!Number.isFinite(num)) return String(value);
+        try {
+          return new Intl.NumberFormat("fa-IR").format(num);
+        } catch (_) {
+          return String(num);
+        }
+      },
+
+      formatExpiry(value) {
+        if (!value) return "—";
+        const d = new Date(value);
+        if (Number.isNaN(d.getTime())) return String(value);
+        try {
+          return new Intl.DateTimeFormat("fa-IR", { year: "numeric", month: "long", day: "numeric" }).format(d);
+        } catch (_) {
+          return String(value);
+        }
+      },
+
       async saveSettings() {
         if (this.connection === "offline") {
           this.settingsOpen = false;

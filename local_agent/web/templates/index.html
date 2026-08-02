@@ -513,6 +513,43 @@
             «تشخیص خودکار» کلید و آدرس را می‌خواند و ارائه‌دهنده (مثلاً AvalAI یا GapGPT) و لیست واقعی مدل‌ها را بازمی‌گرداند.
           </p>
         </div>
+        <div class="field" x-show="form.provider !== 'ollama'">
+          <label>💰 مالی و توکن</label>
+          <div class="field__row">
+            <button class="btn btn--ghost btn--sm" type="button" @click="loadBilling()" :disabled="billingLoading">
+              <span x-show="!billingLoading">به‌روزرسانی موجودی</span>
+              <span x-show="billingLoading" x-cloak>در حال دریافت…</span>
+            </button>
+          </div>
+          <div class="billing" x-show="billing" x-cloak>
+            <p x-show="billing && billing.available === false" class="billing__empty">
+              {{ billing && billing.error ? billing.error : "درگاه مالی در دسترس نیست." }}
+            </p>
+            <template x-if="billing && billing.available">
+              <div class="billing__grid">
+                <div class="billing__item">
+                  <span class="billing__label">موجودی</span>
+                  <strong class="billing__value" dir="ltr">
+                    {{ formatAmount(billing.balance) }} <small x-text="billing.currency || ''"></small>
+                  </strong>
+                </div>
+                <div class="billing__item">
+                  <span class="billing__label">مصرف (unit)</span>
+                  <strong class="billing__value" dir="ltr">{{ formatAmount(billing.usage) }}</strong>
+                </div>
+                <div class="billing__item">
+                  <span class="billing__label">تاریخ انقضا</span>
+                  <strong class="billing__value">{{ formatExpiry(billing.expires) }}</strong>
+                </div>
+                <div class="billing__item">
+                  <span class="billing__label">ارائه‌دهنده</span>
+                  <strong class="billing__value" x-text="billing.label || billing.provider || '—'"></strong>
+                </div>
+              </div>
+            </template>
+          </div>
+          <p class="field__hint">موجودی و مصرف بر اساس مستندات ارائه‌دهنده (AvalAI / GapGPT / OpenAI) بازیابی می‌شود.</p>
+        </div>
         <div class="field">
           <label for="set-confirm">حالت تأیید</label>
           <select id="set-confirm" x-model="form.confirm_mode">
