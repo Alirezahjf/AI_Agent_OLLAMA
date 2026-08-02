@@ -404,7 +404,10 @@ def run_web(argv: list[str] | None = None) -> int:
     import os
 
     from ..core.config import load_settings
+    from ..utils.encoding import ensure_utf8_stdio
     from ..utils.platform import log_platform_summary
+
+    ensure_utf8_stdio()
 
     parser = argparse.ArgumentParser(
         prog="persian-local-web",

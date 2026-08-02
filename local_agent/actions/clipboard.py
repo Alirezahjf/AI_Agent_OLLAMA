@@ -122,6 +122,8 @@ def _read_clipboard_macos() -> str:
             ["pbpaste"],
             capture_output=True,
             text=True,
+                encoding="utf-8",
+                errors="replace",
             timeout=5,
             check=False,
         )
@@ -138,6 +140,8 @@ def _read_clipboard_linux() -> str:
                 ["wl-paste", "--no-newline"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
                 check=False,
             )
@@ -153,6 +157,8 @@ def _read_clipboard_linux() -> str:
                 ["xclip", "-selection", "clipboard", "-o"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
                 check=False,
             )
@@ -168,6 +174,8 @@ def _read_clipboard_linux() -> str:
                 ["xsel", "--clipboard", "--output"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
                 check=False,
             )
@@ -254,6 +262,8 @@ def _write_clipboard_macos(text: str) -> None:
             ["pbcopy"],
             input=text,
             text=True,
+                encoding="utf-8",
+                errors="replace",
             timeout=5,
             check=True,
         )
@@ -269,6 +279,8 @@ def _write_clipboard_linux(text: str) -> None:
                 ["wl-copy"],
                 input=text,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
                 check=True,
             )
@@ -283,6 +295,8 @@ def _write_clipboard_linux(text: str) -> None:
                 ["xclip", "-selection", "clipboard"],
                 input=text,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
                 check=True,
             )
@@ -297,6 +311,8 @@ def _write_clipboard_linux(text: str) -> None:
                 ["xsel", "--clipboard", "--input"],
                 input=text,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
                 check=True,
             )

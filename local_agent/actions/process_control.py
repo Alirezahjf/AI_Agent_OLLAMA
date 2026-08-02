@@ -118,6 +118,8 @@ def _list_powershell(needle: str, limit: int) -> str:
             ["powershell", "-NoProfile", "-Command", script],
             capture_output=True,
             text=True,
+                encoding="utf-8",
+                errors="replace",
             timeout=15,
             check=False,
         )
@@ -153,6 +155,8 @@ def _list_linux_fallback(needle: str, limit: int) -> str:
                 ["ps", "-eo", "pid,comm,pcpu,pmem", "--sort=-pmem"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
                 check=False,
             )
@@ -210,6 +214,8 @@ def _kill_windows(pid: int) -> str:
             ["taskkill", "/PID", str(pid), "/T", "/F"],
             capture_output=True,
             text=True,
+                encoding="utf-8",
+                errors="replace",
             timeout=10,
             check=False,
         )

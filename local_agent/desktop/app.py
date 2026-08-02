@@ -651,6 +651,10 @@ def run(argv: list[str] | None = None) -> int:
     """``persian-local-desktop`` entry point."""
     import argparse
 
+    from ..utils.encoding import ensure_utf8_stdio
+
+    ensure_utf8_stdio()
+
     parser = argparse.ArgumentParser(
         prog="persian-local-desktop", description=f"{APP_NAME_EN} — native desktop app"
     )

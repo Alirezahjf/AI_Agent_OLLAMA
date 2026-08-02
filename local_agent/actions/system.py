@@ -169,6 +169,8 @@ def run_shell(
             cwd=str(cwd) if cwd else None,
             env=env,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=timeout,
             check=False,

@@ -367,7 +367,9 @@ def _close_windows(real: str, force: bool) -> str:
         cmd.insert(1, flag)
     try:
         completed = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=15, check=False
+            cmd, capture_output=True, text=True,
+                encoding="utf-8",
+                errors="replace", timeout=15, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise AssistantError(f"taskkill failed: {exc}") from exc
@@ -402,7 +404,9 @@ def _close_linux(real: str, name: str, force: bool) -> str:
         if flag:
             cmd.append(flag)
         cmd.append(real)
-        subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=10)
+        subprocess.run(cmd, capture_output=True, text=True,
+                encoding="utf-8",
+                errors="replace", check=False, timeout=10)
     except OSError as exc:
         raise AssistantError(f"pkill failed: {exc}") from exc
     return f"pkill {real} dispatched (force={force})."

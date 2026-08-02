@@ -74,6 +74,9 @@ frontends (the Telegram bot, the web UI) see the same history.
 
 
 def run_cli(argv: list[str] | None = None) -> int:
+    from ..utils.encoding import ensure_utf8_stdio
+
+    ensure_utf8_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
     settings = load_settings()
     setup_logging(settings.data_dir, verbose=_has_flag(argv, "--verbose", "-v"))
