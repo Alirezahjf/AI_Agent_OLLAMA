@@ -1124,6 +1124,44 @@ kbd {
 .billing__txstatus--ok { color: var(--success); background: rgba(52, 211, 153, 0.1); border: 1px solid rgba(52, 211, 153, 0.25); }
 .billing__txstatus--bad { color: var(--danger); background: rgba(251, 113, 133, 0.1); border: 1px solid rgba(251, 113, 133, 0.25); }
 .billing__fetched { margin: 0; font-size: 10.5px; color: var(--text-faint); }
+
+/* Full purge (danger zone) ---------------------------------------------- */
+.field--danger {
+  border-top: 1px solid rgba(251, 113, 133, 0.28);
+  padding-top: var(--space-3);
+  margin-top: var(--space-1);
+}
+.field--danger > label { color: var(--danger); }
+.field--danger .field__hint strong { color: var(--text-muted); }
+.purge-confirm {
+  border: 1px solid rgba(251, 113, 133, 0.34);
+  background: rgba(251, 113, 133, 0.07);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  display: flex; flex-direction: column; gap: var(--space-2);
+}
+.purge-confirm__warn { margin: 0; font-size: 12.5px; color: var(--text); font-weight: 600; }
+
+.purge-done {
+  position: fixed; inset: 0; z-index: 999;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(4, 7, 18, 0.92);
+  backdrop-filter: blur(8px);
+}
+.purge-done__card {
+  max-width: 440px; margin: var(--space-4);
+  background: var(--bg-elev-solid);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: var(--space-6);
+  text-align: center;
+  display: flex; flex-direction: column; gap: var(--space-3); align-items: center;
+}
+.purge-done__icon { font-size: 44px; line-height: 1; }
+.purge-done__card h2 { margin: 0; font-size: 20px; }
+.purge-done__card p { margin: 0; font-size: 13.5px; color: var(--text-muted); line-height: 1.9; }
+.purge-done__hint { font-size: 12px; color: var(--text-faint); }
 .field--switch { flex-direction: row; align-items: center; justify-content: space-between; }
 
 .switch {

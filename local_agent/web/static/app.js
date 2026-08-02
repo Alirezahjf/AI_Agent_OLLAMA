@@ -205,6 +205,10 @@
       billingLoading: false,
       billing: null,
       billingOpen: false,
+      purging: false,
+      purgeArmed: false,
+      purgeDone: false,
+      purgeMessage: "",
       form: {
         provider: "ollama",
         model: "",
@@ -757,6 +761,48 @@
 
       billingTransactions() {
         return (this.billing && this.billing.transactions) || [];
+      },
+
+      /* ---------------------------------------------------- full purge */
+
+      async purgeEverything() {
+        if (this.connection === "offline") {
+          this.purgeArmed = false;
+          this.toast("info", "ℹ️", "در حالت نمایش آفلاین پاک‌سازی در دسترس نیست");
+          return;
+        }
+        this.purging = true;
+        try {
+          const result = await this.api("/api/purge", {
+            method: "POST",
+            body: JSON.stringify({ confirm: true, shutdown: true }),
+          });
+          // Wipe the browser-side traces as well (prefs + conversations).
+          try {
+            localStorage.removeItem(STORAGE_PREFS);
+            localStorage.removeItem(STORAGE_CONVERSATIONS);
+          } catch (_) { /* private mode */ }
+          this.conversations = [];
+          this.conversationId = null;
+          this.messages = [];
+          this.settingsOpen = false;
+          this.purgeArmed = false;
+          // Stop the socket before the process exits so no reconnect storm
+          // (or error toast) appears while the server shuts itself down.
+          if (this.ws) {
+            try { this.ws.onclose = null; this.ws.onerror = null; this.ws.close(); } catch (_) { /* ignore */ }
+            this.ws = null;
+          }
+          if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+          this.connection = "offline";
+          this.purgeMessage = (result && result.message) || "";
+          this.purgeDone = true;
+        } catch (_) {
+          this.purgeArmed = false;
+          this.toast("bad", "❌", "پاک‌سازی کامل ناموفق بود — برنامه هنوز فعال است");
+        } finally {
+          this.purging = false;
+        }
       },
 
       async saveSettings() {

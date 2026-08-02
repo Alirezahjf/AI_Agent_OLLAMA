@@ -23,6 +23,7 @@ Endpoints
 ``GET  /api/artifact``        fetch a tool artifact (workspace or data dir)
 ``POST /api/provider/detect`` auto-detect provider from base URL + API key
 ``GET  /api/billing``         live credit / usage for the cloud provider
+``POST /api/purge``           full app wipe (confirmed), then shuts down
 ``WS   /ws``                  chat + confirmation stream
 """
 
@@ -33,6 +34,7 @@ import base64
 import binascii
 import json
 import mimetypes
+import os
 import re
 import sys
 import threading
@@ -93,6 +95,29 @@ class UploadRequest(BaseModel):
 class DetectProviderRequest(BaseModel):
     base_url: str = ""
     api_key: str = ""
+
+
+class PurgeRequest(BaseModel):
+    confirm: bool = False
+    include_repo_caches: bool = True
+    # Exit the process after a successful wipe so the running app cannot
+    # recreate the data directory it just deleted.
+    shutdown: bool = True
+
+
+def _schedule_process_exit(delay: float = 0.8) -> None:
+    """Exit this process shortly after the HTTP response has been flushed.
+
+    Purging deletes the very files the running app works with (config,
+    history, logs, tokens); exiting straight after the reply guarantees a
+    half-alive server never recreates the data directory.  Called in a
+    daemon timer so ``POST /api/purge`` can respond first.
+    """
+
+    def _exit() -> None:
+        os._exit(0)
+
+    threading.Timer(delay, _exit).start()
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +303,33 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         return await asyncio.to_thread(
             fetch_billing, llm.openai_base_url, llm.openai_api_key, provider_hint=hint
         )
+
+    @app.post("/api/purge")
+    async def purge(req: PurgeRequest) -> dict[str, Any]:
+        """Full wipe of the assistant's on-disk footprint (see core/cleanup).
+
+        Requires explicit ``confirm: true``.  Installed packages, venvs and
+        the pip cache are never touched.  On success the process exits a
+        moment later (``shutdown``), so the UI shows its "fully wiped" state.
+        """
+        if not req.confirm:
+            raise HTTPException(400, "پاک‌سازی کامل نیازمند تأیید صریح است (confirm)")
+        from ..core.cleanup import purge_all
+
+        server = _server_of(client)
+        active = server.handlers.settings if server is not None else settings
+        result = await asyncio.to_thread(
+            purge_all,
+            active,
+            include_repo_caches=req.include_repo_caches,
+            # This very process holds the log files inside data_dir; release
+            # them first so Windows can delete the files we still own.
+            close_logging=True,
+        )
+        if req.shutdown and result.get("ok"):
+            result["shutdown_scheduled"] = True
+            _schedule_process_exit()
+        return result
 
     @app.get("/api/history")
     async def history(limit: int = 50) -> list[dict[str, Any]]:

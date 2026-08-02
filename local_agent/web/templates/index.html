@@ -638,11 +638,48 @@
           <label for="set-autostart">اجرای خودکار هنگام روشن شدن ویندوز</label>
           <input id="set-autostart" type="checkbox" class="switch" x-model="form.autostart" @change="setAutostart()">
         </div>
+        <div class="field field--danger">
+          <label>🗑 پاک‌سازی کامل برنامه</label>
+          <p class="field__hint">
+            همهٔ داده‌های دستیار — تنظیمات، تاریخچهٔ گفتگو، حافظه، لاگ‌ها، اسکرین‌شات‌ها و توکن‌ها —
+            برای همیشه حذف می‌شود و ثبت «اجرای خودکار» لغو می‌گردد.
+            <strong>کتابخانه‌های نصب‌شده و محیط مجازی حذف نمی‌شوند</strong> تا نصب دوباره نیاز به اینترنت نداشته باشد.
+            این عمل قابل بازگشت نیست؛ برنامه بعد از پاک‌سازی بسته می‌شود.
+          </p>
+          <div class="field__row" x-show="!purgeArmed">
+            <button class="btn btn--danger btn--sm" type="button" @click="purgeArmed = true">
+              🗑 پاک‌سازی کامل…
+            </button>
+          </div>
+          <div class="purge-confirm" x-show="purgeArmed" x-cloak>
+            <p class="purge-confirm__warn">⚠️ مطمئن هستید؟ هیچ‌چیز از دستیار روی سیستم باقی نمی‌ماند.</p>
+            <div class="field__row">
+              <button class="btn btn--danger btn--sm" type="button" @click="purgeEverything()" :disabled="purging">
+                <span x-show="!purging">بله، همه‌چیز برای همیشه پاک شود</span>
+                <span x-show="purging" x-cloak>در حال پاک‌سازی…</span>
+              </button>
+              <button class="btn btn--ghost btn--sm" type="button" @click="purgeArmed = false" :disabled="purging">
+                انصراف
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
       <footer class="modal__foot">
         <button class="btn btn--ghost" @click="settingsOpen = false">انصراف</button>
         <button class="btn btn--primary" @click="saveSettings()">ذخیره</button>
       </footer>
+    </div>
+  </div>
+
+  <!-- ================= Purge-done overlay ================= -->
+  <div class="purge-done" x-show="purgeDone" x-transition.opacity x-cloak role="alertdialog" aria-modal="true"
+       aria-label="پاک‌سازی کامل انجام شد">
+    <div class="purge-done__card">
+      <span class="purge-done__icon" aria-hidden="true">🗑</span>
+      <h2>برنامه کاملاً پاک شد</h2>
+      <p x-text="purgeMessage || 'همهٔ داده‌ها و تنظیمات حذف شد و برنامه در حال بسته‌شدن است.'"></p>
+      <p class="purge-done__hint">برای شروع دوباره، کافی است دستیار را دوباره اجرا کنید. می‌توانید این صفحه را ببندید.</p>
     </div>
   </div>
 

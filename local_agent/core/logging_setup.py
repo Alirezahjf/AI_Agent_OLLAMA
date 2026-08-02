@@ -27,6 +27,27 @@ def get_logger(name: str | None = None) -> logging.Logger:
     return logging.getLogger(_LOGGER_NAME)
 
 
+def shutdown_logging() -> None:
+    """Flush, close and detach every handler of the assistant's root logger.
+
+    Only the ``local_assistant`` logger is touched — pytest's capture
+    handlers and third-party loggers are left alone.  The full-purge flow
+    calls this before deleting ``data_dir`` so the running process releases
+    the log files (Windows refuses to delete open files).
+    """
+    root = logging.getLogger(_LOGGER_NAME)
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+        try:
+            handler.flush()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            handler.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def setup_logging(
     data_dir: Path,
     *,

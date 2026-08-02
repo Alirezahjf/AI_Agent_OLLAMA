@@ -60,6 +60,7 @@ Available commands (type /<command> or just chat normally):
   /telegram           connect / status for the personal Telegram client
   /send NAME TEXT     (telegram) quick send without going through the agent
   /history            show the last 20 conversation messages
+  /purge              پاک‌سازی کامل داده‌ها/تنظیمات ایجنت و لغو اجرای خودکار
   /quit               exit the assistant
 
 When this CLI is connected to a Bridge daemon, every command above
@@ -80,6 +81,19 @@ def run_cli(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     settings = load_settings()
     setup_logging(settings.data_dir, verbose=_has_flag(argv, "--verbose", "-v"))
+
+    # ``--purge`` wipes the app's footprint and exits before any server or
+    # bridge starts; ``--yes`` is the required safety switch for unattended
+    # use (otherwise a typed confirmation is requested).
+    if _has_flag(argv, "--purge"):
+        from ..core.cleanup import purge_with_confirmation
+
+        return purge_with_confirmation(
+            settings,
+            assume_yes=_has_flag(argv, "--yes", "-y"),
+            extra_kwargs={"close_logging": True},
+        )
+
     renderer = Renderer()
 
     bridge_url = _bridge_url_from_argv(argv)
@@ -213,6 +227,8 @@ class _REPL:
             self._cmd_send(rest)
         elif cmd == "/history":
             self._cmd_history()
+        elif cmd == "/purge":
+            self._cmd_purge()
         elif cmd in {"/quit", "/exit"}:
             self._stop.set()
         else:
@@ -350,6 +366,30 @@ class _REPL:
         for message in history:
             content = str(message.get("content", "")).replace("\n", " ")[:240]
             self.renderer.info(f"  [{message.get('role')}] {content}")
+
+    def _cmd_purge(self) -> None:
+        """Wipe every trace of the app and exit — the CLI's «پاک‌سازی کامل»."""
+        from ..core.cleanup import PURGE_CONFIRM_WORD, purge_all
+
+        self.renderer.warn("⚠️  پاک‌سازی کامل: همهٔ داده‌ها، تنظیمات، تاریخچه، لاگ‌ها، اسکرین‌شات‌ها")
+        self.renderer.warn("   و توکن‌ها حذف و ثبت «اجرای خودکار» لغو می‌شود. (کتابخانه‌ها باقی می‌مانند)")
+        try:
+            answer = self.renderer.prompt(
+                f"برای تأیید عبارت «{PURGE_CONFIRM_WORD}» را بنویسید (‌ برای لغو Enter)"
+            )
+        except (EOFError, KeyboardInterrupt):
+            self.renderer.info("لغو شد — چیزی پاک نشد.")
+            return
+        if answer.strip() not in {PURGE_CONFIRM_WORD, "بله", "yes", "y"}:
+            self.renderer.info("تأیید نشد — چیزی پاک نشد.")
+            return
+        report = purge_all(self.settings, close_logging=True)
+        self.renderer.info(report["message"])
+        for failure in report["failed"]:
+            self.renderer.warn(f"  نشد: {failure['path']} — {failure['error']}")
+        # Exit afterwards: the just-wiped data directory must not be
+        # recreated by a half-alive session.
+        self._stop.set()
 
     # ------------------------------------------------------------- message
 
