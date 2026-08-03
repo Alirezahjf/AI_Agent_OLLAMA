@@ -674,6 +674,16 @@ def run(argv: list[str] | None = None) -> int:
         action="store_true",
         help="serve the UI and open the system browser instead of a native window",
     )
+    parser.add_argument(
+        "--purge",
+        action="store_true",
+        help="پاک‌سازی کامل داده‌ها و تنظیمات برنامه و لغو اجرای خودکار، سپس خروج",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="تأیید خودکار عملیات مخرب مثل --purge (بدون پرسش تعاملی)",
+    )
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
     settings = load_settings()
@@ -686,6 +696,17 @@ def run(argv: list[str] | None = None) -> int:
         report = run_checks(settings)
         print(report.render())
         return 0 if report.status != "fail" else 1
+
+    if args.purge:
+        # Wipe everything and exit before the single-instance lock, the
+        # web server or any window/tray machinery starts.
+        from ..core.cleanup import purge_with_confirmation
+
+        return purge_with_confirmation(
+            settings,
+            assume_yes=args.yes,
+            extra_kwargs={"close_logging": True},
+        )
 
     config = DesktopConfig.from_env()
 

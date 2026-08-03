@@ -23,6 +23,7 @@ Endpoints
 ``GET  /api/artifact``        fetch a tool artifact (workspace or data dir)
 ``POST /api/provider/detect`` auto-detect provider from base URL + API key
 ``GET  /api/billing``         live credit / usage for the cloud provider
+``POST /api/purge``           full app wipe (confirmed), then shuts down
 ``WS   /ws``                  chat + confirmation stream
 """
 
@@ -33,6 +34,7 @@ import base64
 import binascii
 import json
 import mimetypes
+import os
 import re
 import sys
 import threading
@@ -95,6 +97,29 @@ class DetectProviderRequest(BaseModel):
     api_key: str = ""
 
 
+class PurgeRequest(BaseModel):
+    confirm: bool = False
+    include_repo_caches: bool = True
+    # Exit the process after a successful wipe so the running app cannot
+    # recreate the data directory it just deleted.
+    shutdown: bool = True
+
+
+def _schedule_process_exit(delay: float = 0.8) -> None:
+    """Exit this process shortly after the HTTP response has been flushed.
+
+    Purging deletes the very files the running app works with (config,
+    history, logs, tokens); exiting straight after the reply guarantees a
+    half-alive server never recreates the data directory.  Called in a
+    daemon timer so ``POST /api/purge`` can respond first.
+    """
+
+    def _exit() -> None:
+        os._exit(0)
+
+    threading.Timer(delay, _exit).start()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -148,12 +173,28 @@ def resolve_artifact_path(work_dir: Path, data_dir: Path, candidate: str) -> Pat
     write into ``work_dir``, so an artifact's ``path`` (as reported by the
     bridge) can live under either root.  Absolute paths inside either root
     are also accepted.  Anything else raises 403/404.
+
+    Two real-world wrinkles are handled here:
+
+    * **Windows-style separators** — artifacts produced on Windows use
+      backslashes (``screenshots\\screen.png``); they must resolve on any
+      host, so ``\\`` is normalised to ``/`` first (names produced by our
+      own tools never contain a real backslash).
+    * **cwd-shadowing** — when the process cwd *is* the work dir (the
+      normal production layout), a bare relative candidate used to match
+      the first (cwd-relative) target which sits inside the work-dir root
+      but **does not exist**, hiding the real file in the data dir behind
+      a bogus 404.  Candidates are now tried in order and the first one
+      that is in scope **and** actually exists wins; when nothing exists
+      the first in-scope candidate is returned so the caller can answer
+      with an honest 404 instead of a misleading 403.
     """
     if not candidate:
         raise HTTPException(400, "empty path")
-    raw = Path(candidate)
+    raw = Path(candidate.replace("\\", "/"))
     roots = (work_dir.resolve(), data_dir.resolve())
     targets = [raw] + ([work_dir / raw, data_dir / raw] if not raw.is_absolute() else [])
+    first_in_scope: Path | None = None
     for target in targets:
         try:
             resolved = target.resolve()
@@ -161,7 +202,13 @@ def resolve_artifact_path(work_dir: Path, data_dir: Path, candidate: str) -> Pat
             raise HTTPException(400, f"bad path: {exc}") from exc
         for root in roots:
             if resolved == root or root in resolved.parents:
-                return resolved
+                if first_in_scope is None:
+                    first_in_scope = resolved
+                if resolved.is_file():
+                    return resolved
+                break
+    if first_in_scope is not None:
+        return first_in_scope
     raise HTTPException(403, "path is outside the workspace / data directory")
 
 
@@ -278,6 +325,33 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         return await asyncio.to_thread(
             fetch_billing, llm.openai_base_url, llm.openai_api_key, provider_hint=hint
         )
+
+    @app.post("/api/purge")
+    async def purge(req: PurgeRequest) -> dict[str, Any]:
+        """Full wipe of the assistant's on-disk footprint (see core/cleanup).
+
+        Requires explicit ``confirm: true``.  Installed packages, venvs and
+        the pip cache are never touched.  On success the process exits a
+        moment later (``shutdown``), so the UI shows its "fully wiped" state.
+        """
+        if not req.confirm:
+            raise HTTPException(400, "پاک‌سازی کامل نیازمند تأیید صریح است (confirm)")
+        from ..core.cleanup import purge_all
+
+        server = _server_of(client)
+        active = server.handlers.settings if server is not None else settings
+        result = await asyncio.to_thread(
+            purge_all,
+            active,
+            include_repo_caches=req.include_repo_caches,
+            # This very process holds the log files inside data_dir; release
+            # them first so Windows can delete the files we still own.
+            close_logging=True,
+        )
+        if req.shutdown and result.get("ok"):
+            result["shutdown_scheduled"] = True
+            _schedule_process_exit()
+        return result
 
     @app.get("/api/history")
     async def history(limit: int = 50) -> list[dict[str, Any]]:
