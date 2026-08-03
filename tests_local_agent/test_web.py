@@ -447,3 +447,80 @@ def test_api_purge_wipes_data_dir(purge_server: WebServer, tmp_path: Path) -> No
     assert "پاک‌سازی کامل انجام شد" in body["message"]
     assert not data_dir.exists(), "کل پوشهٔ داده باید پاک شود"
     assert keep.exists(), "هیچ مسیر بیرونی نباید پاک شود"
+
+
+# ---------------------------------------------------------------------------
+# Artifact endpoint — Windows-style paths + cwd-shadowing regression
+# ---------------------------------------------------------------------------
+
+
+def test_artifact_endpoint_windows_backslash_relative_path(
+    tmp_path: Path, web_server: WebServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production 404: artifacts like ``screenshots\\screen.png``.
+
+    On the desktop app the process cwd *is* the workspace, so the old
+    resolver matched the (non-existent) cwd-relative candidate whose
+    containment check passed and never reached the real file in the data
+    dir — answering 404 for a screenshot that existed.  The bridge also
+    used to emit backslashed relative paths on Windows.
+    """
+    # chdir *into the workspace* to reproduce production (cwd == work_dir).
+    monkeypatch.chdir(tmp_path)
+    shot = tmp_path / "screenshots" / "screen.png"
+    shot.parent.mkdir(exist_ok=True)
+    shot.write_bytes(b"REAL-PNG")
+    base = f"http://127.0.0.1:{web_server.port}"
+
+    r = requests.get(base + "/api/artifact", params={"path": "screenshots\\screen.png"}, timeout=3)
+    assert r.status_code == 200, r.text
+    assert r.content == b"REAL-PNG"
+
+    # forward slash form keeps working too
+    r2 = requests.get(base + "/api/artifact", params={"path": "screenshots/screen.png"}, timeout=3)
+    assert r2.status_code == 200
+    assert r2.content == b"REAL-PNG"
+
+
+def test_artifact_endpoint_prefers_existing_file_over_cwd_shadow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """resolve_artifact_path must not stop at the first in-scope target."""
+    from local_agent.web.app import resolve_artifact_path
+
+    work = tmp_path / "work"
+    data = tmp_path / "data"
+    (work / "screenshots").mkdir(parents=True)
+    (data / "screenshots").mkdir(parents=True)
+    real = data / "screenshots" / "screen.png"
+    real.write_bytes(b"real")
+    monkeypatch.chdir(work)
+    # (work/screenshots exists as a DIRECTORY only — no file shadowing ours)
+    resolved = resolve_artifact_path(work, data, "screenshots\\screen.png")
+    assert resolved == real
+    resolved2 = resolve_artifact_path(work, data, "screenshots/screen.png")
+    assert resolved2 == real
+
+
+def test_artifact_endpoint_missing_file_is_404_not_403(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi import HTTPException
+
+    from local_agent.web.app import resolve_artifact_path
+
+    work = tmp_path / "work"
+    data = tmp_path / "data"
+    work.mkdir()
+    data.mkdir()
+    monkeypatch.chdir(work)
+    # In-scope but missing → path returned (endpoint answers 404), not 403.
+    resolved = resolve_artifact_path(work, data, "screenshots\\nope.png")
+    assert not resolved.exists()
+    # Out of scope stays forbidden.
+    with pytest.raises(HTTPException) as excinfo:
+        resolve_artifact_path(work, data, "..\\..\\etc\\passwd")
+    assert excinfo.value.status_code == 403
+    with pytest.raises(HTTPException) as excinfo2:
+        resolve_artifact_path(work, data, "screenshots/../../../etc/passwd")
+    assert excinfo2.value.status_code == 403

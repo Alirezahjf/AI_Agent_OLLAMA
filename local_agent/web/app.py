@@ -173,12 +173,28 @@ def resolve_artifact_path(work_dir: Path, data_dir: Path, candidate: str) -> Pat
     write into ``work_dir``, so an artifact's ``path`` (as reported by the
     bridge) can live under either root.  Absolute paths inside either root
     are also accepted.  Anything else raises 403/404.
+
+    Two real-world wrinkles are handled here:
+
+    * **Windows-style separators** — artifacts produced on Windows use
+      backslashes (``screenshots\\screen.png``); they must resolve on any
+      host, so ``\\`` is normalised to ``/`` first (names produced by our
+      own tools never contain a real backslash).
+    * **cwd-shadowing** — when the process cwd *is* the work dir (the
+      normal production layout), a bare relative candidate used to match
+      the first (cwd-relative) target which sits inside the work-dir root
+      but **does not exist**, hiding the real file in the data dir behind
+      a bogus 404.  Candidates are now tried in order and the first one
+      that is in scope **and** actually exists wins; when nothing exists
+      the first in-scope candidate is returned so the caller can answer
+      with an honest 404 instead of a misleading 403.
     """
     if not candidate:
         raise HTTPException(400, "empty path")
-    raw = Path(candidate)
+    raw = Path(candidate.replace("\\", "/"))
     roots = (work_dir.resolve(), data_dir.resolve())
     targets = [raw] + ([work_dir / raw, data_dir / raw] if not raw.is_absolute() else [])
+    first_in_scope: Path | None = None
     for target in targets:
         try:
             resolved = target.resolve()
@@ -186,7 +202,13 @@ def resolve_artifact_path(work_dir: Path, data_dir: Path, candidate: str) -> Pat
             raise HTTPException(400, f"bad path: {exc}") from exc
         for root in roots:
             if resolved == root or root in resolved.parents:
-                return resolved
+                if first_in_scope is None:
+                    first_in_scope = resolved
+                if resolved.is_file():
+                    return resolved
+                break
+    if first_in_scope is not None:
+        return first_in_scope
     raise HTTPException(403, "path is outside the workspace / data directory")
 
 

@@ -685,27 +685,27 @@ def _collect_artifacts(text: str, settings: AssistantSettings) -> list[dict[str,
             if not resolved.is_file():
                 continue
             try:
-                resolved.relative_to(work_dir)
-                relative = str(resolved.relative_to(work_dir))
+                relative_to = resolved.relative_to(work_dir)
             except ValueError:
                 pass
             else:
                 suffix = resolved.suffix.lower()
                 artifacts.append({
                     "name": resolved.name,
-                    "path": relative,
+                    # Canonical forward slashes: the web layer accepts both
+                    # separators, and stored conversations stay portable.
+                    "path": relative_to.as_posix(),
                     "kind": "image" if suffix in _IMAGE_EXT else "file",
                 })
                 break
             try:
-                resolved.relative_to(data_dir)
-                relative = str(resolved.relative_to(data_dir))
+                relative_to = resolved.relative_to(data_dir)
             except ValueError:
                 continue
             suffix = resolved.suffix.lower()
             artifacts.append({
                 "name": resolved.name,
-                "path": relative,
+                "path": relative_to.as_posix(),
                 "kind": "image" if suffix in _IMAGE_EXT else "file",
             })
             break
