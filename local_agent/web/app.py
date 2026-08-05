@@ -43,7 +43,8 @@ from pathlib import Path
 from queue import Empty
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError, StarletteHTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -218,12 +219,57 @@ def _server_of(client: BridgeClient) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Global exception handling
+# ---------------------------------------------------------------------------
+
+
+def register_exception_handlers(app: FastAPI) -> None:
+    """Convert every unhandled failure into clean JSON, never HTML.
+
+    Without this, FastAPI answers unexpected exceptions with a bare
+    ``500 Internal Server Error`` HTML page — the bug this whole task
+    (P0) hunts.  The traceback is logged locally and the client only
+    ever sees a short Persian message; no exception text, no paths, no
+    secrets.
+    """
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(
+        _request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        messages: list[str] = []
+        for error in exc.errors()[:5]:
+            loc = ".".join(str(part) for part in error.get("loc", ()) if part != "body")
+            message = str(error.get("msg", "مقدار نامعتبر"))
+            messages.append(f"{loc}: {message}" if loc else message)
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "ورودی نامعتبر است — " + " | ".join(messages)},
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_exception(
+        _request: Request, exc: StarletteHTTPException
+    ) -> JSONResponse:
+        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc.detail)})
+
+    @app.exception_handler(Exception)
+    async def _unhandled(_request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("endpoint crashed (unhandled exception)")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "خطای داخلی سرور رخ داد؛ جزئیات در لاگ ثبت شد."},
+        )
+
+
+# ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
 
 
 def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
     app = FastAPI(title="Local Windows Assistant", version="2.0")
+    register_exception_handlers(app)
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
@@ -322,9 +368,18 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                 "error": "درگاه مالی فقط برای ارائه‌دهندگان ابری با کلید API در دسترس است",
             }
         hint = llm.provider if llm.provider == "ollama" else ""
-        return await asyncio.to_thread(
-            fetch_billing, llm.openai_base_url, llm.openai_api_key, provider_hint=hint
-        )
+        try:
+            return await asyncio.to_thread(
+                fetch_billing, llm.openai_base_url, llm.openai_api_key, provider_hint=hint
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("billing fetch failed")
+            return {
+                "provider": llm.provider,
+                "label": "",
+                "available": False,
+                "error": "دریافت اطلاعات مالی ناموفق بود؛ دوباره تلاش کنید یا لاگ را بررسی کنید.",
+            }
 
     @app.post("/api/purge")
     async def purge(req: PurgeRequest) -> dict[str, Any]:
@@ -521,6 +576,14 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                     await websocket.send_text(json.dumps({"type": "pong", "ts": time.time()}))
         except WebSocketDisconnect:
             return
+        except Exception:  # noqa: BLE001 - never kill the socket with a bare crash
+            logger.exception("websocket handler crashed")
+            try:
+                await websocket.send_text(
+                    json.dumps({"type": "error", "message": "خطای داخلی سرور رخ داد؛ اتصال دوباره برقرار می‌شود"})
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     # Static assets
     if STATIC.is_dir():

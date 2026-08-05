@@ -524,3 +524,82 @@ def test_artifact_endpoint_missing_file_is_404_not_403(
     with pytest.raises(HTTPException) as excinfo2:
         resolve_artifact_path(work, data, "screenshots/../../../etc/passwd")
     assert excinfo2.value.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# P0 — global exception handler: no more HTML "Internal Server Error"
+# ---------------------------------------------------------------------------
+
+
+def test_unhandled_exception_returns_clean_persian_json() -> None:
+    """Every unhandled exception must become JSON, never an HTML 500 page."""
+    import json as _json
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from local_agent.web.app import register_exception_handlers
+
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.get("/boom")
+    def boom() -> None:
+        raise RuntimeError("secret-detail-sk-abc should never reach the client")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        r = client.get("/boom")
+        assert r.status_code == 500
+        assert "application/json" in r.headers.get("content-type", "")
+        body = r.json()
+        assert isinstance(body.get("detail"), str)
+        assert body["detail"], "پیام فارسی باید غیرخالی باشد"
+        # The raw exception text, paths and secret-looking values never leak.
+        assert "secret-detail-sk-abc" not in r.text
+        assert "Traceback" not in r.text
+        assert "RuntimeError" not in r.text
+
+
+def test_validation_error_returns_persian_json() -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from local_agent.web.app import register_exception_handlers
+
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.post("/echo")
+    async def echo(name: str) -> dict:
+        return {"name": name}
+
+    with TestClient(app) as client:
+        r = client.post("/echo", json={})
+        assert r.status_code == 422
+        body = r.json()
+        assert "نامعتبر" in body.get("detail", "")
+
+
+def test_artifact_windows_path_with_cwd_equal_workdir_regression(
+    tmp_path: Path, web_server: WebServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P0 regression: ``screenshots\\screen.png`` served from data_dir.
+
+    The production layout runs the process with cwd == work_dir.  The
+    file exists ONLY under data_dir/screenshots; the old resolver used to
+    answer 404 (or 500) for the backslashed path.  ``..`` escapes must
+    stay forbidden.
+    """
+    monkeypatch.chdir(tmp_path)  # cwd == work_dir, like the Windows build
+    shot = tmp_path / "screenshots" / "screen.png"
+    shot.parent.mkdir(exist_ok=True)
+    shot.write_bytes(b"P0-REAL")
+    base = f"http://127.0.0.1:{web_server.port}"
+
+    ok = requests.get(base + "/api/artifact", params={"path": "screenshots\\screen.png"}, timeout=3)
+    assert ok.status_code == 200, ok.text
+    assert ok.content == b"P0-REAL"
+
+    for escape in ("..\\..\\etc\\passwd", "screenshots/../../../etc/passwd"):
+        blocked = requests.get(base + "/api/artifact", params={"path": escape}, timeout=3)
+        assert blocked.status_code in {403, 404}, f"{escape} باید مسدود شود"
