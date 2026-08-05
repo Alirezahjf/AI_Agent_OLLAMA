@@ -10,7 +10,9 @@ High-level improvements:
 
 from __future__ import annotations
 
+import secrets
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +71,31 @@ def _sanitize_filename(name: str) -> str:
     return safe
 
 
+def _unique_screenshot_name(target_dir: Path, requested: str) -> Path:
+    """Pick a filename that never overwrites an existing screenshot.
+
+    Default names are ``screen-<YYYYmmdd-HHMMSS>-<6hex>.png`` (time +
+    random suffix), so two back-to-back captures always differ and old
+    chat messages keep pointing at *their own* image.  A user-supplied
+    name is sanitised, and if a file with that name already exists a
+    numeric counter is appended (``name-1.png``, ``name-2.png``, ...).
+    """
+    if requested and requested.strip():
+        safe = _sanitize_filename(requested)
+        candidate = target_dir / safe
+        if not candidate.exists():
+            return candidate
+        stem, suffix = safe.rsplit(".", 1)
+        for index in range(1, 1000):
+            candidate = target_dir / f"{stem}-{index}.{suffix}"
+            if not candidate.exists():
+                return candidate
+        return candidate  # pragma: no cover - 999 collisions is impossible in practice
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    token = secrets.token_hex(3)
+    return target_dir / f"screen-{stamp}-{token}.png"
+
+
 def register_gui(registry: ActionRegistry, context: ActionContext) -> None:
     """Register mouse / keyboard / screenshot tools.
 
@@ -84,10 +111,16 @@ def register_gui(registry: ActionRegistry, context: ActionContext) -> None:
         description=(
             "Take a PNG screenshot of the full primary screen and return the path. "
             "The image is saved into the assistant's data directory so the LLM can "
-            "read it back. Always safe. Filename is sanitized and forced to .png."
+            "read it back. Always safe. The filename is sanitized and forced to .png; "
+            "the default name is unique per capture (screen-<timestamp>-<random>.png) "
+            "and an existing custom name gets a numeric suffix instead of being "
+            "overwritten."
         ),
         parameters={
-            "filename": {"type": "string", "description": "Output filename (default screen.png)."},
+            "filename": {
+                "type": "string",
+                "description": "اختیاری — نام خروجی؛ در صورت وجود، پسوند عددی می‌گیرد.",
+            },
         },
     )(screen_capture)
 
@@ -215,14 +248,17 @@ def _pyautogui():
 
 
 @risk(Risk.SAFE)
-def screen_capture(*, filename: str = "screen.png", context: ActionContext) -> str:
+def screen_capture(*, filename: str = "", context: ActionContext) -> str:
     from .screenshot import take_screenshot
 
-    safe_name = _sanitize_filename(filename or "screen.png")
     image = take_screenshot()
     target = context.runtime.settings.data_dir / "screenshots"
     target.mkdir(parents=True, exist_ok=True)
-    final = target / safe_name
+    # Unique name: never overwrite an existing screenshot, so every chat
+    # message keeps pointing at its own image (P4).  An empty filename
+    # yields screen-<timestamp>-<random>.png; a custom name that exists
+    # gets a numeric suffix.
+    final = _unique_screenshot_name(target, filename)
     # Use flexible save that accepts format
     try:
         image.save(final)
