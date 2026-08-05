@@ -22,7 +22,6 @@ from dotenv import load_dotenv
 
 from .errors import ConfigError
 
-
 _DEFAULT_DATA_DIR = Path.home() / ".local_assistant"
 
 
@@ -174,7 +173,7 @@ class AssistantSettings:
         return payload
 
     @classmethod
-    def from_dict(cls, payload: dict) -> "AssistantSettings":
+    def from_dict(cls, payload: dict) -> AssistantSettings:
         try:
             llm_payload = dict(payload.get("llm") or {})
             provider = str(llm_payload.get("provider", "ollama")).lower()
@@ -218,7 +217,7 @@ class AssistantSettings:
         except (TypeError, ValueError) as exc:
             raise ConfigError(f"invalid config payload: {exc}") from exc
 
-    def with_overrides(self, **changes) -> "AssistantSettings":
+    def with_overrides(self, **changes) -> AssistantSettings:
         """Return a new settings object with the given fields replaced."""
         return replace(self, **changes)
 

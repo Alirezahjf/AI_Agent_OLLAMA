@@ -10,14 +10,13 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..core.errors import AssistantError
 from ..core.logging_setup import get_logger
-
 
 logger = get_logger("telegram")
 
@@ -175,8 +174,8 @@ class PersonalTelegram:
                 future = asyncio.run_coroutine_threadsafe(self._abort_login(), self._loop)
                 try:
                     future.result(timeout=15)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001 - best-effort teardown
+                    logger.debug("login abort failed: %s", exc)
             self._login_state = "disconnected"
             self._login_ctx = {}
 
@@ -210,8 +209,8 @@ class PersonalTelegram:
             future = asyncio.run_coroutine_threadsafe(self._disconnect(), self._loop)
             try:
                 future.result(timeout=15)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001 - best-effort teardown
+                logger.debug("disconnect failed: %s", exc)
             self._login_state = "disconnected"
             self._login_ctx = {}
 
@@ -317,7 +316,7 @@ class PersonalTelegram:
         phone_code_hash = self._login_ctx.get("phone_code_hash")
         try:
             await client.sign_in(self._phone, code, phone_code_hash=phone_code_hash)
-        except Exception as sign_in_exc:  # noqa: BLE001
+        except Exception as sign_in_exc:
             # SessionPasswordNeededError means 2FA is on.
             if "SessionPasswordNeededError" in type(sign_in_exc).__name__:
                 self._login_state = "await_2fa"
@@ -338,7 +337,7 @@ class PersonalTelegram:
             raise TelegramError("ابتدا اتصال را شروع کنید")
         try:
             await client.sign_in(password=password)
-        except Exception as sign_in_exc:  # noqa: BLE001
+        except Exception as sign_in_exc:
             if "PasswordHashInvalidError" in type(sign_in_exc).__name__:
                 raise TelegramError("رمز 2FA صحیح نیست؛ دوباره تلاش کنید")
             raise TelegramError(f"ورود با رمز 2FA ناموفق بود: {sign_in_exc}") from sign_in_exc
@@ -358,8 +357,8 @@ class PersonalTelegram:
         if self._client is not None:
             try:
                 await self._client.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001 - best-effort teardown
+                logger.debug("abort disconnect failed: %s", exc)
             self._client = None
             self._connected = False
 
@@ -379,7 +378,7 @@ class PersonalTelegram:
             raise TelegramError("chat target is empty")
         try:
             return await self._client.get_entity(cleaned)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise TelegramError(f"could not resolve chat {target!r}: {exc}") from exc
 
     async def _list_chats(self, limit: int) -> list[Chat]:

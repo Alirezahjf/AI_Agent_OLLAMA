@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.errors import AssistantError
-from .registry import ActionContext, ActionRegistry, risk, Risk
+from .registry import ActionContext, ActionRegistry, Risk, risk
 
 # Field names whose values must never appear in action output or logs.
 _SECRET_SUFFIXES = ("api_key", "api_hash", "password", "token", "secret")

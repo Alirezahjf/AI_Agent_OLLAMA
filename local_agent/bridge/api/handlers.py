@@ -7,20 +7,20 @@ Both the in-process backend and the HTTP server delegate to it.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import re
-import os
 import socket
 import threading
-import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Queue
+from typing import Any
 from urllib.parse import urlparse
-from typing import Any, Callable, Iterable
 
-from ...actions import build_default_registry, run_action, describe_action
+from ...actions import build_default_registry, describe_action, run_action
 from ...actions.config_actions import register_config
 from ...actions.gmail_actions import register_gmail
 from ...actions.registry import ActionContext, ConfirmationGate
@@ -33,10 +33,10 @@ from ...core.logging_setup import get_logger
 from ...gmail import GmailClient
 from ...gmail.client import GmailError
 from ...llm import create_client
-from ...llm.client import ToolDefinition
 from ...telegram import PersonalTelegram
 from ...telegram.client import TelegramError
 from ..protocol import (
+    PROTOCOL_VERSION,
     ActionInvocation,
     ActionResult,
     ErrorPayload,
@@ -44,12 +44,9 @@ from ..protocol import (
     EventType,
     Hello,
     MessageType,
-    PROTOCOL_VERSION,
-    Request,
     Response,
     Welcome,
 )
-
 
 logger = get_logger("bridge.handlers")
 
@@ -103,7 +100,7 @@ class EventBus:
         for listener in listeners:
             try:
                 listener(event)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("event listener raised")
         if q is not None:
             q.put(event)
@@ -141,10 +138,10 @@ class BridgeHandlers:
     _active_runs: dict[str, threading.Event] = field(default_factory=dict)
     _run_threads: dict[str, threading.Thread] = field(default_factory=dict)
     _confirmation_lock: threading.Lock = field(default_factory=threading.Lock)
-    _pending_confirms: dict[str, "PendingConfirmation"] = field(default_factory=dict)
+    _pending_confirms: dict[str, PendingConfirmation] = field(default_factory=dict)
 
     @classmethod
-    def build(cls, settings: AssistantSettings) -> "BridgeHandlers":
+    def build(cls, settings: AssistantSettings) -> BridgeHandlers:
         settings = _auto_select_provider(settings)
         runtime = RuntimeContext(settings)
         gate = ConfirmationGate(settings.safety)
@@ -247,7 +244,7 @@ class BridgeHandlers:
             return self._fail(request_id, "unknown_type", f"unknown message type: {type_!r}")
         except AssistantError as exc:
             return self._fail(request_id, "assistant_error", str(exc))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception("bridge handler crashed")
             return self._fail(request_id, "internal", f"{type(exc).__name__}: {exc}")
 
@@ -349,7 +346,7 @@ class BridgeHandlers:
             os.replace(tmp, path)
             self.runtime.settings = self.settings
             return True
-        except OSError as exc:  # noqa: BLE001
+        except OSError as exc:
             logger.warning("could not persist settings to %s: %s", path, exc)
             return False
 
@@ -412,8 +409,8 @@ class BridgeHandlers:
             if self.telegram.is_connected:
                 try:
                     self.telegram.disconnect()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001 - best-effort teardown
+                    logger.debug("telegram disconnect failed: %s", exc)
             self.telegram = None
             self.context.extra["telegram"] = None
 
@@ -427,8 +424,8 @@ class BridgeHandlers:
             existing = self.context.extra["gmail"]
             try:
                 existing.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001 - best-effort teardown
+                logger.debug("gmail disconnect failed: %s", exc)
             self.context.extra["gmail"] = None
 
     # ---------------------------------------------------------- gmail flow
@@ -468,8 +465,8 @@ class BridgeHandlers:
         if client is not None:
             try:
                 client.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001 - best-effort teardown
+                logger.debug("gmail disconnect failed: %s", exc)
         return self.gmail_status()
 
     # ------------------------------------------------------- telegram flow
@@ -557,8 +554,8 @@ class BridgeHandlers:
         if self.telegram is not None:
             try:
                 self.telegram.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001 - best-effort teardown
+                logger.debug("telegram disconnect failed: %s", exc)
         self._publish_telegram_state()
         return self.telegram_status()
 
@@ -635,7 +632,7 @@ class BridgeHandlers:
     def _chat_worker(self, run_id: str, user_message: str, stop_event: threading.Event) -> None:
         try:
             self._chat_loop(run_id, user_message, stop_event)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception("chat run %s crashed", run_id)
             self.event_bus.publish(Event(
                 type=EventType.CHAT_FAILED.value,
@@ -984,7 +981,7 @@ def _short(value: Any, limit: int = 120) -> str:
     return rendered[: limit - 3] + "..." if len(rendered) > limit else rendered
 
 
-def _capabilities(handlers: "BridgeHandlers") -> list[str]:
+def _capabilities(handlers: BridgeHandlers) -> list[str]:
     caps = [
         "actions",
         "chat_stream",

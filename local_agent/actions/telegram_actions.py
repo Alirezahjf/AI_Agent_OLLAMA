@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.errors import AssistantError, DependencyMissing
-from .registry import ActionContext, ActionRegistry, risk, Risk
+from .registry import ActionContext, ActionRegistry, Risk, risk
 
 _NOT_CONNECTED_HINT = (
     "تلگرام شخصی وصل نیست. ابتدا در تنظیمات (دکمهٔ «اتصال تلگرام») یا با دستور "
@@ -29,7 +29,7 @@ _NOT_CONNECTED_HINT = (
 
 
 def register_telegram(registry: ActionRegistry, context: ActionContext) -> None:
-    confirm_send = lambda _safety: bool(  # noqa: E731
+    confirm_send = lambda _safety: bool(
         context.runtime.settings.telegram.confirm_send
     )
 

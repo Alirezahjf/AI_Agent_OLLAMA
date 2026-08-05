@@ -12,14 +12,12 @@ from __future__ import annotations
 
 import secrets
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
-from ..core.errors import AssistantError, DependencyMissing
+from ..actions.registry import ActionContext, ActionRegistry, Risk, risk
+from ..core.errors import AssistantError
 from ..core.logging_setup import get_logger
-from ..actions.registry import ActionContext, ActionRegistry, risk, Risk
-
 
 logger = get_logger("automation.gui")
 
@@ -45,7 +43,7 @@ def _get_screen_size_safe() -> tuple[int, int]:
 
         s = pyautogui.size()
         return int(s.width), int(s.height)
-    except Exception:
+    except Exception:  # noqa: BLE001 - headless fallback
         return 1920, 1080
 
 
@@ -91,7 +89,7 @@ def _unique_screenshot_name(target_dir: Path, requested: str) -> Path:
             if not candidate.exists():
                 return candidate
         return candidate  # pragma: no cover - 999 collisions is impossible in practice
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     token = secrets.token_hex(3)
     return target_dir / f"screen-{stamp}-{token}.png"
 
@@ -347,7 +345,7 @@ def type_text(
                 pg.hotkey("ctrl", "v")
             time.sleep(0.15)
             return f"متن {len(text)} کاراکتری از طریق کلیپ‌بورد تایپ شد (Unicode)"
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - fall back to direct typing
             logger.debug("clipboard typing failed, falling back to direct: %s", exc)
             # Fall back to direct
 

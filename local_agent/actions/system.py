@@ -21,13 +21,11 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
 
 from ..core.errors import AssistantError
 from ..core.logging_setup import get_logger
-from ..utils.platform import is_linux, is_windows
-from .registry import ActionContext, ActionRegistry, risk, Risk
-
+from ..utils.platform import is_windows
+from .registry import ActionContext, ActionRegistry, Risk, risk
 
 logger = get_logger("actions.system")
 
@@ -52,9 +50,7 @@ def _is_hard_blocked(cmd: str) -> bool:
         if re.search(pat, low, re.IGNORECASE):
             return True
     # Block direct disk operations
-    if re.search(r"\bformat\s+[a-z]:", low):
-        return True
-    return False
+    return bool(re.search(r"\bformat\s+[a-z]:", low))
 
 
 def _resolve_shell_cwd(
@@ -257,7 +253,9 @@ def system_info(*, context: ActionContext) -> str:
         boot = psutil.boot_time()
         import datetime
 
-        lines.append(f"  uptime: boot at {datetime.datetime.fromtimestamp(boot).isoformat()}")
+        lines.append(
+            f"  uptime: boot at {datetime.datetime.fromtimestamp(boot, datetime.UTC).isoformat()}"
+        )
     except ImportError:
         lines.append("  psutil: نصب نیست (برای اطلاعات RAM/CPU: pip install psutil)")
     except Exception as exc:  # noqa: BLE001
@@ -266,8 +264,8 @@ def system_info(*, context: ActionContext) -> str:
     # Additional diagnostics
     try:
         lines.append(f"  work_dir exists: {context.work_dir.exists()}, free check: {shutil.disk_usage(context.work_dir).free // (1024**2)} MB free")
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - best-effort extra info
+        logger.debug("disk usage probe failed: %s", exc)
 
     return "🖥️ اطلاعات سیستم:\n" + "\n".join(lines)
 
@@ -287,7 +285,8 @@ def open_path(*, path: str, context: ActionContext) -> str:
     try:
         work_resolved = context.work_dir.resolve()
         is_inside = target == work_resolved or work_resolved in target.parents
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - path probing is best-effort
+        logger.debug("workspace check failed for %s: %s", target, exc)
         is_inside = False
     if not is_inside:
         logger.warning("open_path outside workspace: %s", target)

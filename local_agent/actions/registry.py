@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import inspect
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 from ..core.context import RuntimeContext
 from ..core.errors import ActionRefused, AssistantError, DependencyMissing
 from ..core.logging_setup import get_logger
-
 
 logger = get_logger("actions")
 
@@ -50,7 +50,7 @@ class ActionContext:
     """
 
     runtime: RuntimeContext
-    confirmation_gate: "ConfirmationGate"
+    confirmation_gate: ConfirmationGate
     work_dir: Any  # pathlib.Path
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -246,7 +246,7 @@ def run_action(
         raise
     except AssistantError:
         raise
-    except Exception as exc:  # noqa: BLE001 - convert to friendly error
+    except Exception as exc:
         logger.exception("action %s crashed", name)
         raise AssistantError(f"action {name} failed: {exc}") from exc
     return str(result)

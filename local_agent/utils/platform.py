@@ -15,12 +15,11 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from collections.abc import Iterable
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable
 
 from ..core.logging_setup import get_logger
-
 
 logger = get_logger("utils.platform")
 
@@ -307,8 +306,10 @@ def _resolve_uwp_executable(bare: str) -> str | None:
                 "powershell",
                 "-NoProfile",
                 "-Command",
-                f"Get-StartApps | Where-Object {{$_.Name -like '*{bare}*'}} "
-                "| Select-Object -First 1 -ExpandProperty AppID",
+                (
+                    f"Get-StartApps | Where-Object {{$_.Name -like '*{bare}*'}} "
+                    "| Select-Object -First 1 -ExpandProperty AppID"
+                ),
             ],
             capture_output=True,
             text=True,
@@ -482,8 +483,7 @@ def iter_windows_windows() -> Iterable[str]:
             return True
 
         EnumWindows(EnumWindowsProc(callback), 0)
-        for title in titles:
-            yield title
+        yield from titles
     except (OSError, AttributeError) as exc:
         logger.debug("iter_windows_windows failed: %s", exc)
 

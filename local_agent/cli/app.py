@@ -19,25 +19,16 @@ import shlex
 import sys
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
-from ..actions.registry import ActionContext, ConfirmationGate, Risk
-from ..actions import build_default_registry, describe_action, run_action
-from ..automation import is_gui_available, register_gui
 from ..automation.screenshot import take_screenshot
 from ..bridge import BridgeClient, BridgeConnectionError
 from ..bridge.api.handlers import EventType
-from ..bridge.protocol import ActionResult, Event
+from ..bridge.protocol import Event
 from ..core.config import AssistantSettings, load_settings
-from ..core.context import ConversationMessage, RuntimeContext
-from ..core.errors import ActionRefused, AssistantError, DependencyMissing
+from ..core.errors import AssistantError
 from ..core.logging_setup import get_logger, setup_logging
-from ..llm import LLMClient, create_client
-from ..llm.client import ToolDefinition
 from .render import Renderer
-from .prompts import build_system_prompt
-
 
 logger = get_logger("cli")
 

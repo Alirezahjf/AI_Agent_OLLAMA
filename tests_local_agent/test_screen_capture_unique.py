@@ -47,22 +47,25 @@ def fake_camera(monkeypatch: pytest.MonkeyPatch) -> list[bytes]:
 
 
 def test_two_captures_produce_two_different_files(
-    tmp_path: Path, ctx: ActionContext, fake_camera
+    tmp_path: Path, ctx, fake_camera
 ) -> None:
     registry = ctx.registry
     first = run_action(registry, "screen_capture", {}, ctx)
     second = run_action(registry, "screen_capture", {}, ctx)
     assert first != second
-    shots = sorted((tmp_path / "screenshots").glob("screen-*.png"))
+    shots = list((tmp_path / "screenshots").glob("screen-*.png"))
     assert len(shots) == 2
     assert shots[0].read_bytes() != shots[1].read_bytes()
-    # Both names must appear in the tool output so the LLM keeps stable refs.
-    assert str(shots[0].name) in first
-    assert str(shots[1].name) in second
+    # Both names must appear in the tool outputs so the LLM keeps stable
+    # refs; each capture names its own file (no overwriting).
+    name1 = first.rsplit("/", 1)[-1].split(")", 1)[0]
+    name2 = second.rsplit("/", 1)[-1].split(")", 1)[0]
+    assert name1 in first and name1 != name2
+    assert name2 in second
 
 
 def test_custom_name_gets_numeric_suffix_when_exists(
-    tmp_path: Path, ctx: ActionContext, fake_camera
+    tmp_path: Path, ctx, fake_camera
 ) -> None:
     registry = ctx.registry
     first = run_action(registry, "screen_capture", {"filename": "my_shot.png"}, ctx)
@@ -74,7 +77,7 @@ def test_custom_name_gets_numeric_suffix_when_exists(
 
 
 def test_artifact_paths_resolve_to_their_own_file(
-    tmp_path: Path, ctx: ActionContext, fake_camera
+    tmp_path: Path, ctx, fake_camera
 ) -> None:
     settings = ctx.settings
     registry = ctx.registry

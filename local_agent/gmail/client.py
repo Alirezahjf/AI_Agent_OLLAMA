@@ -24,13 +24,11 @@ import smtplib
 import ssl
 import threading
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..core.errors import AssistantError
 from ..core.logging_setup import get_logger
-
 
 logger = get_logger("gmail")
 
@@ -242,8 +240,8 @@ class _ImapGmailBackend(GmailBackend):
             if self._imap is not None:
                 try:
                     self._imap.logout()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001 - best-effort teardown
+                    logger.debug("imap logout failed: %s", exc)
                 self._imap = None
 
     @property
@@ -322,7 +320,7 @@ class GmailClient:
         self._backend = backend or _build_backend(**settings)
 
     @classmethod
-    def from_settings(cls, gmail_settings: Any, data_dir: Path) -> "GmailClient":
+    def from_settings(cls, gmail_settings: Any, data_dir: Path) -> GmailClient:
         credentials_file = (
             Path(gmail_settings.credentials_file).expanduser()
             if gmail_settings.credentials_file
@@ -423,7 +421,8 @@ def _rfc822_body(parsed: email.message.Message) -> str:
             if part.get_content_type() == "text/plain":
                 try:
                     return part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", "replace")
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001 - try the next part
+                    logger.debug("could not decode part: %s", exc)
                     continue
         return ""
     try:

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import socket
-import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +10,7 @@ import requests
 
 from local_agent.bridge.server.server import BridgeServer
 from local_agent.core.config import AssistantSettings
-from local_agent.web.app import WebServer, create_app
+from local_agent.web.app import WebServer
 
 
 def test_root_endpoint_returns_html(web_server: WebServer) -> None:
@@ -187,7 +184,7 @@ def test_parse_action_line_handles_garbage() -> None:
 def test_upload_writes_into_the_workspace(web_server: WebServer, tmp_path: Path) -> None:
     import base64
 
-    payload = base64.b64encode("سلام".encode("utf-8")).decode("ascii")
+    payload = base64.b64encode("سلام".encode()).decode("ascii")
     r = requests.post(
         f"http://127.0.0.1:{web_server.port}/api/upload",
         json={"name": "uploaded.txt", "content_base64": payload},
@@ -494,7 +491,6 @@ def test_artifact_endpoint_missing_file_is_404_not_403(
 
 def test_unhandled_exception_returns_clean_persian_json() -> None:
     """Every unhandled exception must become JSON, never an HTML 500 page."""
-    import json as _json
 
     from fastapi import FastAPI
     from fastapi.testclient import TestClient

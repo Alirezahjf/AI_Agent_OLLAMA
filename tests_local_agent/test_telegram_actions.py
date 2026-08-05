@@ -6,16 +6,16 @@ tiny fake and the settings live in a tmp_path.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from local_agent.actions import run_action
-from local_agent.actions.registry import ActionContext, ConfirmationGate, Risk
+from local_agent.actions.registry import ActionContext, Risk
 from local_agent.bridge.api.handlers import BridgeHandlers
 from local_agent.core.config import AssistantSettings
-from local_agent.core.context import RuntimeContext
 from local_agent.core.errors import ActionRefused, AssistantError
 from local_agent.telegram.client import Chat, Message
 
@@ -37,9 +37,8 @@ class _FakeTelegram:
 
     def search_messages(self, chat, query: str, limit: int = 30) -> list[Message]:
         self.calls.append("search_messages")
-        from datetime import datetime
 
-        return [Message(id=1, chat_id=10, sender="alice", text="hit", date=datetime(2024, 1, 1), is_outgoing=False)]
+        return [Message(id=1, chat_id=10, sender="alice", text="hit", date=datetime(2024, 1, 1, tzinfo=UTC), is_outgoing=False)]
 
     def get_me(self) -> dict[str, Any]:
         self.calls.append("get_me")
@@ -47,21 +46,18 @@ class _FakeTelegram:
 
     def send_message(self, chat, text: str) -> Message:
         self.calls.append("send_message")
-        from datetime import datetime
 
-        return Message(id=99, chat_id=10, sender="me", text=text, date=datetime(2024, 1, 1), is_outgoing=True)
+        return Message(id=99, chat_id=10, sender="me", text=text, date=datetime(2024, 1, 1, tzinfo=UTC), is_outgoing=True)
 
     def send_photo(self, chat, path, caption: str = "") -> Message:
         self.calls.append("send_photo")
-        from datetime import datetime
 
-        return Message(id=100, chat_id=10, sender="me", text=caption or "", date=datetime(2024, 1, 1), is_outgoing=True)
+        return Message(id=100, chat_id=10, sender="me", text=caption or "", date=datetime(2024, 1, 1, tzinfo=UTC), is_outgoing=True)
 
     def send_file(self, chat, path, caption: str = "") -> Message:
         self.calls.append("send_file")
-        from datetime import datetime
 
-        return Message(id=101, chat_id=10, sender="me", text=caption or "", date=datetime(2024, 1, 1), is_outgoing=True)
+        return Message(id=101, chat_id=10, sender="me", text=caption or "", date=datetime(2024, 1, 1, tzinfo=UTC), is_outgoing=True)
 
 
 @pytest.fixture

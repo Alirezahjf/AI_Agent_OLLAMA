@@ -7,9 +7,7 @@ TelegramClient to avoid needing a real account.
 
 from __future__ import annotations
 
-import asyncio
-import threading
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,14 +15,10 @@ import pytest
 
 telethon = pytest.importorskip("telethon")
 
-from local_agent.core.errors import AssistantError  # noqa: E402
-from local_agent.telegram.client import (  # noqa: E402
-    Chat,
-    Message,
+from local_agent.telegram.client import (
     PersonalTelegram,
     TelegramError,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fake telethon client
@@ -64,7 +58,7 @@ class _FakeMessage:
     def __init__(self, id: int, text: str, sender: str = "alice", out: bool = True) -> None:
         self.id = id
         self.message = text
-        self.date = datetime(2024, 1, 1, 12, 0, 0)
+        self.date = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
         self.out = out
         self.sender = _FakeSender(sender) if sender else None
 

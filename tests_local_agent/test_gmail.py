@@ -6,7 +6,6 @@ the settings round-trip for the gmail section.
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 
 import pytest

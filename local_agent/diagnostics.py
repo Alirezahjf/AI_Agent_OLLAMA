@@ -22,13 +22,13 @@ import shutil
 import socket
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlparse
 
 from .core.config import AssistantSettings, load_settings
-
 
 OK = "ok"
 WARN = "warn"

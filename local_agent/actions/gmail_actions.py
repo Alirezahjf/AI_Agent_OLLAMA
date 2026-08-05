@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.errors import AssistantError, DependencyMissing
-from .registry import ActionContext, ActionRegistry, risk, Risk
+from .registry import ActionContext, ActionRegistry, Risk, risk
 
 _NOT_CONNECTED_HINT = (
     "جیمیل وصل نیست. در تنظیمات وب credentials.json یا App Password را "
@@ -19,7 +19,7 @@ _NOT_CONNECTED_HINT = (
 
 
 def register_gmail(registry: ActionRegistry, context: ActionContext) -> None:
-    confirm_send = lambda _safety: bool(  # noqa: E731
+    confirm_send = lambda _safety: bool(
         context.runtime.settings.gmail.confirm_send
     )
 

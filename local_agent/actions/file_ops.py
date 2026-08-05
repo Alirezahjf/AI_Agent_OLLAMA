@@ -13,12 +13,10 @@ import os
 import shutil
 import zipfile
 from pathlib import Path
-from typing import Any
 
 from ..core.errors import AssistantError
 from ..core.logging_setup import get_logger
-from .registry import ActionContext, ActionRegistry, risk, Risk
-
+from .registry import ActionContext, ActionRegistry, Risk, risk
 
 logger = get_logger("actions.file_ops")
 
@@ -219,10 +217,12 @@ def _assert_not_sensitive(path: Path, work_dir: Path) -> None:
     lower_parts = {p.lower() for p in parts}
     # Check for sensitive directories in path
     for sensitive in SENSITIVE_PARTS:
-        if any(sensitive.lower() in part for part in lower_parts) or sensitive.lower() in str(path).lower().replace("\\", "/"):
-            # More precise: check if any part matches
-            if sensitive.split("/")[-1].lower() in lower_parts:
-                raise AssistantError(f"دسترسی به مسیر حساس مسدود شد: {sensitive}")
+        matches_part = sensitive.split("/")[-1].lower() in lower_parts
+        if matches_part and (
+            any(sensitive.lower() in part for part in lower_parts)
+            or sensitive.lower() in str(path).lower().replace("\\", "/")
+        ):
+            raise AssistantError(f"دسترسی به مسیر حساس مسدود شد: {sensitive}")
     name = path.name.lower()
     if name in SENSITIVE_NAMES or name.startswith(".env.") or "credential" in name:
         raise AssistantError(f"فایل محرمانه محافظت شده است: {path.name}")
@@ -450,10 +450,8 @@ def search_files(
             try:
                 # Skip hidden sensitive parts
                 rel_for_check = full.resolve().relative_to(work_root)
-                if any(part.lower() in SENSITIVE_PARTS or part.startswith(".") and part in {".ssh", ".gnupg"} for part in rel_for_check.parts):
-                    # allow dotfiles but block .ssh etc
-                    if ".ssh" in rel_for_check.parts or ".gnupg" in rel_for_check.parts:
-                        continue
+                if ".ssh" in rel_for_check.parts or ".gnupg" in rel_for_check.parts:
+                    continue
             except ValueError:
                 continue
             try:

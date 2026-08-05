@@ -55,7 +55,6 @@ from ..core.errors import AssistantError
 from ..core.logging_setup import get_logger, setup_logging
 from ..utils.paths import web_static_dir, web_templates_dir
 
-
 logger = get_logger("web")
 
 
@@ -408,7 +407,7 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
             return await asyncio.to_thread(
                 fetch_billing, llm.openai_base_url, llm.openai_api_key, provider_hint=hint
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception:
             logger.exception("billing fetch failed")
             return {
                 "provider": llm.provider,
@@ -661,7 +660,7 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                 "elevated": True,
                 "message": "برنامه با سطح administrator دوباره اجرا می‌شود؛ این پنجره را ببندید.",
             }
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception("elevate/restart failed")
             return {"elevated": False, "message": f"اجرای دوباره ممکن نشد: {exc}"}
 
@@ -792,13 +791,13 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                     await websocket.send_text(json.dumps({"type": "pong", "ts": time.time()}))
         except WebSocketDisconnect:
             return
-        except Exception:  # noqa: BLE001 - never kill the socket with a bare crash
+        except Exception:
             logger.exception("websocket handler crashed")
             try:
                 await websocket.send_text(
                     json.dumps({"type": "error", "message": "خطای داخلی سرور رخ داد؛ اتصال دوباره برقرار می‌شود"})
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, S110 - socket already gone
                 pass
 
     # Static assets
