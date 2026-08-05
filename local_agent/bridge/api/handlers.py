@@ -22,6 +22,7 @@ from typing import Any, Callable, Iterable
 
 from ...actions import build_default_registry, run_action, describe_action
 from ...actions.config_actions import register_config
+from ...actions.gmail_actions import register_gmail
 from ...actions.registry import ActionContext, ConfirmationGate
 from ...actions.telegram_actions import register_telegram
 from ...automation import is_gui_available, register_gui
@@ -29,6 +30,8 @@ from ...core.config import AssistantSettings, ConfigError
 from ...core.context import ConversationMessage, RuntimeContext
 from ...core.errors import ActionRefused, AssistantError, DependencyMissing
 from ...core.logging_setup import get_logger
+from ...gmail import GmailClient
+from ...gmail.client import GmailError
 from ...llm import create_client
 from ...llm.client import ToolDefinition
 from ...telegram import PersonalTelegram
@@ -157,6 +160,7 @@ class BridgeHandlers:
         register_gui(registry, context)
         register_telegram(registry, context)
         register_config(registry, context)
+        register_gmail(registry, context)
         telegram = None
         if settings.telegram.enabled:
             telegram = PersonalTelegram(
@@ -166,6 +170,8 @@ class BridgeHandlers:
                 session_path=settings.telegram_session_path,
             )
         context.extra["telegram"] = telegram
+        gmail = _build_gmail_client(settings)
+        context.extra["gmail"] = gmail
         runtime.set_system_prompt(_build_system_prompt(registry, settings, is_gui_available(), telegram is not None))
         handlers = cls(
             settings=settings,
@@ -384,6 +390,7 @@ class BridgeHandlers:
         self.context.work_dir = new_settings.work_dir
         self._persist_settings()
         self._sync_telegram_client(old)
+        self._sync_gmail_client(old)
         return new_settings
 
     def _sync_telegram_client(self, old: AssistantSettings) -> None:
@@ -409,6 +416,61 @@ class BridgeHandlers:
                     pass
             self.telegram = None
             self.context.extra["telegram"] = None
+
+    def _sync_gmail_client(self, old: AssistantSettings) -> None:
+        """Create/drop the Gmail client as ``gmail.enabled`` changes."""
+        gmail = self.settings.gmail
+        if gmail.enabled and self.context.extra.get("gmail") is None:
+            client = _build_gmail_client(self.settings)
+            self.context.extra["gmail"] = client
+        elif not gmail.enabled and self.context.extra.get("gmail") is not None:
+            existing = self.context.extra["gmail"]
+            try:
+                existing.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+            self.context.extra["gmail"] = None
+
+    # ---------------------------------------------------------- gmail flow
+
+    def gmail_status(self) -> dict[str, Any]:
+        client = self.context.extra.get("gmail")
+        gmail = self.settings.gmail
+        return {
+            "enabled": bool(gmail.enabled),
+            "connected": bool(client and client.is_connected),
+            "username": gmail.username,
+            "has_credentials_file": self.settings.gmail_credentials_path.is_file(),
+            "has_token_file": self.settings.gmail_token_path.is_file(),
+            "has_app_password": bool(gmail.app_password),
+        }
+
+    def connect_gmail(self) -> dict[str, Any]:
+        """Connect the Gmail backend (OAuth browser flow or IMAP login)."""
+        client = self.context.extra.get("gmail")
+        if client is None:
+            client = _build_gmail_client(self.settings, force=True)
+            self.context.extra["gmail"] = client
+        if client is None:
+            raise AssistantError(
+                "هیچ روش اتصال جیمیل پیکربندی نشده است. یا credentials.json (OAuth) را "
+                "از Google Cloud Console بگذارید، یا gmail.username و gmail.app_password "
+                "را در تنظیمات وب ثبت کنید."
+            )
+        try:
+            message = client.connect()
+        except GmailError as exc:
+            raise AssistantError(str(exc)) from exc
+        return {"connected": True, "message": message, **self.gmail_status()}
+
+    def disconnect_gmail(self) -> dict[str, Any]:
+        client = self.context.extra.get("gmail")
+        if client is not None:
+            try:
+                client.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+        return self.gmail_status()
 
     # ------------------------------------------------------- telegram flow
 
@@ -953,6 +1015,19 @@ def _ollama_reachable(base_url: str, timeout: float = 1.5) -> bool:
             return True
     except OSError:
         return False
+
+
+def _build_gmail_client(
+    settings: AssistantSettings, *, force: bool = False
+) -> GmailClient | None:
+    """Build the Gmail client when enabled (or when ``force``); never touches the network."""
+    if not settings.gmail.enabled and not force:
+        return None
+    try:
+        return GmailClient.from_settings(settings.gmail, settings.data_dir)
+    except GmailError as exc:
+        logger.warning("gmail client not built: %s", exc)
+        return None
 
 
 def _auto_select_provider(settings: AssistantSettings) -> AssistantSettings:

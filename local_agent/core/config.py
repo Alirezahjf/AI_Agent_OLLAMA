@@ -108,6 +108,7 @@ class GmailSettings:
     enabled: bool = False
     credentials_file: str = ""  # default: <data_dir>/credentials.json
     token_file: str = ""  # default: <data_dir>/gmail_token.json
+    username: str = ""  # Gmail address, needed for the IMAP/SMTP fallback
     app_password: str = ""  # IMAP/SMTP fallback (16-char App Password)
     confirm_send: bool = True  # ask before every outgoing email
 

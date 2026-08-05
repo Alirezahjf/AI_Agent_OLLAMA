@@ -542,7 +542,7 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         if req.gmail:
             gm_dict = dict(new_settings.gmail.__dict__)
             gm_changed = False
-            for key in ("enabled", "credentials_file", "token_file", "app_password", "confirm_send"):
+            for key in ("enabled", "credentials_file", "token_file", "username", "app_password", "confirm_send"):
                 if key in req.gmail:
                     raw = req.gmail[key]
                     if key == "app_password" and (not raw or not str(raw).strip()):
@@ -607,6 +607,24 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         if server is None:
             raise HTTPException(503, "telegram needs an in-process bridge")
         return server.handlers.disconnect_telegram()
+
+    @app.post("/api/gmail/connect")
+    async def gmail_connect() -> dict[str, Any]:
+        """Connect Gmail (OAuth browser flow or IMAP/SMTP App Password)."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "gmail needs an in-process bridge")
+        try:
+            return server.handlers.connect_gmail()
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.post("/api/gmail/disconnect")
+    async def gmail_disconnect() -> dict[str, Any]:
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "gmail needs an in-process bridge")
+        return server.handlers.disconnect_gmail()
 
     @app.post("/api/chat")
     async def chat(req: ChatRequest) -> dict[str, Any]:

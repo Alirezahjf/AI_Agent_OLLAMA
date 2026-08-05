@@ -11,6 +11,10 @@ mss>=9.0
 # Personal-account Telegram via Telethon (user client, NOT a bot)
 telethon>=1.36
 
+# Gmail OAuth2 installed-app (optional; IMAP/SMTP fallback needs nothing)
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.1
+
 # Web UI (FastAPI + uvicorn + websockets)
 fastapi>=0.110
 uvicorn[standard]>=0.27
