@@ -677,3 +677,43 @@ def test_telegram_full_login_flow_over_http(
     r = requests.post(base + "/api/telegram/disconnect", timeout=5)
     assert r.status_code == 200
     assert r.json()["connected"] is False
+
+
+# ---------------------------------------------------------------------------
+# P1/P2/P3/P5 — settings modal covers the new sections
+# ---------------------------------------------------------------------------
+
+
+def test_index_settings_modal_has_new_sections() -> None:
+    html = (WEB_DIR / "templates" / "index.html").read_text(encoding="utf-8")
+    for marker in (
+        "set-workdir",          # P3: work_dir
+        "set-tg-enabled",       # P1: telegram section
+        "connectTelegram",      # P1: telegram connect flow
+        "telegramState === 'await_code'",
+        "set-gm-enabled",       # P5: gmail section
+        "connectGmail",
+        "set-fullaccess",       # P2: admin/root switch
+        "confirmFullAccess",    # P2: two-step confirm
+        "restartElevated",      # P2: restart-as-admin button
+        "elevationLabel",
+    ):
+        assert marker in html, f"missing UI region: {marker}"
+
+
+def test_app_js_exposes_new_behaviours() -> None:
+    js = (WEB_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    for feature in (
+        "connectTelegram", "submitTelegramCode", "submitTelegramPassword",
+        "disconnectTelegram", "connectGmail", "disconnectGmail",
+        "onFullAccessToggle", "restartElevated", "applyTelegramState",
+    ):
+        assert feature in js, f"missing behaviour: {feature}"
+
+
+def test_elevate_endpoint_returns_guidance_on_posix(web_server: WebServer) -> None:
+    r = requests.post(f"http://127.0.0.1:{web_server.port}/api/elevate/restart", timeout=5)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["elevated"] is False
+    assert "sudo" in body.get("message", "")

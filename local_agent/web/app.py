@@ -529,8 +529,10 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
             for key in ("enabled", "api_id", "api_hash", "phone", "session_name", "confirm_send"):
                 if key in req.telegram:
                     raw = req.telegram[key]
-                    if key == "api_hash" and (not raw or not str(raw).strip()):
-                        continue  # blank = keep the stored hash
+                    # Blank scalar = keep the stored value (the UI never
+                    # echoes secrets back, so an empty hash is not a change).
+                    if key != "enabled" and key != "confirm_send" and (not raw or not str(raw).strip()):
+                        continue
                     tg_dict[key] = _coerce_telegram_field(key, raw)
                     tg_changed = True
             if tg_changed:
@@ -625,6 +627,43 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         if server is None:
             raise HTTPException(503, "gmail needs an in-process bridge")
         return server.handlers.disconnect_gmail()
+
+    @app.post("/api/elevate/restart")
+    async def elevate_restart() -> dict[str, Any]:
+        """Relaunch the assistant with administrator rights (best-effort).
+
+        Windows: ``ShellExecuteW(..., "runas", ...)`` re-spawns the app
+        elevated (UAC prompt).  On POSIX we cannot elevate a running
+        process, so we return guidance to restart with sudo.
+        """
+        from ..utils.platform import Platform, current_platform
+
+        if current_platform() != Platform.WINDOWS:
+            return {
+                "elevated": False,
+                "message": "در لینوکس/مک، برنامه را با sudo دوباره اجرا کنید: "
+                "sudo python -m local_agent.web",
+            }
+        try:
+            import ctypes
+
+            argv = list(sys.argv[1:]) if not getattr(sys, "frozen", False) else []
+            params = " ".join(argv) if argv else ""
+            result = ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, params, None, 1
+            )
+            if int(result) <= 32:
+                return {
+                    "elevated": False,
+                    "message": "اجرای دوباره به‌عنوان administrator ممکن نشد (شاید تأیید UAC لغو شد).",
+                }
+            return {
+                "elevated": True,
+                "message": "برنامه با سطح administrator دوباره اجرا می‌شود؛ این پنجره را ببندید.",
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("elevate/restart failed")
+            return {"elevated": False, "message": f"اجرای دوباره ممکن نشد: {exc}"}
 
     @app.post("/api/chat")
     async def chat(req: ChatRequest) -> dict[str, Any]:

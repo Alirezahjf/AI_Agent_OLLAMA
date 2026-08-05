@@ -215,8 +215,23 @@
         openai_base_url: "",
         openai_api_key: "",
         confirm_mode: "destructive",
+        work_dir: "",
+        full_system_access: false,
         autostart: false,
+        telegram: { enabled: false, api_id: "", api_hash: "", phone: "" },
+        gmail: { enabled: false, username: "", credentials_file: "", token_file: "", app_password: "" },
       },
+      fullAccessWanted: false,
+      fullAccessArmed: false,
+      elevating: false,
+      elevation: "",
+      telegramState: "disabled",
+      telegramConnected: false,
+      telegramBusy: false,
+      telegramCode: "",
+      telegramPassword: "",
+      gmailConnected: false,
+      gmailBusy: false,
 
       status: {},
       warnings: [],
@@ -345,6 +360,9 @@
       handleEvent(msg) {
         const p = msg.payload || {};
         switch (msg.event_type) {
+          case "telegram_state":
+            this.applyTelegramState(p.telegram || {});
+            break;
           case "chat_started":
             this.runId = msg.run_id;
             this.busy = true;
@@ -565,7 +583,176 @@
           this.form.model = s.llm_model || this.form.model;
           this.form.confirm_mode = s.confirm_mode || this.form.confirm_mode;
           if (s.openai_base_url) this.form.openai_base_url = s.openai_base_url;
+          if (s.work_dir) this.form.work_dir = s.work_dir;
+          if (typeof s.full_system_access === "boolean") {
+            this.form.full_system_access = s.full_system_access;
+            this.fullAccessWanted = s.full_system_access;
+          }
+          this.elevation = s.elevation || "";
+          this.applyTelegramState({
+            enabled: s.telegram_enabled,
+            connected: s.telegram_connected,
+            state: s.telegram_state,
+            phone: s.telegram_phone,
+          });
+          this.form.telegram.enabled = Boolean(s.telegram_enabled);
+          if (s.telegram_phone) this.form.telegram.phone = s.telegram_phone;
+          this.gmailConnected = Boolean(s.gmail_connected);
+          this.form.gmail.enabled = Boolean(s.gmail_enabled);
         } catch (_) { /* keep previous values */ }
+      },
+
+      /* --------------------------------------------- telegram / gmail flow */
+
+      applyTelegramState(state) {
+        if (!state) return;
+        this.telegramState = state.state || this.telegramState;
+        this.telegramConnected = Boolean(state.connected);
+        if (state.phone && !this.form.telegram.phone) this.form.telegram.phone = state.phone;
+        if (this.telegramState === "connected") {
+          this.telegramCode = "";
+          this.telegramPassword = "";
+        }
+      },
+
+      get telegramStateLabel() {
+        const labels = {
+          disabled: "",
+          disconnected: "وصل نیست",
+          await_code: "منتظر کد…",
+          await_2fa: "منتظر رمز 2FA…",
+          connected: "✅ متصل",
+        };
+        return labels[this.telegramState] || "";
+      },
+
+      get gmailStateLabel() {
+        return this.gmailConnected ? "✅ متصل" : "وصل نیست";
+      },
+
+      get elevationLabel() {
+        return { admin: "administrator", root: "root", user: "user" }[this.elevation] || this.elevation || "نامشخص";
+      },
+
+      async connectTelegram() {
+        if (this.connection === "offline") return;
+        this.telegramBusy = true;
+        try {
+          const result = await this.api("/api/telegram/connect", { method: "POST" });
+          this.applyTelegramState(result);
+          if (result.state === "connected") {
+            this.toast("ok", "✅", "تلگرام متصل شد");
+            this.refreshStatus();
+          }
+        } catch (err) {
+          this.toast("bad", "⚠️", "اتصال تلگرام ناموفق بود — " + err.message);
+        } finally {
+          this.telegramBusy = false;
+        }
+      },
+
+      async submitTelegramCode() {
+        if (!this.telegramCode.trim()) { this.toast("bad", "⚠️", "کد را وارد کنید"); return; }
+        this.telegramBusy = true;
+        try {
+          const result = await this.api("/api/telegram/verify", {
+            method: "POST",
+            body: JSON.stringify({ code: this.telegramCode.trim() }),
+          });
+          this.applyTelegramState(result);
+          if (result.state === "connected") this.toast("ok", "✅", "تلگرام متصل شد");
+        } catch (err) {
+          this.toast("bad", "⚠️", "کد نادرست است — " + err.message);
+        } finally {
+          this.telegramBusy = false;
+        }
+      },
+
+      async submitTelegramPassword() {
+        if (!this.telegramPassword) { this.toast("bad", "⚠️", "رمز 2FA را وارد کنید"); return; }
+        this.telegramBusy = true;
+        try {
+          const result = await this.api("/api/telegram/verify", {
+            method: "POST",
+            body: JSON.stringify({ password: this.telegramPassword }),
+          });
+          this.applyTelegramState(result);
+          if (result.state === "connected") this.toast("ok", "✅", "تلگرام متصل شد");
+        } catch (err) {
+          this.toast("bad", "⚠️", "رمز 2FA نادرست است — " + err.message);
+        } finally {
+          this.telegramBusy = false;
+        }
+      },
+
+      async disconnectTelegram() {
+        if (this.connection === "offline") return;
+        try {
+          const result = await this.api("/api/telegram/disconnect", { method: "POST" });
+          this.applyTelegramState(result);
+          this.toast("info", "ℹ️", "تلگرام قطع شد");
+        } catch (_) {
+          this.toast("bad", "❌", "قطع اتصال تلگرام ناموفق بود");
+        }
+      },
+
+      async connectGmail() {
+        if (this.connection === "offline") return;
+        this.gmailBusy = true;
+        try {
+          const result = await this.api("/api/gmail/connect", { method: "POST" });
+          this.gmailConnected = Boolean(result.connected);
+          if (result.connected) this.toast("ok", "✅", "جیمیل متصل شد");
+          else this.toast("info", "ℹ️", result.message || "اتصال جیمیل نیاز به تأیید در مرورگر دارد");
+        } catch (err) {
+          this.toast("bad", "⚠️", "اتصال جیمیل ناموفق بود — " + err.message);
+        } finally {
+          this.gmailBusy = false;
+        }
+      },
+
+      async disconnectGmail() {
+        if (this.connection === "offline") return;
+        try {
+          await this.api("/api/gmail/disconnect", { method: "POST" });
+          this.gmailConnected = false;
+          this.toast("info", "ℹ️", "جیمیل قطع شد");
+        } catch (_) {
+          this.toast("bad", "❌", "قطع اتصال جیمیل ناموفق بود");
+        }
+      },
+
+      onFullAccessToggle() {
+        if (this.fullAccessWanted) {
+          this.fullAccessArmed = true;  // two-step confirm
+        } else {
+          this.fullAccessArmed = false;
+          this.form.full_system_access = false;
+        }
+      },
+
+      confirmFullAccess() {
+        this.form.full_system_access = true;
+        this.fullAccessArmed = false;
+        this.toast("warn", "⚠️", "دسترسی کامل فعال شد — ذخیره را بزنید");
+      },
+
+      cancelFullAccess() {
+        this.fullAccessWanted = this.form.full_system_access;
+        this.fullAccessArmed = false;
+      },
+
+      async restartElevated() {
+        if (this.connection === "offline") return;
+        this.elevating = true;
+        try {
+          const result = await this.api("/api/elevate/restart", { method: "POST" });
+          this.toast(result.elevated ? "ok" : "info", result.elevated ? "✅" : "ℹ️", result.message || "");
+        } catch (_) {
+          this.toast("bad", "❌", "اجرای دوباره ناموفق بود");
+        } finally {
+          this.elevating = false;
+        }
       },
 
       async refreshActions() {
