@@ -1,9 +1,10 @@
 """File operations: safe read / write / move / copy / delete / search.
 
-Paths are sandboxed to the assistant's work directory unless the user
-explicitly passes an absolute path that is allowed by the policy. The
-agent can still escape by passing a C:\\... path; in that case the
-action is marked DESTRUCTIVE and the user must approve.
+Paths are sandboxed to the assistant's work directory.  With
+``safety.full_system_access`` enabled the whole filesystem becomes
+reachable, but sensitive files (``.ssh``, ``.env``, credentials, ...)
+stay blocked in *both* modes and destructive actions still ask for
+confirmation.
 """
 
 from __future__ import annotations
@@ -227,8 +228,14 @@ def _assert_not_sensitive(path: Path, work_dir: Path) -> None:
         raise AssistantError(f"فایل محرمانه محافظت شده است: {path.name}")
 
 
-def _resolve_path(raw: str, work_dir: Path) -> Path:
-    """Resolve a user-supplied path to an absolute Path, sandboxed to work_dir."""
+def _resolve_path(raw: str, work_dir: Path, *, full_system_access: bool = False) -> Path:
+    """Resolve a user-supplied path to an absolute Path.
+
+    By default the path is sandboxed to ``work_dir``.  With
+    ``full_system_access=True`` the whole filesystem becomes reachable,
+    but sensitive files (``.ssh``, ``.env``, credentials, ...) stay
+    blocked in both modes via :func:`_assert_not_sensitive`.
+    """
     if not isinstance(raw, str) or not raw.strip():
         raise AssistantError("path must be a non-empty string")
     if len(raw) > 1024:
@@ -238,16 +245,17 @@ def _resolve_path(raw: str, work_dir: Path) -> Path:
         candidate = (work_dir / candidate).resolve()
     else:
         candidate = candidate.resolve()
-    # Enforce sandbox: resolved path must be inside work_dir (or work_dir itself)
-    try:
-        work_resolved = work_dir.resolve()
-        # allow the work_dir itself
-        if candidate != work_resolved:
-            candidate.relative_to(work_resolved)
-    except ValueError:
-        raise AssistantError(f"مسیر خارج از فضای کاری است: {raw!r} — فقط داخل workspace مجاز است")
-    except OSError as exc:
-        raise AssistantError(f"خواندن مسیر ممکن نشد {raw!r}: {exc}") from exc
+    if not full_system_access:
+        # Enforce sandbox: resolved path must be inside work_dir (or work_dir itself)
+        try:
+            work_resolved = work_dir.resolve()
+            # allow the work_dir itself
+            if candidate != work_resolved:
+                candidate.relative_to(work_resolved)
+        except ValueError:
+            raise AssistantError(f"مسیر خارج از فضای کاری است: {raw!r} — فقط داخل workspace مجاز است")
+        except OSError as exc:
+            raise AssistantError(f"خواندن مسیر ممکن نشد {raw!r}: {exc}") from exc
     _assert_not_sensitive(candidate, work_dir)
     return candidate
 
@@ -265,7 +273,7 @@ def read_file(
     max_lines: int = 400,
     context: ActionContext,
 ) -> str:
-    target = _resolve_path(path, context.work_dir)
+    target = _resolve_path(path, context.work_dir, full_system_access=context.runtime.settings.safety.full_system_access)
     if not target.is_file():
         raise AssistantError(f"not a file: {target}")
     # Check for binary files
@@ -299,7 +307,7 @@ def write_file(
     content: str,
     context: ActionContext,
 ) -> str:
-    target = _resolve_path(path, context.work_dir)
+    target = _resolve_path(path, context.work_dir, full_system_access=context.runtime.settings.safety.full_system_access)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_suffix(target.suffix + ".tmp")
     try:
@@ -317,7 +325,7 @@ def append_file(
     content: str,
     context: ActionContext,
 ) -> str:
-    target = _resolve_path(path, context.work_dir)
+    target = _resolve_path(path, context.work_dir, full_system_access=context.runtime.settings.safety.full_system_access)
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         with target.open("a", encoding="utf-8") as f:
@@ -334,8 +342,8 @@ def copy_path(
     destination: str,
     context: ActionContext,
 ) -> str:
-    src = _resolve_path(source, context.work_dir)
-    dst = _resolve_path(destination, context.work_dir)
+    src = _resolve_path(source, context.work_dir, full_system_access=context.runtime.settings.safety.full_system_access)
+    dst = _resolve_path(destination, context.work_dir, full_system_access=context.runtime.settings.safety.full_system_access)
     if not src.exists():
         raise AssistantError(f"source does not exist: {src}")
     if dst.exists():
@@ -353,7 +361,7 @@ def copy_path(
 
 @risk(Risk.SAFE)
 def list_directory(*, path: str = ".", context: ActionContext) -> str:
-    target = _resolve_path(path or ".", context.work_dir)
+    target = _resolve_path(path or ".", context.work_dir, full_system_access=context.runtime.settings.safety.full_system_access)
     if not target.is_dir():
         raise AssistantError(f"not a directory: {target}")
     try:
@@ -376,7 +384,7 @@ def list_directory(*, path: str = ".", context: ActionContext) -> str:
 
 @risk(Risk.DESTRUCTIVE)
 def make_directory(*, path: str, context: ActionContext) -> str:
-    target = _resolve_path(path, context.work_dir)
+    target = _resolve_path(path, context.work_dir, full_system_access=context.runtime.settings.safety.full_system_access)
     if target.exists() and not target.is_dir():
         raise AssistantError(f"a file already exists at {target}")
     target.mkdir(parents=True, exist_ok=True)
@@ -385,8 +393,8 @@ def make_directory(*, path: str, context: ActionContext) -> str:
 
 @risk(Risk.DESTRUCTIVE)
 def move_path(*, source: str, destination: str, context: ActionContext) -> str:
-    src = _resolve_path(source, context.work_dir)
-    dst = _resolve_path(destination, context.work_dir)
+    src = _resolve_path(source, context.work_dir, full_system_access=context.runtime.settings.safety.full_system_access)
+    dst = _resolve_path(destination, context.work_dir, full_system_access=context.runtime.settings.safety.full_system_access)
     if not src.exists():
         raise AssistantError(f"source does not exist: {src}")
     if dst.exists():
@@ -398,7 +406,7 @@ def move_path(*, source: str, destination: str, context: ActionContext) -> str:
 
 @risk(Risk.SYSTEM)
 def delete_path(*, path: str, recursive: bool = False, context: ActionContext) -> str:
-    target = _resolve_path(path, context.work_dir)
+    target = _resolve_path(path, context.work_dir, full_system_access=context.runtime.settings.safety.full_system_access)
     if not target.exists():
         return f"path did not exist: {target}"
     if target.is_dir() and not recursive:
@@ -425,7 +433,7 @@ def search_files(
         raise AssistantError("query must be a non-empty string")
     if len(query) > 500:
         raise AssistantError("عبارت جستجو خیلی طولانی است")
-    target = _resolve_path(path or ".", context.work_dir)
+    target = _resolve_path(path or ".", context.work_dir, full_system_access=context.runtime.settings.safety.full_system_access)
     if not target.is_dir():
         raise AssistantError(f"مسیر پوشه نیست: {target}")
     needle = query
@@ -483,11 +491,11 @@ def zip_directory(
     destination: str = "",
     context: ActionContext,
 ) -> str:
-    src = _resolve_path(source, context.work_dir)
+    src = _resolve_path(source, context.work_dir, full_system_access=context.runtime.settings.safety.full_system_access)
     if not src.is_dir():
         raise AssistantError(f"not a directory: {src}")
     if destination:
-        dst = _resolve_path(destination, context.work_dir)
+        dst = _resolve_path(destination, context.work_dir, full_system_access=context.runtime.settings.safety.full_system_access)
     else:
         dst = src.with_suffix(".zip")
     if dst.suffix.lower() != ".zip":
@@ -512,11 +520,11 @@ def unzip_file(
     destination: str = "",
     context: ActionContext,
 ) -> str:
-    src = _resolve_path(source, context.work_dir)
+    src = _resolve_path(source, context.work_dir, full_system_access=context.runtime.settings.safety.full_system_access)
     if not src.is_file():
         raise AssistantError(f"not a file: {src}")
     if destination:
-        dst = _resolve_path(destination, context.work_dir)
+        dst = _resolve_path(destination, context.work_dir, full_system_access=context.runtime.settings.safety.full_system_access)
     else:
         dst = src.with_suffix("")
     dst.mkdir(parents=True, exist_ok=True)
@@ -544,7 +552,7 @@ def download_file(
     if not url.startswith(("http://", "https://")):
         raise AssistantError("url must start with http:// or https://")
     if path:
-        target = _resolve_path(path, context.work_dir)
+        target = _resolve_path(path, context.work_dir, full_system_access=context.runtime.settings.safety.full_system_access)
     else:
         # Derive filename from URL
         from urllib.parse import urlparse

@@ -57,6 +57,50 @@ def _is_hard_blocked(cmd: str) -> bool:
     return False
 
 
+def _resolve_shell_cwd(
+    context: ActionContext, working_dir: str, *, restrict: bool
+) -> Path:
+    """Pick the working directory for a shell command.
+
+    ``working_dir`` (the ``cd`` equivalent) is validated and then
+    *remembered* on the context, so the next command runs in the same
+    directory — a stateful session shell.  When no directory is given,
+    the last remembered one is reused.  Outside ``full_system_access``
+    the workspace sandbox is enforced; a stale out-of-workspace cwd
+    (left over from a full-access session) falls back to ``work_dir``.
+    """
+    if working_dir:
+        candidate = Path(working_dir).expanduser()
+        if not candidate.is_absolute():
+            candidate = (context.work_dir / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+        if not candidate.is_dir():
+            raise AssistantError(f"پوشهٔ کاری وجود ندارد: {candidate}")
+        if restrict:
+            try:
+                candidate.relative_to(context.work_dir.resolve())
+            except ValueError:
+                raise AssistantError(
+                    "در حالت restrict_shell_to_workdir فقط داخل workspace مجاز است؛ "
+                    "برای اجرای شل در همهٔ سیستم، «دسترسی کامل سیستم» را فعال کنید."
+                )
+        context.extra["shell_cwd"] = str(candidate)
+        return candidate
+
+    stored = context.extra.get("shell_cwd")
+    if stored:
+        candidate = Path(stored)
+        if candidate.is_dir():
+            if restrict:
+                try:
+                    candidate.relative_to(context.work_dir.resolve())
+                except ValueError:
+                    return context.work_dir  # stale cwd from a full-access session
+            return candidate
+    return context.work_dir
+
+
 def register_system(registry: ActionRegistry, context: ActionContext) -> None:
     registry.decorator(
         name="run_shell",
@@ -64,7 +108,10 @@ def register_system(registry: ActionRegistry, context: ActionContext) -> None:
             "Run a shell command and return its output. On Windows, commands are "
             "executed via cmd.exe /c; on Linux/macOS via bash -lc. DESTRUCTIVE — "
             "always asks for confirmation unless the policy says otherwise. "
-            "Blocked patterns: rm -rf /, mkfs, dd to /dev, fork-bomb, curl|sh."
+            "Blocked patterns: rm -rf /, mkfs, dd to /dev, fork-bomb, curl|sh. "
+            "working_dir changes the session directory (stateful cd); with "
+            "«دسترسی کامل سیستم» active the shell may run in any folder, "
+            "otherwise only inside the workspace."
         ),
         parameters={
             "command": {"type": "string"},
@@ -135,24 +182,9 @@ def run_shell(
         raise AssistantError("این دستور به‌دلیل خطر بالا مسدود شد (الگوی خطرناک)")
 
     timeout = max(1, min(int(timeout or 30), context.runtime.settings.safety.shell_timeout_seconds))
-    cwd: Path | None = None
-    if working_dir:
-        candidate = Path(working_dir).expanduser()
-        if not candidate.is_absolute():
-            candidate = (context.work_dir / candidate).resolve()
-        else:
-            candidate = candidate.resolve()
-        if not candidate.is_dir():
-            raise AssistantError(f"پوشهٔ کاری وجود ندارد: {candidate}")
-        # Enforce sandbox when policy says so
-        if context.runtime.settings.safety.restrict_shell_to_workdir:
-            try:
-                candidate.relative_to(context.work_dir.resolve())
-            except ValueError:
-                raise AssistantError("در حالت restrict_shell_to_workdir فقط داخل workspace مجاز است")
-        cwd = candidate
-    elif context.runtime.settings.safety.restrict_shell_to_workdir:
-        cwd = context.work_dir
+    full_access = bool(context.runtime.settings.safety.full_system_access)
+    restrict = bool(context.runtime.settings.safety.restrict_shell_to_workdir) and not full_access
+    cwd = _resolve_shell_cwd(context, working_dir, restrict=restrict)
 
     if os.name == "nt":
         argv = ["cmd.exe", "/d", "/s", "/c", command]

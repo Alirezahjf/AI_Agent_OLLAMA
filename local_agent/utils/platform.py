@@ -72,6 +72,31 @@ def is_wsl() -> bool:
         return False
 
 
+def elevation_level() -> str:
+    """Report the process privilege level: ``admin`` | ``root`` | ``user``.
+
+    Windows answers through ``IsUserAnAdmin()`` (guarded with
+    ``getattr`` so the sandbox/CI never crashes), POSIX through
+    ``os.geteuid()``.  This tells the UI whether the assistant really
+    runs with administrator/root rights when ``full_system_access`` is
+    enabled — or whether the user still needs to restart it elevated.
+    """
+    if current_platform() == Platform.WINDOWS:
+        try:
+            import ctypes
+
+            shell32 = getattr(ctypes, "windll", None)
+            if shell32 is not None and hasattr(shell32, "shell32"):
+                return "admin" if bool(shell32.shell32.IsUserAnAdmin()) else "user"
+        except (OSError, AttributeError, ImportError):
+            pass
+        return "user"
+    try:
+        return "root" if os.geteuid() == 0 else "user"
+    except (AttributeError, OSError):
+        return "user"
+
+
 def has_display() -> bool:
     """True when a graphical display is available.
 
