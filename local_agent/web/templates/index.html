@@ -664,6 +664,25 @@
             <button class="btn btn--ghost btn--sm" type="button" @click="disconnectTelegram()" x-show="telegramConnected" x-cloak>قطع اتصال</button>
             <span class="field__hint" x-text="telegramStateLabel"></span>
           </div>
+          <div class="field">
+            <label>اکانت‌ها (چند اکانت)</label>
+            <p class="field__hint" x-text="activeTelegramAccount ? ('اکانت فعال: ' + activeTelegramAccount) : ''"></p>
+            <template x-for="acc in telegramAccounts" :key="acc.account">
+              <div class="field__row">
+                <span class="field__hint">
+                  {{ acc.account }} — {{ acc.phone || 'شماره ندارد' }} — {{ acc.state }}
+                </span>
+                <button class="btn btn--ghost btn--sm" type="button"
+                        @click="connectTelegram(acc.account)" :disabled="telegramBusy">
+                  <span x-show="!telegramBusy">🔌 اتصال</span>
+                  <span x-show="telegramBusy" x-cloak>…</span>
+                </button>
+                <button class="btn btn--ghost btn--sm" type="button"
+                        @click="switchAccount(acc.account)" :disabled="switchingTelegram"
+                        x-show="acc.account !== activeTelegramAccount" x-cloak>فعال کن</button>
+              </div>
+            </template>
+          </div>
           <div class="field" x-show="telegramState === 'await_code'" x-cloak>
             <label for="tg-code">کد تأیید ارسال‌شده به تلگرام</label>
             <div class="field__row">

@@ -230,6 +230,10 @@
       telegramBusy: false,
       telegramCode: "",
       telegramPassword: "",
+      telegramAccounts: [],
+      activeTelegramAccount: "",
+      telegramTargetAccount: "",
+      switchingTelegram: false,
       gmailConnected: false,
       gmailBusy: false,
 
@@ -620,6 +624,8 @@
           this.form.telegram.enabled = Boolean(s.telegram_enabled);
           if (s.telegram_phone) this.form.telegram.phone = s.telegram_phone;
           if (typeof s.telegram_confirm_send === "boolean") this.form.telegram.confirm_send = s.telegram_confirm_send;
+          this.telegramAccounts = (s.telegram_accounts && s.telegram_accounts.accounts) || [];
+          this.activeTelegramAccount = s.telegram_active_account || "";
           this.gmailConnected = Boolean(s.gmail_connected);
           this.form.gmail.enabled = Boolean(s.gmail_enabled);
           if (typeof s.gmail_confirm_send === "boolean") this.form.gmail.confirm_send = s.gmail_confirm_send;
@@ -658,11 +664,15 @@
         return { admin: "administrator", root: "root", user: "user" }[this.elevation] || this.elevation || "نامشخص";
       },
 
-      async connectTelegram() {
+      async connectTelegram(account) {
         if (this.connection === "offline") return;
+        this.telegramTargetAccount = account || this.activeTelegramAccount || "";
         this.telegramBusy = true;
         try {
-          const result = await this.api("/api/telegram/connect", { method: "POST" });
+          const result = await this.api("/api/telegram/connect", {
+            method: "POST",
+            body: JSON.stringify(this.telegramTargetAccount ? { account: this.telegramTargetAccount } : {}),
+          });
           this.applyTelegramState(result);
           if (result.state === "connected") {
             this.toast("ok", "✅", "تلگرام متصل شد");
@@ -675,13 +685,33 @@
         }
       },
 
+      async switchAccount(name) {
+        if (this.connection === "offline") return;
+        this.switchingTelegram = true;
+        try {
+          const result = await this.api("/api/telegram/switch", {
+            method: "POST",
+            body: JSON.stringify({ name }),
+          });
+          this.toast("ok", "✅", "اکانت فعال تلگرام: " + name);
+          this.refreshStatus();
+        } catch (err) {
+          this.toast("bad", "⚠️", "تعویض اکانت ناموفق بود — " + err.message);
+        } finally {
+          this.switchingTelegram = false;
+        }
+      },
+
       async submitTelegramCode() {
         if (!this.telegramCode.trim()) { this.toast("bad", "⚠️", "کد را وارد کنید"); return; }
         this.telegramBusy = true;
         try {
           const result = await this.api("/api/telegram/verify", {
             method: "POST",
-            body: JSON.stringify({ code: this.telegramCode.trim() }),
+            body: JSON.stringify({
+              code: this.telegramCode.trim(),
+              account: this.telegramTargetAccount || undefined,
+            }),
           });
           this.applyTelegramState(result);
           if (result.state === "connected") this.toast("ok", "✅", "تلگرام متصل شد");
@@ -698,7 +728,10 @@
         try {
           const result = await this.api("/api/telegram/verify", {
             method: "POST",
-            body: JSON.stringify({ password: this.telegramPassword }),
+            body: JSON.stringify({
+              password: this.telegramPassword,
+              account: this.telegramTargetAccount || undefined,
+            }),
           });
           this.applyTelegramState(result);
           if (result.state === "connected") this.toast("ok", "✅", "تلگرام متصل شد");
