@@ -19,7 +19,10 @@ _NOT_CONNECTED_HINT = (
 
 
 def register_gmail(registry: ActionRegistry, context: ActionContext) -> None:
-    confirm_send = lambda _safety: bool(
+    confirm_send = lambda _safety, _args: bool(
+        context.runtime.settings.gmail.confirm_send
+    )
+    confirm_skip = lambda _safety, _args: not bool(
         context.runtime.settings.gmail.confirm_send
     )
 
@@ -66,6 +69,7 @@ def register_gmail(registry: ActionRegistry, context: ActionContext) -> None:
         required=("to", "subject", "body"),
         risk_level=Risk.DESTRUCTIVE,
         confirm_override=confirm_send,
+        confirm_skip=confirm_skip,
     )(send)
 
 

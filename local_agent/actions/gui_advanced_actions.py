@@ -7,13 +7,9 @@ gracefully when the optional dependencies (``uiautomation``,
 
 from __future__ import annotations
 
-import time
-from typing import Any
-
-from ..core.errors import AssistantError, DependencyMissing
+from ..core.errors import AssistantError
 from ..core.logging_setup import get_logger
-from .registry import ActionContext, ActionRegistry, risk, Risk
-
+from .registry import ActionContext, ActionRegistry, Risk, risk
 
 logger = get_logger("actions.gui_advanced")
 
@@ -89,6 +85,18 @@ def register_gui_advanced(registry: ActionRegistry, context: ActionContext) -> N
         required=("chat_names", "message"),
     )(send_telegram_desktop_batch)
 
+    # B4 — when the personal Telethon account is enabled, the model must use
+    # the reliable telegram.* tools instead of driving the fragile Telegram
+    # Desktop GUI.  Hide these two GUI actions so they are never chosen.
+    if context.runtime.settings.telegram.enabled:
+        for _name in ("send_telegram_desktop", "send_telegram_desktop_batch"):
+            _action = registry.get(_name)
+            _action.unavailable = True
+            _action.unavailable_reason = (
+                "اکانت شخصی تلگرام (Telethon) فعال است؛ برای ارسال پیام فقط از "
+                "ابزارهای telegram.send_message / telegram.send_photo و... استفاده کنید."
+            )
+
 
 # ---------------------------------------------------------------------------
 # Implementations
@@ -141,16 +149,13 @@ def find_controls(
     if not (name or class_name or automation_id or control_type):
         return "specify at least one of: name, class_name, automation_id, control_type"
     limit = max(1, min(int(max_results or 50), 500))
-    try:
-        controls = gui.find_controls(
-            name=name or None,
-            class_name=class_name or None,
-            automation_id=automation_id or None,
-            control_type=control_type or None,
-            max_depth=10,
-        )
-    except DependencyMissing as exc:
-        raise
+    controls = gui.find_controls(
+        name=name or None,
+        class_name=class_name or None,
+        automation_id=automation_id or None,
+        control_type=control_type or None,
+        max_depth=10,
+    )
     if not controls:
         return "no controls matched"
     lines = [f"found {len(controls)} controls:"]

@@ -84,6 +84,7 @@ class PersonalTelegram:
         api_hash: str,
         phone: str,
         session_path: Path,
+        account_name: str = "اصلی",
     ) -> None:
         if not api_id or not api_hash or not phone:
             raise TelegramError(
@@ -92,6 +93,7 @@ class PersonalTelegram:
         self._api_id = int(api_id)
         self._api_hash = str(api_hash)
         self._phone = str(phone)
+        self._name = str(account_name)
         self._session_path = Path(session_path)
         self._session_path.parent.mkdir(parents=True, exist_ok=True)
         self._client: Any | None = None
@@ -110,6 +112,10 @@ class PersonalTelegram:
     @property
     def session_path(self) -> Path:
         return self._session_path
+
+    @property
+    def account_name(self) -> str:
+        return self._name
 
     @property
     def is_connected(self) -> bool:
@@ -242,6 +248,42 @@ class PersonalTelegram:
     def get_me(self) -> dict[str, Any]:
         return self._run(self._get_me())
 
+    def search_contacts(self, query: str, limit: int = 30) -> list[dict[str, Any]]:
+        return self._run(self._search_contacts(query, limit))
+
+    def get_chat_history(self, chat: str | int, limit: int = 30, offset_id: int = 0) -> list[Message]:
+        return self._run(self._get_chat_history(chat, limit, offset_id))
+
+    def get_profile(self, chat: str | int, media_dir: Path) -> dict[str, Any]:
+        return self._run(self._get_profile(chat, media_dir))
+
+    def send_media(self, chat: str | int, path: str | os.PathLike, caption: str = "",
+                   *, kind: str = "document") -> Message:
+        target = Path(path).expanduser()
+        if not target.is_file():
+            raise TelegramError(f"فایل پیدا نشد: {target}")
+        return self._run(self._send_media(chat, target, caption=caption, kind=kind))
+
+    def send_location(self, chat: str | int, lat: float, lng: float) -> Message:
+        return self._run(self._send_location(chat, float(lat), float(lng)))
+
+    def download_media(self, chat: str | int, msg_id: int, filename: str, media_dir: Path) -> Path:
+        return self._run(self._download_media(chat, int(msg_id), filename, media_dir))
+
+    def reply_to(self, chat: str | int, msg_id: int, text: str) -> Message:
+        if not isinstance(text, str) or not text:
+            raise TelegramError("text must be a non-empty string")
+        return self._run(self._reply_to(chat, int(msg_id), text))
+
+    def forward_message(self, chat: str | int, from_chat: str | int, msg_id: int) -> Message:
+        return self._run(self._forward_message(chat, from_chat, int(msg_id)))
+
+    def mark_read(self, chat: str | int) -> None:
+        self._run(self._mark_read(chat))
+
+    def resolve_username(self, username: str) -> dict[str, Any]:
+        return self._run(self._resolve_username(username))
+
     # -------------------------------------------------------- Internals
 
     def _start_loop(self) -> None:
@@ -371,15 +413,19 @@ class PersonalTelegram:
                 self._connected = False
 
     async def _resolve_entity(self, target):
+        """Resolve a chat target; special-cases the user's own «Saved Messages»."""
         if isinstance(target, int):
             return await self._client.get_entity(target)
         cleaned = str(target).strip()
         if not cleaned:
-            raise TelegramError("chat target is empty")
+            raise TelegramError("نام چت خالی است")
+        lowered = cleaned.lower().replace(" ", "")
+        if lowered in {"saved", "savedmessages", "خودم", "ذخیره‌شده"}:
+            return await self._client.get_me()
         try:
             return await self._client.get_entity(cleaned)
         except Exception as exc:
-            raise TelegramError(f"could not resolve chat {target!r}: {exc}") from exc
+            raise TelegramError(f"چت {target!r} پیدا نشد: {exc}") from exc
 
     async def _list_chats(self, limit: int) -> list[Chat]:
         chats: list[Chat] = []
@@ -439,7 +485,137 @@ class PersonalTelegram:
             "phone": getattr(me, "phone", ""),
         }
 
+    async def _search_contacts(self, query: str, limit: int) -> list[dict[str, Any]]:
+        q = str(query or "").strip()
+        if not q:
+            raise TelegramError("عبارت جست‌وجوی مخاطب خالی است")
+        results: list[dict[str, Any]] = []
+        async for user in self._client.iter_contacts(limit=max(1, limit)):
+            name = " ".join(
+                p for p in (getattr(user, "first_name", ""), getattr(user, "last_name", "")) if p
+            )
+            username = getattr(user, "username", "") or ""
+            phone = getattr(user, "phone", "") or ""
+            haystack = f"{name} {username} {phone}".lower()
+            if q.lower() in haystack:
+                results.append({
+                    "id": user.id,
+                    "name": name,
+                    "username": username,
+                    "phone": phone,
+                })
+                if len(results) >= max(1, limit):
+                    break
+        return results
 
+    async def _get_chat_history(self, chat, limit: int, offset_id: int) -> list[Message]:
+        entity = await self._resolve_entity(chat)
+        chat_id = getattr(entity, "id", 0)
+        kwargs: dict[str, Any] = {"limit": max(1, limit)}
+        if offset_id:
+            kwargs["offset_id"] = int(offset_id)
+        out: list[Message] = []
+        async for msg in self._client.iter_messages(entity, **kwargs):
+            out.append(_message_from_telethon(msg, chat_id=chat_id))
+        return out
+
+    async def _get_profile(self, chat, media_dir: Path) -> dict[str, Any]:
+        entity = await self._resolve_entity(chat)
+        info: dict[str, Any] = {
+            "id": entity.id,
+            "name": getattr(entity, "title", None) or " ".join(
+                p for p in (getattr(entity, "first_name", ""), getattr(entity, "last_name", "")) if p
+            ) or "?",
+            "username": getattr(entity, "username", "") or "",
+            "is_group": bool(getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False)
+                             or getattr(entity, "is_group", False)),
+        }
+        if not info["is_group"]:
+            info["phone"] = getattr(entity, "phone", "") or ""
+            about = await self._client.get_entity(entity)
+            info["bio"] = getattr(about, "about", "") or ""
+        photo_path = ""
+        if getattr(entity, "photo", None) is not None:
+            try:
+                media_dir.mkdir(parents=True, exist_ok=True)
+                filename = media_dir / f"profile_{entity.id}.jpg"
+                await self._client.download_profile_photo(entity, file=str(filename))
+                if filename.is_file():
+                    photo_path = str(filename)
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                logger.debug("profile photo download failed: %s", exc)
+        info["photo_path"] = photo_path
+        return info
+
+    async def _send_media(self, chat, path: Path, *, caption: str, kind: str) -> Message:
+        entity = await self._resolve_entity(chat)
+        kwargs: dict[str, Any] = {"caption": caption or ""}
+        if kind == "voice":
+            kwargs["voice_note"] = True
+        elif kind == "video_note":
+            kwargs["video_note"] = True
+        elif kind == "document":
+            kwargs["force_document"] = True
+        elif kind == "photo":
+            kwargs["force_document"] = False
+        # ``audio``/``video``/``sticker``/``animation`` let telethon infer the
+        # type from the file content.
+        result = await self._client.send_file(entity, str(path), **kwargs)
+        return _message_from_telethon(result, chat_id=getattr(entity, "id", 0))
+
+    async def _send_location(self, chat, lat: float, lng: float) -> Message:
+        entity = await self._resolve_entity(chat)
+        from telethon.tl.types import InputGeoPoint
+
+        geo = InputGeoPoint(lat=lat, long=lng)
+        result = await self._client.send_file(entity, geo)
+        return _message_from_telethon(result, chat_id=getattr(entity, "id", 0))
+
+    async def _download_media(self, chat, msg_id: int, filename: str, media_dir: Path) -> Path:
+        entity = await self._resolve_entity(chat)
+        messages = await self._client.get_messages(entity, ids=msg_id)
+        if not messages:
+            raise TelegramError(f"پیامی با شناسهٔ {msg_id} پیدا نشد")
+        safe = Path(filename or f"{msg_id}").name
+        media_dir.mkdir(parents=True, exist_ok=True)
+        target = media_dir / safe
+        try:
+            out = await messages.download_media(file=str(target))
+        except Exception as exc:
+            raise TelegramError(f"دانلود مدیا ناموفق بود: {exc}") from exc
+        if out is None:
+            raise TelegramError("این پیام مدیا ندارد")
+        return Path(str(out))
+
+    async def _reply_to(self, chat, msg_id: int, text: str) -> Message:
+        entity = await self._resolve_entity(chat)
+        result = await self._client.send_message(entity, text, reply_to=msg_id)
+        return _message_from_telethon(result, chat_id=getattr(entity, "id", 0))
+
+    async def _forward_message(self, chat, from_chat, msg_id: int) -> Message:
+        target = await self._resolve_entity(chat)
+        source = await self._resolve_entity(from_chat)
+        result = await self._client.forward_messages(target, msg_id, source)
+        return _message_from_telethon(result, chat_id=getattr(target, "id", 0))
+
+    async def _mark_read(self, chat) -> None:
+        entity = await self._resolve_entity(chat)
+        await self._client.send_read_acknowledge(entity)
+
+    async def _resolve_username(self, username: str) -> dict[str, Any]:
+        cleaned = str(username or "").strip().lstrip("@")
+        if not cleaned:
+            raise TelegramError("نام کاربری خالی است")
+        entity = await self._client.get_entity(cleaned)
+        return {
+            "id": entity.id,
+            "name": getattr(entity, "title", None) or " ".join(
+                p for p in (getattr(entity, "first_name", ""), getattr(entity, "last_name", "")) if p
+            ) or "?",
+            "username": getattr(entity, "username", "") or "",
+            "is_group": bool(getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False)
+                             or getattr(entity, "is_group", False)),
+        }
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
