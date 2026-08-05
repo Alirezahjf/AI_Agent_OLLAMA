@@ -746,3 +746,38 @@ def test_telegram_connect_network_failure_is_400_not_500(
     body = r.json()
     assert "تلگرام" in body.get("detail", "") or "اینترنت" in body.get("detail", "")
     assert "connection reset" not in r.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# F1 — confirm_send toggles in the settings modal
+# ---------------------------------------------------------------------------
+
+
+def test_index_settings_modal_has_confirm_send_switches() -> None:
+    html = (WEB_DIR / "templates" / "index.html").read_text(encoding="utf-8")
+    assert "set-tg-confirm" in html
+    assert "set-gm-confirm" in html
+    assert "تأیید قبل از ارسال پیام تلگرام" in html
+    assert "تأیید قبل از ارسال ایمیل" in html
+
+
+def test_app_js_binds_confirm_send() -> None:
+    js = (WEB_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    assert "form.telegram.confirm_send" in js
+    assert "form.gmail.confirm_send" in js
+
+
+def test_settings_persists_confirm_send_flags(web_server) -> None:
+    import requests
+
+    base = f"http://127.0.0.1:{web_server.port}"
+    r = requests.post(
+        base + "/api/settings",
+        json={"telegram": {"confirm_send": False}, "gmail": {"confirm_send": False}},
+        timeout=10,
+    )
+    assert r.status_code == 200, r.text
+    status = requests.get(base + "/api/status", timeout=5).json()
+    s = status["settings"]["settings"]
+    assert s["telegram_confirm_send"] is False
+    assert s["gmail_confirm_send"] is False

@@ -44,6 +44,7 @@ Available commands (type /<command> or just chat normally):
   /provider NAME      switch provider (ollama | openai_compatible | auto)
   /approve            toggle auto-approve for destructive actions
   /confirm MODE       set confirm mode: destructive | always | never
+  /confirm-send on|off  toggle confirmation before sending Telegram/Gmail messages
   /reset              clear conversation history (shared across frontends)
   /undo               pop the last user message and resend
   /screenshot         capture the primary screen now
@@ -204,6 +205,8 @@ class _REPL:
             self._cmd_approve()
         elif cmd == "/confirm":
             self._cmd_confirm(rest)
+        elif cmd == "/confirm-send":
+            self._cmd_confirm_send(rest)
         elif cmd == "/reset":
             self.client.clear_history()
             self.renderer.info("conversation cleared.")
@@ -300,6 +303,28 @@ class _REPL:
         self.renderer.info(
             "confirm mode is a Bridge-level setting. "
             f"Set safety.confirm_mode = {args[0]!r} in config.json and restart."
+        )
+
+    def _cmd_confirm_send(self, args: list[str]) -> None:
+        """``/confirm-send on|off`` — disable/enable send-confirmation (F1).
+
+        When off, outgoing Telegram/Gmail messages never ask for
+        confirmation (even in confirm_mode=destructive).
+        """
+        if not args or args[0].strip().lower() not in {"on", "off", "1", "0", "true", "false"}:
+            self.renderer.warn("usage: /confirm-send on | off")
+            return
+        enabled = args[0].strip().lower() in {"on", "1", "true"}
+        for path in ("telegram.confirm_send", "gmail.confirm_send"):
+            try:
+                self.client.invoke_action(
+                    "config_set", {"path": path, "value": enabled}, auto_confirm=True
+                )
+            except AssistantError as exc:
+                self.renderer.warn(f"تنظیم {path} ناموفق بود: {exc}")
+                return
+        self.renderer.info(
+            "تأیید قبل از ارسال " + ("فعال شد ✅" if enabled else "غیرفعال شد")
         )
 
     def _cmd_undo(self) -> None:

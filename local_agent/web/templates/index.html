@@ -642,6 +642,10 @@
             <label for="set-tg-enabled">فعال</label>
             <input id="set-tg-enabled" type="checkbox" class="switch" x-model="form.telegram.enabled">
           </div>
+          <div class="field field--switch">
+            <label for="set-tg-confirm">✅ تأیید قبل از ارسال پیام تلگرام</label>
+            <input id="set-tg-confirm" type="checkbox" class="switch" x-model="form.telegram.confirm_send">
+          </div>
           <div class="field__row">
             <input x-model="form.telegram.api_id" placeholder="api_id" dir="ltr" aria-label="api_id">
             <input x-model="form.telegram.phone" placeholder="شماره (مثلاً +98912...)" dir="ltr" aria-label="شماره تلفن">
@@ -680,6 +684,10 @@
           <div class="field field--switch">
             <label for="set-gm-enabled">فعال</label>
             <input id="set-gm-enabled" type="checkbox" class="switch" x-model="form.gmail.enabled">
+          </div>
+          <div class="field field--switch">
+            <label for="set-gm-confirm">✅ تأیید قبل از ارسال ایمیل</label>
+            <input id="set-gm-confirm" type="checkbox" class="switch" x-model="form.gmail.confirm_send">
           </div>
           <input x-model="form.gmail.username" placeholder="آدرس جیمیل (برای IMAP/SMTP)" dir="ltr" aria-label="آدرس جیمیل">
           <div class="field__row">

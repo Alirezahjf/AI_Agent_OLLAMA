@@ -218,8 +218,8 @@
         work_dir: "",
         full_system_access: false,
         autostart: false,
-        telegram: { enabled: false, api_id: "", api_hash: "", phone: "" },
-        gmail: { enabled: false, username: "", credentials_file: "", token_file: "", app_password: "" },
+        telegram: { enabled: false, api_id: "", api_hash: "", phone: "", confirm_send: true },
+        gmail: { enabled: false, username: "", credentials_file: "", token_file: "", app_password: "", confirm_send: true },
       },
       fullAccessWanted: false,
       fullAccessArmed: false,
@@ -619,8 +619,10 @@
           });
           this.form.telegram.enabled = Boolean(s.telegram_enabled);
           if (s.telegram_phone) this.form.telegram.phone = s.telegram_phone;
+          if (typeof s.telegram_confirm_send === "boolean") this.form.telegram.confirm_send = s.telegram_confirm_send;
           this.gmailConnected = Boolean(s.gmail_connected);
           this.form.gmail.enabled = Boolean(s.gmail_enabled);
+          if (typeof s.gmail_confirm_send === "boolean") this.form.gmail.confirm_send = s.gmail_confirm_send;
         } catch (_) { /* keep previous values */ }
       },
 

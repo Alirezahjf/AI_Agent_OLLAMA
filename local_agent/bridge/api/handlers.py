@@ -297,6 +297,10 @@ class BridgeHandlers:
                 "confirm_mode": self.settings.safety.confirm_mode,
                 "telegram_active_account": self.settings.telegram.active_account,
                 "telegram_accounts": self.telegram_accounts_status(),
+                "telegram_confirm_send": bool(
+                    self.settings.telegram.account(None).confirm_send
+                ),
+                "gmail_confirm_send": bool(self.settings.gmail.confirm_send),
             },
             "warnings": self._warnings(),
             "actions": [a.name for a in self.registry.all()],
