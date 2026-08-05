@@ -515,6 +515,12 @@ class BridgeHandlers:
             result = client.start_login()
         except TelegramError as exc:
             raise AssistantError(str(exc)) from exc
+        except Exception as exc:
+            logger.warning("telegram start_login failed: %s", exc)
+            raise AssistantError(
+                "اتصال به سرور تلگرام ممکن نشد؛ اتصال اینترنت را بررسی کنید "
+                "(در صورت نیاز فیلترشکن) و دوباره تلاش کنید."
+            ) from exc
         self._publish_telegram_state()
         return {**result, **self.telegram_status()}
 
@@ -525,6 +531,11 @@ class BridgeHandlers:
             result = self.telegram.submit_code(code)
         except TelegramError as exc:
             raise AssistantError(str(exc)) from exc
+        except Exception as exc:
+            logger.warning("telegram submit_code failed: %s", exc)
+            raise AssistantError(
+                "ارسال کد به سرور تلگرام ناموفق بود؛ اتصال اینترنت را بررسی کنید."
+            ) from exc
         self._publish_telegram_state()
         return {**result, **self.telegram_status()}
 
@@ -535,6 +546,11 @@ class BridgeHandlers:
             result = self.telegram.submit_password(password)
         except TelegramError as exc:
             raise AssistantError(str(exc)) from exc
+        except Exception as exc:
+            logger.warning("telegram submit_password failed: %s", exc)
+            raise AssistantError(
+                "ارسال رمز 2FA به سرور تلگرام ناموفق بود؛ اتصال اینترنت را بررسی کنید."
+            ) from exc
         self._publish_telegram_state()
         return {**result, **self.telegram_status()}
 
@@ -547,6 +563,12 @@ class BridgeHandlers:
             message = client.connect(code_callback=code_callback, password_callback=password_callback)
         except TelegramError as exc:
             raise AssistantError(str(exc)) from exc
+        except Exception as exc:
+            logger.warning("telegram connect failed: %s", exc)
+            raise AssistantError(
+                "اتصال به سرور تلگرام ممکن نشد؛ اتصال اینترنت را بررسی کنید "
+                "(در صورت نیاز فیلترشکن) و دوباره تلاش کنید."
+            ) from exc
         self._publish_telegram_state()
         return {"state": "connected", "message": message, **self.telegram_status()}
 

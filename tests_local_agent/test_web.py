@@ -713,3 +713,36 @@ def test_elevate_endpoint_returns_guidance_on_posix(web_server: WebServer) -> No
     body = r.json()
     assert body["elevated"] is False
     assert "sudo" in body.get("message", "")
+
+
+def test_telegram_connect_network_failure_is_400_not_500(
+    web_server: WebServer,
+) -> None:
+    """Telethon network errors must become a Persian 400, never a 500."""
+    import requests as _requests
+
+    base = f"http://127.0.0.1:{web_server.port}"
+    _requests.post(
+        base + "/api/settings",
+        json={"telegram": {"enabled": True, "api_id": 1, "api_hash": "h" * 32, "phone": "+100"}},
+        timeout=5,
+    )
+
+    class _BrokenClient:
+        is_connected = False
+        login_state = "disconnected"
+
+        def start_login(self) -> dict:
+            raise ConnectionError("connection reset by peer")
+
+    from local_agent.web.app import _server_of
+
+    server = _server_of(web_server.client)
+    assert server is not None
+    server.handlers.telegram = _BrokenClient()  # type: ignore[assignment]
+
+    r = _requests.post(base + "/api/telegram/connect", timeout=10)
+    assert r.status_code == 400, r.text
+    body = r.json()
+    assert "تلگرام" in body.get("detail", "") or "اینترنت" in body.get("detail", "")
+    assert "connection reset" not in r.text.lower()
