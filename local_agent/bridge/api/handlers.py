@@ -12,6 +12,7 @@ import platform
 import re
 import socket
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -54,6 +55,10 @@ from ..protocol import (
 )
 
 logger = get_logger("bridge.handlers")
+
+# Multi-session limits (F4): cap live sessions and drop idle ones.
+MAX_SESSIONS = 20
+SESSION_TIMEOUT_SECONDS = 24 * 3600
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +147,10 @@ class BridgeHandlers:
     telegram: PersonalTelegram | None = None
     # Every enabled account's client, keyed by account name (F2).
     _telegram_accounts: dict[str, PersonalTelegram] = field(default_factory=dict)
+    # Per-session runtimes keyed by session_id (F4); the default runtime is
+    # ``self.runtime`` under the key "default".
+    _sessions: dict[str, RuntimeContext] = field(default_factory=dict)
+    _sessions_lock: threading.RLock = field(default_factory=threading.RLock)
     _lock: threading.RLock = field(default_factory=threading.RLock)
     _active_runs: dict[str, threading.Event] = field(default_factory=dict)
     _run_threads: dict[str, threading.Thread] = field(default_factory=dict)
@@ -222,18 +231,22 @@ class BridgeHandlers:
             if type_ == MessageType.GET_STATUS.value:
                 return Response(id=request_id, ok=True, result=self._status()).to_dict()
             if type_ == MessageType.GET_HISTORY.value:
+                runtime = self._runtime_for(payload.get("session_id"))
                 return Response(
                     id=request_id, ok=True,
-                    result=[m.to_openai() for m in self.runtime.snapshot()],
+                    result=[m.to_openai() for m in runtime.snapshot()],
                 ).to_dict()
             if type_ == MessageType.CLEAR_HISTORY.value:
-                self.runtime.clear()
+                runtime = self._runtime_for(payload.get("session_id"))
+                runtime.clear()
                 return Response(id=request_id, ok=True, result={"cleared": True}).to_dict()
             if type_ == MessageType.SET_MODEL.value:
                 return Response(id=request_id, ok=True, result=self._set_model(payload)).to_dict()
             if type_ == MessageType.CHAT.value:
                 # Returns a run_id immediately; events flow over the bus.
-                run_id = self._start_chat_run(payload.get("message", ""))
+                run_id = self._start_chat_run(
+                    payload.get("message", ""), session_id=payload.get("session_id")
+                )
                 return Response(id=request_id, ok=True, result={"run_id": run_id}).to_dict()
             if type_ == MessageType.INTERRUPT.value:
                 self._interrupt_run(payload.get("run_id", ""))
@@ -288,6 +301,7 @@ class BridgeHandlers:
             "warnings": self._warnings(),
             "actions": [a.name for a in self.registry.all()],
             "history": self.runtime.stats(),
+            "sessions": len(self._sessions),
         }
 
     def gmail_connected(self) -> bool:
@@ -731,15 +745,55 @@ class BridgeHandlers:
 
     # ---------------------------------------------------------------- chat
 
-    def _start_chat_run(self, user_message: str) -> str:
+    def _runtime_for(self, session_id: str | None = None) -> RuntimeContext:
+        """Get (or create) the runtime for a chat session (F4).
+
+        ``None``/``"default"`` maps to the shared ``self.runtime``.  Any other
+        session id gets its own runtime whose history lives at
+        ``data_dir/history/<session_id>.jsonl``, so tabs never share history.
+        Live sessions are capped (oldest unused are dropped) and unused
+        sessions are closed after a quiet period.
+        """
+        sid = (session_id or "default") or "default"
+        if sid == "default":
+            return self.runtime
+        with self._sessions_lock:
+            runtime = self._sessions.get(sid)
+            if runtime is None:
+                self._close_stale_sessions()
+                history = self.settings.data_dir / "history" / f"{sid}.jsonl"
+                runtime = RuntimeContext(self.settings, history_path=history)
+                self._sessions[sid] = runtime
+                if len(self._sessions) > MAX_SESSIONS:
+                    self._close_stale_sessions()
+            runtime._last_used = time.monotonic()  # type: ignore[attr-defined]
+            return runtime
+
+    def _close_stale_sessions(self) -> None:
+        """Drop the oldest sessions once we exceed the cap, and any that have
+        been idle longer than the session timeout."""
+        now = time.monotonic()
+        with self._sessions_lock:
+            stale = [
+                sid for sid, rt in self._sessions.items()
+                if now - getattr(rt, "_last_used", now) > SESSION_TIMEOUT_SECONDS
+            ]
+            for sid in stale:
+                self._sessions.pop(sid, None)
+            while len(self._sessions) > MAX_SESSIONS:
+                oldest = min(self._sessions, key=lambda s: getattr(self._sessions[s], "_last_used", 0))
+                self._sessions.pop(oldest, None)
+
+    def _start_chat_run(self, user_message: str, session_id: str | None = None) -> str:
         if not user_message:
             raise AssistantError("empty chat message")
         run_id = uuid.uuid4().hex[:12]
         stop_event = threading.Event()
+        runtime = self._runtime_for(session_id)
         self.event_bus.create_run_queue(run_id)
         thread = threading.Thread(
             target=self._chat_worker,
-            args=(run_id, user_message, stop_event),
+            args=(run_id, user_message, stop_event, runtime),
             name=f"bridge-chat-{run_id}",
             daemon=True,
         )
@@ -755,9 +809,10 @@ class BridgeHandlers:
         if ev is not None:
             ev.set()
 
-    def _chat_worker(self, run_id: str, user_message: str, stop_event: threading.Event) -> None:
+    def _chat_worker(self, run_id: str, user_message: str, stop_event: threading.Event,
+                     runtime: RuntimeContext) -> None:
         try:
-            self._chat_loop(run_id, user_message, stop_event)
+            self._chat_loop(run_id, user_message, stop_event, runtime)
         except Exception as exc:
             logger.exception("chat run %s crashed", run_id)
             self.event_bus.publish(Event(
@@ -771,14 +826,15 @@ class BridgeHandlers:
                 self._active_runs.pop(run_id, None)
                 self._run_threads.pop(run_id, None)
 
-    def _chat_loop(self, run_id: str, user_message: str, stop_event: threading.Event) -> None:
+    def _chat_loop(self, run_id: str, user_message: str, stop_event: threading.Event,
+                   runtime: RuntimeContext) -> None:
         self.event_bus.publish(Event(
             type=EventType.CHAT_STARTED.value,
             payload={"user_message": user_message},
             run_id=run_id,
         ))
 
-        self.runtime.append(ConversationMessage(role="user", content=user_message))
+        runtime.append(ConversationMessage(role="user", content=user_message))
 
         max_turns = max(1, self.settings.safety.max_agent_turns)
         tools = [a.to_tool_definition() for a in self.registry.all()]
@@ -817,9 +873,9 @@ class BridgeHandlers:
             stream = getattr(client, "complete_streaming", None)
             try:
                 if callable(stream):
-                    reply = stream(self._build_messages(), tools, emit_delta)
+                    reply = stream(self._build_messages(runtime), tools, emit_delta)
                 else:
-                    reply = client.complete(self._build_messages(), tools)
+                    reply = client.complete(self._build_messages(runtime), tools)
             except Exception as exc:  # noqa: BLE001
                 self.event_bus.publish(Event(
                     type=EventType.CHAT_FAILED.value,
@@ -845,7 +901,7 @@ class BridgeHandlers:
 
             if not reply.has_tool_calls:
                 if reply.content:
-                    self.runtime.append(ConversationMessage(role="assistant", content=reply.content))
+                    runtime.append(ConversationMessage(role="assistant", content=reply.content))
                 self.event_bus.publish(Event(type=EventType.CHAT_DONE.value, payload={}, run_id=run_id))
                 return
 
@@ -867,7 +923,7 @@ class BridgeHandlers:
                         "arguments": json.dumps(call.arguments, ensure_ascii=False),
                     },
                 })
-            self.runtime.append(ConversationMessage(
+            runtime.append(ConversationMessage(
                 role="assistant",
                 content=reply.content or "",
                 tool_calls=openai_tool_calls,
@@ -901,7 +957,7 @@ class BridgeHandlers:
                 else:
                     text = result.text
                 artifacts = _collect_artifacts(text, self.settings) or list(result.artifacts)
-                self.runtime.append(ConversationMessage(
+                runtime.append(ConversationMessage(
                     role="tool",
                     name=call.name,
                     tool_call_id=call_id,
@@ -995,11 +1051,12 @@ class BridgeHandlers:
         ))
         return True
 
-    def _build_messages(self) -> list[dict[str, Any]]:
+    def _build_messages(self, runtime: RuntimeContext | None = None) -> list[dict[str, Any]]:
+        runtime = runtime or self.runtime
         out: list[dict[str, Any]] = []
-        if self.runtime.system_prompt:
-            out.append({"role": "system", "content": self.runtime.system_prompt})
-        for msg in self.runtime.snapshot():
+        if runtime.system_prompt:
+            out.append({"role": "system", "content": runtime.system_prompt})
+        for msg in runtime.snapshot():
             out.append(msg.to_openai())
         if len(out) > self.settings.llm.max_context_messages:
             out = [out[0]] + out[-self.settings.llm.max_context_messages + 1:]

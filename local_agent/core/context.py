@@ -11,9 +11,10 @@ import json
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .config import AssistantSettings
 
@@ -40,7 +41,7 @@ class ConversationMessage:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ConversationMessage":
+    def from_dict(cls, payload: dict[str, Any]) -> ConversationMessage:
         return cls(
             role=str(payload.get("role", "user")),
             content=str(payload.get("content", "")),
@@ -80,12 +81,19 @@ class RuntimeContext:
     consistent.
     """
 
-    def __init__(self, settings: AssistantSettings) -> None:
+    def __init__(
+        self,
+        settings: AssistantSettings,
+        *,
+        history_path: Path | None = None,
+    ) -> None:
         self.settings = settings
         self._lock = threading.RLock()
         self._messages: deque[ConversationMessage] = deque()
         self._listeners: list[Callable[[str, dict[str, Any]], None]] = []
         self._system_prompt: str | None = None
+        # Per-session history file (F4); falls back to settings.history_path.
+        self._history_path = history_path
         self._load_history()
 
     # ------------------------------------------------------------------ I/O
@@ -155,8 +163,12 @@ class RuntimeContext:
 
     # -------------------------------------------------------- Persistence
 
+    @property
+    def history_path(self) -> Path:
+        return self._history_path or self.settings.history_path
+
     def _load_history(self) -> None:
-        path = self.settings.history_path
+        path = self.history_path
         if not path.is_file():
             return
         try:
@@ -174,7 +186,7 @@ class RuntimeContext:
             return
 
     def _persist_history_locked(self) -> None:
-        path = self.settings.history_path
+        path = self.history_path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(path.suffix + ".tmp")

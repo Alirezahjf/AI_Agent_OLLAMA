@@ -470,7 +470,11 @@
         }
         this.busy = true;
         this.setTaskbarProgress(-1);
-        this.ws.send(JSON.stringify({ type: "chat", message: full }));
+        // F4: each tab's conversation is its own session so tabs never share
+        // history.  The session id is the conversationId persisted locally.
+        const chatMsg = { type: "chat", message: full };
+        if (this.conversationId) chatMsg.session_id = this.conversationId;
+        this.ws.send(JSON.stringify(chatMsg));
       },
 
       simulateReply(text) {
@@ -1069,7 +1073,7 @@
       async clearMemory() {
         this.messages = [];
         if (this.connection !== "offline") {
-          try { await this.api("/api/clear", { method: "POST" }); } catch (_) { /* ignore */ }
+          try { await this.api("/api/clear" + (this.conversationId ? "?session_id=" + encodeURIComponent(this.conversationId) : ""), { method: "POST" }); } catch (_) { /* ignore */ }
         }
         this.toast("ok", "🧹", "حافظهٔ گفتگو پاک شد");
       },
@@ -1124,7 +1128,7 @@
         this.messages = [];
         this.historyOpen = false;
         if (this.connection !== "offline") {
-          this.api("/api/clear", { method: "POST" }).catch(() => {});
+          this.api("/api/clear" + (this.conversationId ? "?session_id=" + encodeURIComponent(this.conversationId) : ""), { method: "POST" }).catch(() => {});
         }
       },
 

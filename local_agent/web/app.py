@@ -72,6 +72,7 @@ MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 class ChatRequest(BaseModel):
     message: str
     auto_confirm: bool = False
+    session_id: str | None = None
 
 
 class InvokeRequest(BaseModel):
@@ -458,12 +459,12 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         return result
 
     @app.get("/api/history")
-    async def history(limit: int = 50) -> list[dict[str, Any]]:
-        return client.get_history(limit=limit)
+    async def history(limit: int = 50, session_id: str | None = None) -> list[dict[str, Any]]:
+        return client.get_history(limit=limit, session_id=session_id)
 
     @app.post("/api/clear")
-    async def clear() -> dict[str, bool]:
-        client.clear_history()
+    async def clear(session_id: str | None = None) -> dict[str, bool]:
+        client.clear_history(session_id=session_id)
         return {"cleared": True}
 
     @app.post("/api/settings")
@@ -714,7 +715,7 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         server = _server_of(client)
         if server is None:
             raise HTTPException(503, "chat is only available with an in-process bridge")
-        run_id = server.handlers._start_chat_run(req.message)
+        run_id = server.handlers._start_chat_run(req.message, session_id=req.session_id)
         return {"run_id": run_id}
 
     @app.post("/api/invoke")
@@ -878,7 +879,9 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                     if server is None:
                         await _send({"type": "error", "message": "no in-process bridge"})
                         continue
-                    run_id = server.handlers._start_chat_run(message)
+                    run_id = server.handlers._start_chat_run(
+                        message, session_id=item.get("session_id")
+                    )
                     tq = server.handlers.event_bus.create_run_queue(run_id)
                     run_queues[run_id] = tq
                     forwarders[run_id] = asyncio.create_task(forwarder(run_id, tq))
