@@ -14,7 +14,7 @@ import socket
 import threading
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from queue import Queue
 from typing import Any
@@ -26,7 +26,12 @@ from ...actions.gmail_actions import register_gmail
 from ...actions.registry import ActionContext, ConfirmationGate
 from ...actions.telegram_actions import register_telegram
 from ...automation import is_gui_available, register_gui
-from ...core.config import AssistantSettings, ConfigError
+from ...core.config import (
+    AssistantSettings,
+    ConfigError,
+    TelegramAccount,
+    TelegramSettings,
+)
 from ...core.context import ConversationMessage, RuntimeContext
 from ...core.errors import ActionRefused, AssistantError, DependencyMissing
 from ...core.logging_setup import get_logger
@@ -133,7 +138,10 @@ class BridgeHandlers:
     context: ActionContext
     gate: ConfirmationGate
     event_bus: EventBus = field(default_factory=EventBus)
+    # The *active* account's client (backward-compatible accessor).
     telegram: PersonalTelegram | None = None
+    # Every enabled account's client, keyed by account name (F2).
+    _telegram_accounts: dict[str, PersonalTelegram] = field(default_factory=dict)
     _lock: threading.RLock = field(default_factory=threading.RLock)
     _active_runs: dict[str, threading.Event] = field(default_factory=dict)
     _run_threads: dict[str, threading.Thread] = field(default_factory=dict)
@@ -158,29 +166,24 @@ class BridgeHandlers:
         register_telegram(registry, context)
         register_config(registry, context)
         register_gmail(registry, context)
-        telegram = None
-        if settings.telegram.enabled:
-            telegram = PersonalTelegram(
-                api_id=settings.telegram.api_id,
-                api_hash=settings.telegram.api_hash,
-                phone=settings.telegram.phone,
-                session_path=settings.telegram_session_path,
-            )
-        context.extra["telegram"] = telegram
+        context.extra["telegram"] = None
         gmail = _build_gmail_client(settings)
         context.extra["gmail"] = gmail
-        runtime.set_system_prompt(_build_system_prompt(registry, settings, is_gui_available(), telegram is not None))
         handlers = cls(
             settings=settings,
             runtime=runtime,
             registry=registry,
             context=context,
             gate=gate,
-            telegram=telegram,
+            telegram=None,
         )
         # ``config_set`` (used when the user says «به تلگرامم وصل شو») needs
         # a way to persist + apply settings from inside the action layer.
         context.extra["settings_owner"] = handlers
+        handlers._sync_telegram_accounts()
+        runtime.set_system_prompt(_build_system_prompt(
+            registry, settings, is_gui_available(), telegram_has_clients(handlers),
+        ))
         return handlers
 
     # -----------------------------------------------------------------
@@ -279,6 +282,8 @@ class BridgeHandlers:
                 "full_system_access": bool(self.settings.safety.full_system_access),
                 "elevation": elevation_level(),
                 "confirm_mode": self.settings.safety.confirm_mode,
+                "telegram_active_account": self.settings.telegram.active_account,
+                "telegram_accounts": self.telegram_accounts_status(),
             },
             "warnings": self._warnings(),
             "actions": [a.name for a in self.registry.all()],
@@ -335,7 +340,7 @@ class BridgeHandlers:
         The write is atomic (tmp + ``os.replace``) so a crash mid-write
         can never corrupt the file the next start reads.
         """
-        path = self.settings.config_path
+        path = self.settings.effective_config_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(path.suffix + ".tmp")
@@ -360,6 +365,8 @@ class BridgeHandlers:
         payload is re-validated through :class:`AssistantSettings` so a
         bad value can never leave a half-written config behind.
         """
+        if path.startswith("telegram."):
+            return self._apply_telegram_config_set(path, value)
         payload = self.settings.to_dict()
         parts = path.split(".")
         cursor = payload
@@ -377,6 +384,41 @@ class BridgeHandlers:
             raise AssistantError(f"مقدار تنظیم نامعتبر است: {exc}") from exc
         return self._apply_settings(new_settings)
 
+    def _apply_telegram_config_set(self, path: str, value: Any) -> AssistantSettings:
+        """Apply a ``telegram.<field>`` config_set to the active account.
+
+        The modern config stores accounts in a list, so legacy dotted paths
+        (``telegram.api_id``, ``telegram.confirm_send``, ...) are mapped onto
+        the active account to keep the «به تلگرامم وصل شو» flow working.
+        """
+        leaf = path[len("telegram."):]
+        tg = self.settings.telegram
+        if leaf == "enabled":
+            # Enabling the feature also enables the active account, so a
+            # client actually gets created for it.
+            val = bool(value)
+            accounts = list(tg.accounts)
+            if not accounts:
+                accounts = [TelegramAccount(name=tg.active_account, enabled=val)]
+            accounts = [
+                replace(a, enabled=val) if a.name == tg.active_account else a
+                for a in accounts
+            ]
+            new_tg = TelegramSettings(
+                enabled=val, active_account=tg.active_account, accounts=tuple(accounts)
+            )
+        elif leaf == "active_account":
+            new_tg = tg.updated({"active_account": str(value)})
+        elif leaf == "api_id":
+            new_tg = tg.updated({"api_id": int(str(value).strip() or 0)})
+        elif leaf == "confirm_send":
+            new_tg = tg.updated({"confirm_send": bool(value)})
+        elif leaf in ("api_hash", "phone", "session_name"):
+            new_tg = tg.updated({leaf: str(value)})
+        else:
+            raise AssistantError(f"تنظیم ناشناخته: {path}")
+        return self._apply_settings(self.settings.with_overrides(telegram=new_tg))
+
     def _apply_settings(self, new_settings: AssistantSettings) -> AssistantSettings:
         """Swap in new settings and keep every dependent object in sync."""
         old = self.settings
@@ -386,33 +428,52 @@ class BridgeHandlers:
         self.context.confirmation_gate = self.gate
         self.context.work_dir = new_settings.work_dir
         self._persist_settings()
-        self._sync_telegram_client(old)
+        self._sync_telegram_accounts()
         self._sync_gmail_client(old)
         return new_settings
 
-    def _sync_telegram_client(self, old: AssistantSettings) -> None:
-        """Create/drop the PersonalTelegram instance as ``telegram.enabled`` changes."""
+    def _sync_telegram_accounts(self) -> None:
+        """Create/drop one PersonalTelegram per enabled account (F2).
+
+        The active account's client is also mirrored onto ``self.telegram``
+        and ``context.extra["telegram"]`` so the existing single-account
+        action code keeps working unchanged.
+        """
         tg = self.settings.telegram
-        if tg.enabled and self.telegram is None:
-            if tg.api_id and tg.api_hash and tg.phone:
-                self.telegram = PersonalTelegram(
-                    api_id=tg.api_id,
-                    api_hash=tg.api_hash,
-                    phone=tg.phone,
-                    session_path=self.settings.telegram_session_path,
+        desired: dict[str, TelegramAccount] = {}
+        if tg.enabled:
+            desired = {acc.name: acc for acc in tg.accounts if acc.enabled}
+
+        # Drop accounts that were disabled / removed.
+        for name in list(self._telegram_accounts):
+            if name not in desired:
+                client = self._telegram_accounts.pop(name)
+                if client.is_connected:
+                    try:
+                        client.disconnect()
+                    except Exception as exc:  # noqa: BLE001 - best-effort teardown
+                        logger.debug("telegram disconnect failed: %s", exc)
+
+        # Create missing enabled accounts.
+        for name, acc in desired.items():
+            if name in self._telegram_accounts:
+                continue
+            if acc.api_id and acc.api_hash and acc.phone:
+                self._telegram_accounts[name] = PersonalTelegram(
+                    api_id=acc.api_id,
+                    api_hash=acc.api_hash,
+                    phone=acc.phone,
+                    session_path=self.settings.telegram_session_path_for(name),
+                    account_name=name,
                 )
-                self.context.extra["telegram"] = self.telegram
-                self.runtime.set_system_prompt(_build_system_prompt(
-                    self.registry, self.settings, is_gui_available(), True
-                ))
-        elif not tg.enabled and self.telegram is not None:
-            if self.telegram.is_connected:
-                try:
-                    self.telegram.disconnect()
-                except Exception as exc:  # noqa: BLE001 - best-effort teardown
-                    logger.debug("telegram disconnect failed: %s", exc)
-            self.telegram = None
-            self.context.extra["telegram"] = None
+
+        # Mirror the active account onto the single-client accessor.
+        active = self._telegram_accounts.get(tg.active_account)
+        self.telegram = active
+        self.context.extra["telegram"] = active
+        self.runtime.set_system_prompt(_build_system_prompt(
+            self.registry, self.settings, is_gui_available(), telegram_has_clients(self),
+        ))
 
     def _sync_gmail_client(self, old: AssistantSettings) -> None:
         """Create/drop the Gmail client as ``gmail.enabled`` changes."""
@@ -471,46 +532,85 @@ class BridgeHandlers:
 
     # ------------------------------------------------------- telegram flow
 
-    def telegram_status(self) -> dict[str, Any]:
-        """Connection state for the personal Telegram client (no secrets)."""
+    def _account_names(self) -> list[str]:
+        return [acc.name for acc in self.settings.telegram.accounts]
+
+    def _account_client(self, account: str | None = None) -> tuple[str, PersonalTelegram]:
+        """Resolve ``account`` (default: active) to its client.
+
+        Raises a Persian error for an unknown account name (F2).
+        """
         tg = self.settings.telegram
-        client = self.telegram
+        name = (account or tg.active_account) or "اصلی"
+        acc = tg.account(name)
+        if name not in self._telegram_accounts:
+            client = None
+            if acc.api_id and acc.api_hash and acc.phone:
+                client = PersonalTelegram(
+                    api_id=acc.api_id,
+                    api_hash=acc.api_hash,
+                    phone=acc.phone,
+                    session_path=self.settings.telegram_session_path_for(name),
+                    account_name=name,
+                )
+                self._telegram_accounts[name] = client
+            if client is None:
+                raise AssistantError(
+                    f"اکانت تلگرام «{name}» پیدا نشد. "
+                    "از https://my.telegram.org یک app بسازید و api_id / api_hash / phone "
+                    "را در تنظیمات وب یا config.json ثبت کنید."
+                )
+        return name, self._telegram_accounts[name]
+
+    def telegram_status(self, account: str | None = None) -> dict[str, Any]:
+        """Connection state for one account (default: active) — no secrets."""
+        tg = self.settings.telegram
+        name = (account or tg.active_account) or "اصلی"
+        acc = tg.account(name)
+        client = self._telegram_accounts.get(name)
         if client is not None:
             state = client.login_state
-        elif tg.enabled:
+        elif acc.enabled and acc.api_id:
             state = "disconnected"
         else:
             state = "disabled"
         return {
+            "account": name,
             "enabled": bool(tg.enabled),
             "connected": bool(client and client.is_connected),
             "state": state,
-            "phone": tg.phone,
-            "session_path": str(self.settings.telegram_session_path),
-            "has_credentials": bool(tg.api_id and tg.api_hash and tg.phone),
+            "phone": acc.phone,
+            "session_path": str(self.settings.telegram_session_path_for(name)),
+            "has_credentials": bool(acc.api_id and acc.api_hash and acc.phone),
+            "confirm_send": bool(acc.confirm_send),
         }
 
-    def _ensure_telegram_client(self) -> PersonalTelegram:
+    def telegram_accounts_status(self) -> dict[str, Any]:
+        """Status of every account (no secrets) plus the active one."""
         tg = self.settings.telegram
-        if not (tg.api_id and tg.api_hash and tg.phone):
-            raise AssistantError(
-                "اطلاعات تلگرام (api_id / api_hash / phone) تنظیم نشده است. "
-                "از https://my.telegram.org یک app بسازید و مقادیر را در config.json "
-                "یا با ابزار config_set ثبت کنید."
-            )
-        if self.telegram is None:
-            self.telegram = PersonalTelegram(
-                api_id=tg.api_id,
-                api_hash=tg.api_hash,
-                phone=tg.phone,
-                session_path=self.settings.telegram_session_path,
-            )
-            self.context.extra["telegram"] = self.telegram
-        return self.telegram
+        accounts = [self.telegram_status(a.name) for a in tg.accounts]
+        return {
+            "enabled": bool(tg.enabled),
+            "active_account": tg.active_account,
+            "accounts": accounts,
+        }
 
-    def start_telegram_login(self) -> dict[str, Any]:
+    def switch_telegram_account(self, name: str) -> dict[str, Any]:
+        """Make ``name`` the active account (persisted)."""
+        tg = self.settings.telegram
+        if not any(a.name == name for a in tg.accounts):
+            raise AssistantError(f"اکانت تلگرام «{name}» وجود ندارد")
+        if name == tg.active_account:
+            return self.telegram_accounts_status()
+        new_tg = TelegramSettings(
+            enabled=tg.enabled, active_account=name, accounts=tg.accounts,
+        )
+        self._apply_settings(self.settings.with_overrides(telegram=new_tg))
+        return self.telegram_accounts_status()
+
+    def start_telegram_login(self, account: str | None = None) -> dict[str, Any]:
         """Begin the SMS-code login flow (web UI state machine)."""
-        client = self._ensure_telegram_client()
+        name, client = self._account_client(account)
         try:
             result = client.start_login()
         except TelegramError as exc:
@@ -522,13 +622,14 @@ class BridgeHandlers:
                 "(در صورت نیاز فیلترشکن) و دوباره تلاش کنید."
             ) from exc
         self._publish_telegram_state()
-        return {**result, **self.telegram_status()}
+        return {**result, **self.telegram_status(name)}
 
-    def submit_telegram_code(self, code: str) -> dict[str, Any]:
-        if self.telegram is None:
+    def submit_telegram_code(self, code: str, account: str | None = None) -> dict[str, Any]:
+        name, client = self._account_client(account)
+        if client is None:
             raise AssistantError("اتصال تلگرام شروع نشده است؛ دوباره دکمهٔ اتصال را بزنید")
         try:
-            result = self.telegram.submit_code(code)
+            result = client.submit_code(code)
         except TelegramError as exc:
             raise AssistantError(str(exc)) from exc
         except Exception as exc:
@@ -537,13 +638,14 @@ class BridgeHandlers:
                 "ارسال کد به سرور تلگرام ناموفق بود؛ اتصال اینترنت را بررسی کنید."
             ) from exc
         self._publish_telegram_state()
-        return {**result, **self.telegram_status()}
+        return {**result, **self.telegram_status(name)}
 
-    def submit_telegram_password(self, password: str) -> dict[str, Any]:
-        if self.telegram is None:
+    def submit_telegram_password(self, password: str, account: str | None = None) -> dict[str, Any]:
+        name, client = self._account_client(account)
+        if client is None:
             raise AssistantError("اتصال تلگرام شروع نشده است؛ دوباره دکمهٔ اتصال را بزنید")
         try:
-            result = self.telegram.submit_password(password)
+            result = client.submit_password(password)
         except TelegramError as exc:
             raise AssistantError(str(exc)) from exc
         except Exception as exc:
@@ -552,13 +654,13 @@ class BridgeHandlers:
                 "ارسال رمز 2FA به سرور تلگرام ناموفق بود؛ اتصال اینترنت را بررسی کنید."
             ) from exc
         self._publish_telegram_state()
-        return {**result, **self.telegram_status()}
+        return {**result, **self.telegram_status(name)}
 
     def connect_telegram(
-        self, *, code_callback=None, password_callback=None
+        self, *, code_callback=None, password_callback=None, account: str | None = None
     ) -> dict[str, Any]:
         """Blocking connect with callbacks — used by the CLI."""
-        client = self._ensure_telegram_client()
+        name, client = self._account_client(account)
         try:
             message = client.connect(code_callback=code_callback, password_callback=password_callback)
         except TelegramError as exc:
@@ -570,21 +672,23 @@ class BridgeHandlers:
                 "(در صورت نیاز فیلترشکن) و دوباره تلاش کنید."
             ) from exc
         self._publish_telegram_state()
-        return {"state": "connected", "message": message, **self.telegram_status()}
+        return {"state": "connected", "message": message, **self.telegram_status(name)}
 
-    def disconnect_telegram(self) -> dict[str, Any]:
-        if self.telegram is not None:
+    def disconnect_telegram(self, account: str | None = None) -> dict[str, Any]:
+        name = (account or self.settings.telegram.active_account) or "اصلی"
+        client = self._telegram_accounts.get(name)
+        if client is not None:
             try:
-                self.telegram.disconnect()
+                client.disconnect()
             except Exception as exc:  # noqa: BLE001 - best-effort teardown
                 logger.debug("telegram disconnect failed: %s", exc)
         self._publish_telegram_state()
-        return self.telegram_status()
+        return self.telegram_status(name)
 
     def _publish_telegram_state(self) -> None:
         self.event_bus.publish(Event(
             type=EventType.TELEGRAM_STATE.value,
-            payload={"telegram": self.telegram_status()},
+            payload={"telegram": self.telegram_status(), "accounts": self.telegram_accounts_status()},
             run_id="",
         ))
 
@@ -771,6 +875,14 @@ class BridgeHandlers:
 
             for call, call_id in zip(reply.tool_calls, call_ids):
                 if stop_event.is_set():
+                    # An interrupt that lands mid-turn must still surface as a
+                    # clean ``chat_failed`` (reason=interrupted), never as a
+                    # silent exit that leaves the UI hanging.
+                    self.event_bus.publish(Event(
+                        type=EventType.CHAT_FAILED.value,
+                        payload={"reason": "interrupted"},
+                        run_id=run_id,
+                    ))
                     return
                 self.event_bus.publish(Event(
                     type=EventType.TOOL_PROPOSED.value,
@@ -823,14 +935,16 @@ class BridgeHandlers:
         short timeout.  In auto-confirm mode, we skip the wait.
         """
         action = self.registry.get(name)
-        if not action.needs_confirmation(self.settings.safety):
+        if not action.needs_confirmation(self.settings.safety, arguments):
             return self._invoke_action_sync(ActionInvocation(name=name, arguments=arguments))
 
         if self.gate._auto_approve_all:  # type: ignore[attr-defined]
             return self._invoke_action_sync(ActionInvocation(name=name, arguments=arguments))
 
         request_id = uuid.uuid4().hex[:12]
-        pending = PendingConfirmation(request_id=request_id, name=name, arguments=arguments)
+        pending = PendingConfirmation(
+            request_id=request_id, name=name, arguments=arguments, run_id=run_id
+        )
         with self._confirmation_lock:
             self._pending_confirms[request_id] = pending
 
@@ -873,6 +987,12 @@ class BridgeHandlers:
             return False
         pending.approved = approved
         pending.event.set()
+        # Let every frontend close the approval card once a decision is in.
+        self.event_bus.publish(Event(
+            type=EventType.TOOL_CONFIRM_RESOLVED.value,
+            payload={"request_id": request_id, "approved": approved, "name": pending.name},
+            run_id=pending.run_id,
+        ))
         return True
 
     def _build_messages(self) -> list[dict[str, Any]]:
@@ -897,6 +1017,7 @@ class PendingConfirmation:
     name: str
     arguments: dict[str, Any]
     approved: bool = False
+    run_id: str = ""
     event: threading.Event = field(default_factory=threading.Event)
 
 
@@ -1001,6 +1122,11 @@ def _short(value: Any, limit: int = 120) -> str:
     except (TypeError, ValueError):
         rendered = str(value)
     return rendered[: limit - 3] + "..." if len(rendered) > limit else rendered
+
+
+def telegram_has_clients(handlers: BridgeHandlers) -> bool:
+    """Whether any account client exists (for the system-prompt banner)."""
+    return bool(handlers._telegram_accounts)
 
 
 def _capabilities(handlers: BridgeHandlers) -> list[str]:

@@ -392,6 +392,19 @@
             this.notifyDesktop("تأیید لازم است", "دستیار می‌خواهد " + p.name + " را اجرا کند");
             this.beep("warn");
             break;
+          case "tool_confirm_resolved": {
+            // Close the approval card once a decision is in (matches by
+            // request_id so a late answer doesn't leave the card hanging).
+            for (let i = this.messages.length - 1; i >= 0; i -= 1) {
+              const m = this.messages[i];
+              if (m.role === "approval" && m.request_id === p.request_id) {
+                m.resolved = true;
+                m.approved = Boolean(p.approved);
+                break;
+              }
+            }
+            break;
+          }
           case "tool_result": {
             // Prefer a call_id match so a card updates live even when the
             // same tool name runs several times in one turn; fall back to
@@ -498,10 +511,15 @@
         message.resolved = true;
         message.approved = approved;
         if (this.connection === "offline") return;
+        const payload = { request_id: message.request_id, approved };
+        // Prefer the live socket, but if it is closed/half-alive (the B1
+        // bug: a confirm typed mid-run used to be buffered and ignored)
+        // fall back to the plain HTTP endpoint so the approval is never lost.
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-          this.ws.send(JSON.stringify({
-            type: "confirm", request_id: message.request_id, approved: approved,
-          }));
+          this.ws.send(JSON.stringify(Object.assign({ type: "confirm" }, payload)));
+        } else {
+          this.api("/api/confirm", { method: "POST", body: JSON.stringify(payload) })
+            .catch(() => this.toast("bad", "⚠️", "ثبت تأیید ناموفق بود"));
         }
       },
 
