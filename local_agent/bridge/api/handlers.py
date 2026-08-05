@@ -881,9 +881,11 @@ class BridgeHandlers:
                 else:
                     reply = client.complete(self._build_messages(runtime), tools)
             except Exception as exc:  # noqa: BLE001
+                # B5: surface a readable Persian message (network/4xx/5xx),
+                # never a raw English traceback as an "internal error".
                 self.event_bus.publish(Event(
                     type=EventType.CHAT_FAILED.value,
-                    payload={"error": f"LLM error: {exc}"},
+                    payload={"error": _friendly_llm_error(exc)},
                     run_id=run_id,
                 ))
                 return
@@ -1175,6 +1177,37 @@ def _collect_artifacts(text: str, settings: AssistantSettings) -> list[dict[str,
             })
             break
     return artifacts
+
+
+def _friendly_llm_error(exc: Exception) -> str:
+    """Translate provider/network failures into a readable Persian message.
+
+    B5: a NameResolutionError / DNS failure or a down gateway must surface as
+    «ارائه‌دهنده در دسترس نیست...» instead of a raw English traceback in the
+    UI, and a transient 4xx/5xx must be retried (done upstream) rather than
+    reported as an internal error.
+    """
+    name = type(exc).__name__
+    text = str(exc) or ""
+    lowered = text.lower()
+    if (
+        "NameResolutionError" in name
+        or "CannotConnectError" in name
+        or "ConnectionError" in name
+        or "resolve" in lowered
+        or "dns" in lowered
+        or "connection" in lowered
+    ):
+        return "ارائه‌دهنده در دسترس نیست؛ اتصال اینترنت را بررسی کنید و دوباره تلاش کنید."
+    if name == "LLMTimeout" or "timed out" in text.lower():
+        return "دریافت پاسخ از مدل ناموفق بود (مهلت زمانی). دوباره تلاش کنید."
+    if name == "LLMRateLimit":
+        return "محدودیت نرخ ارائه‌دهنده فعال شد؛ چند لحظه صبر کنید و دوباره تلاش کنید."
+    if "HTTP 400" in text or "400" in text and "stream" in text.lower():
+        return "پاسخ مدل ناموفق بود (درخواست ناقص). دوباره تلاش کنید."
+    if "401" in text or "403" in text:
+        return "کلید API یا دسترسی نامعتبر است؛ اعتبار سنجی را بررسی کنید."
+    return "پاسخ مدل ناموفق بود؛ دوباره تلاش کنید. (" + text[:120] + ")"
 
 
 def _short(value: Any, limit: int = 120) -> str:
