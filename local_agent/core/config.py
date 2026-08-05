@@ -22,7 +22,6 @@ from dotenv import load_dotenv
 
 from .errors import ConfigError
 
-
 _DEFAULT_DATA_DIR = Path.home() / ".local_assistant"
 
 
@@ -88,6 +87,29 @@ class SafetySettings:
     # Confirm policy: 'always' (every ask), 'destructive' (default),
     # 'never' (auto-execute; only for disposable VMs).
     confirm_mode: str = "destructive"
+    # When True, file tools drop the workspace sandbox (whole filesystem
+    # becomes reachable) and the shell runs without a workdir limit.
+    # Sensitive files (.ssh, .env, credentials, ...) stay blocked and
+    # destructive actions still ask for confirmation. Default OFF.
+    full_system_access: bool = False
+
+
+@dataclass(frozen=True)
+class GmailSettings:
+    """Gmail integration (OAuth2 installed-app, IMAP/SMTP fallback).
+
+    ``credentials_file`` is the OAuth client JSON downloaded from Google
+    Cloud Console (Desktop app); ``token_file`` stores the user's token
+    after the first approval.  When no OAuth files are present but an
+    ``app_password`` is set, the client falls back to IMAP/SMTP.
+    """
+
+    enabled: bool = False
+    credentials_file: str = ""  # default: <data_dir>/credentials.json
+    token_file: str = ""  # default: <data_dir>/gmail_token.json
+    username: str = ""  # Gmail address, needed for the IMAP/SMTP fallback
+    app_password: str = ""  # IMAP/SMTP fallback (16-char App Password)
+    confirm_send: bool = True  # ask before every outgoing email
 
 
 @dataclass(frozen=True)
@@ -98,6 +120,7 @@ class AssistantSettings:
     work_dir: Path = field(default_factory=Path.cwd)
     llm: LLMSettings = field(default_factory=LLMSettings)
     telegram: TelegramSettings = field(default_factory=TelegramSettings)
+    gmail: GmailSettings = field(default_factory=GmailSettings)
     safety: SafetySettings = field(default_factory=SafetySettings)
     # Bot tokens (used by the Telegram/Bale bot)
     telegram_token: str = ""
@@ -125,6 +148,16 @@ class AssistantSettings:
         return self.data_dir / f"{self.telegram.session_name}.session"
 
     @property
+    def gmail_credentials_path(self) -> Path:
+        raw = self.gmail.credentials_file.strip()
+        return Path(raw).expanduser() if raw else self.data_dir / "credentials.json"
+
+    @property
+    def gmail_token_path(self) -> Path:
+        raw = self.gmail.token_file.strip()
+        return Path(raw).expanduser() if raw else self.data_dir / "gmail_token.json"
+
+    @property
     def log_dir(self) -> Path:
         return self.data_dir / "logs"
 
@@ -140,7 +173,7 @@ class AssistantSettings:
         return payload
 
     @classmethod
-    def from_dict(cls, payload: dict) -> "AssistantSettings":
+    def from_dict(cls, payload: dict) -> AssistantSettings:
         try:
             llm_payload = dict(payload.get("llm") or {})
             provider = str(llm_payload.get("provider", "ollama")).lower()
@@ -158,6 +191,7 @@ class AssistantSettings:
                 )
             safety = SafetySettings(**(payload.get("safety") or {}))
             tg = TelegramSettings(**tg_payload)
+            gmail = GmailSettings(**(payload.get("gmail") or {}))
             data_dir = Path(payload.get("data_dir", _default_data_dir())).expanduser()
             work_dir = Path(payload.get("work_dir", str(Path.cwd()))).expanduser()
             extra = payload.get("extra") or {}
@@ -172,6 +206,7 @@ class AssistantSettings:
                 work_dir=work_dir,
                 llm=llm,
                 telegram=tg,
+                gmail=gmail,
                 safety=safety,
                 telegram_token=telegram_token,
                 bale_token=bale_token,
@@ -182,7 +217,7 @@ class AssistantSettings:
         except (TypeError, ValueError) as exc:
             raise ConfigError(f"invalid config payload: {exc}") from exc
 
-    def with_overrides(self, **changes) -> "AssistantSettings":
+    def with_overrides(self, **changes) -> AssistantSettings:
         """Return a new settings object with the given fields replaced."""
         return replace(self, **changes)
 

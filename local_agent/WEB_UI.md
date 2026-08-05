@@ -184,7 +184,10 @@ local_agent/web/
 ![تنظیمات](../docs/images/web-settings.png)
 
 انتخاب ارائه‌دهنده، مدل (با دریافت زندهٔ فهرست)، آدرس API، کلید API،
-حالت تأیید، صدا، پوسته، و اجرای خودکار (فقط در اپ دسکتاپ).
+حالت تأیید، پوشهٔ کاری (`work_dir` — با ساخت خودکار)، اتصال تلگرام شخصی
+(فلوی کد SMS و 2FA)، اتصال جیمیل (OAuth یا App Password)، سوییچ
+«دسترسی کامل سیستم (Admin/Root)» با تأیید دومرحله‌ای و نشان سطح دسترسی،
+صدا، پوسته، و اجرای خودکار (فقط در اپ دسکتاپ).
 
 - **آدرس پایه و کلید API** همیشه قابل ویرایش‌اند و `PYTHONUTF8`/
   `encoding="utf-8"` تضمین می‌کند متن فارسی هنگام اجرا موجیبیک نشود.
@@ -258,12 +261,18 @@ local_agent/web/
 | `POST` | `/api/clear` | پاک کردن تاریخچه |
 | `POST` | `/api/chat` | شروع یک اجرا (رویدادها از `/ws`) |
 | `POST` | `/api/invoke` | اجرای مستقیم یک ابزار |
-| `POST` | `/api/settings` | تغییر ارائه‌دهنده/مدل/کلید/حالت تأیید |
+| `POST` | `/api/settings` | تغییر و persist همهٔ تنظیمات (provider/مدل/کلید/confirm/work_dir/تلگرام/جیمیل/دسترسی کامل) |
 | `POST` | `/api/upload` | ذخیرهٔ فایل در پوشهٔ کاری (حداکثر ۲۵ MB) |
 | `GET` | `/api/file?path=` | دریافت یک فایل از پوشهٔ کاری |
 | `GET` | `/api/artifact?path=` | دریافت خروجی ابزار (اسکرین‌شات/فایل) از workspace یا data dir |
 | `POST` | `/api/provider/detect` | تشخیص خودکار ارائه‌دهنده از آدرس + کلید API |
 | `GET` | `/api/billing` | موجودی/مصرف/انقضای زندهٔ ارائه‌دهندهٔ ابری |
+| `POST` | `/api/telegram/connect` | شروع فلوی لاگین تلگرام شخصی (await_code) |
+| `POST` | `/api/telegram/verify` | ارسال کد SMS یا رمز 2FA |
+| `POST` | `/api/telegram/disconnect` | قطع اتصال تلگرام شخصی |
+| `POST` | `/api/gmail/connect` | اتصال جیمیل (OAuth/IMAP) |
+| `POST` | `/api/gmail/disconnect` | قطع اتصال جیمیل |
+| `POST` | `/api/elevate/restart` | اجرای دوباره با سطح administrator (ویندوز) |
 | `WS` | `/ws` | `chat` / `confirm` / `interrupt` / `ping` |
 
 ### امنیت
@@ -279,7 +288,7 @@ local_agent/web/
 
 `chat_started` · `turn_started` · `assistant_delta` · `assistant_final` ·
 `tool_proposed` · `tool_confirm_requested` · `tool_result` · `chat_done` ·
-`chat_failed`
+`chat_failed` · `telegram_state`
 
 پخش زندهٔ رویدادها با یک صف per-run و keepalive انجام می‌شود: وقتی
 اجرایی در حال کار ولی ساکت است، سرور `pong` می‌فرستد تا اتصال باز

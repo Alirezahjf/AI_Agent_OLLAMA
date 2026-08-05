@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import inspect
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 from ..core.context import RuntimeContext
 from ..core.errors import ActionRefused, AssistantError, DependencyMissing
 from ..core.logging_setup import get_logger
-
 
 logger = get_logger("actions")
 
@@ -50,7 +50,7 @@ class ActionContext:
     """
 
     runtime: RuntimeContext
-    confirmation_gate: "ConfirmationGate"
+    confirmation_gate: ConfirmationGate
     work_dir: Any  # pathlib.Path
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -72,6 +72,10 @@ class Action:
     risk_level: Risk = Risk.SAFE
     unavailable: bool = False
     unavailable_reason: str = ""
+    # Optional runtime override: when set and returns True, the action
+    # always asks for confirmation regardless of confirm_mode/risk
+    # (used e.g. by ``telegram.confirm_send``).  Signature: (safety) -> bool.
+    confirm_override: Callable[[Any], bool] | None = None
 
     def to_tool_definition(self):
         from ..llm.client import ToolDefinition
@@ -84,6 +88,8 @@ class Action:
         )
 
     def needs_confirmation(self, safety) -> bool:
+        if self.confirm_override is not None and self.confirm_override(safety):
+            return True
         if self.risk_level == Risk.SAFE:
             return False
         if safety.confirm_mode == "never":
@@ -117,6 +123,7 @@ class ActionRegistry:
         parameters: dict[str, Any],
         required: tuple[str, ...] = (),
         risk_level: Risk = Risk.SAFE,
+        confirm_override: Callable[[Any], bool] | None = None,
     ) -> Callable[[Callable], Callable]:
         def wrap(func: Callable) -> Callable:
             actual_risk = getattr(func, "__action_risk__", risk_level)
@@ -128,6 +135,7 @@ class ActionRegistry:
                     parameters=parameters,
                     required=required,
                     risk_level=actual_risk,
+                    confirm_override=confirm_override,
                 )
             )
             return func
@@ -238,7 +246,7 @@ def run_action(
         raise
     except AssistantError:
         raise
-    except Exception as exc:  # noqa: BLE001 - convert to friendly error
+    except Exception as exc:
         logger.exception("action %s crashed", name)
         raise AssistantError(f"action {name} failed: {exc}") from exc
     return str(result)

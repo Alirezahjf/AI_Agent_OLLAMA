@@ -201,7 +201,73 @@ python -m local_agent
 /telegram connect
 ```
 
-یک‌بار SMS code از شما می‌پرسد؛ session ذخیره می‌شود و دفعهٔ بعد لازم نیست.
+یک‌بار SMS code از شما می‌پرسد (و اگر حساب 2FA دارد، رمز دوم‌مرحله‌ای)؛
+session در `data_dir/<session_name>.session` ذخیره می‌شود و بعد از
+ری‌استارت **بدون لاگین دوباره** وصل می‌مانید.
+
+در رابط وب هم مودال تنظیمات → بخش «📱 تلگرام شخصی» همین فلوی
+`await_code → await_2fa → connected` را دارد (دکمهٔ «اتصال به تلگرام»).
+
+**خود-تنظیم با چت:** اگر به ایجنت بگویید «به تلگرامم وصل شو»، خودش چک
+می‌کند که `api_id`/`api_hash`/`phone` ثبت شده‌اند یا نه؛ اگر نه، از شما
+می‌خواهد از [my.telegram.org](https://my.telegram.org) بگیرید و با ابزار
+`config_set` در `config.json` ذخیره می‌کند (مقادیر محرمانه هرگز در پاسخ
+چاپ نمی‌شوند) و سپس شما را به دکمهٔ اتصال راهنمایی می‌کند.
+
+---
+
+### ۶) (اختیاری) اتصال جیمیل
+
+بخش `gmail` در `config.json`:
+
+```json
+{
+  "gmail": {
+    "enabled": true,
+    "credentials_file": "credentials.json",
+    "token_file": "gmail_token.json",
+    "username": "you@gmail.com",
+    "app_password": "",
+    "confirm_send": true
+  }
+}
+```
+
+دو روش:
+
+* **OAuth2 (ترجیحی):** در [Google Cloud Console](https://console.cloud.google.com)
+  یک پروژه بسازید، Gmail API را فعال کنید و یک **OAuth Client از نوع
+  Desktop app** بسازید؛ فایل JSON را با نام `credentials.json` در پوشهٔ داده
+  (پیش‌فرض `~/.local_assistant`) بگذارید. وابستگی‌ها با
+  `pip install -e ".[gmail]"` نصب می‌شوند (در بستهٔ پایه نیستند تا بیلد
+  ویندوز سبک بماند). در اولین اتصال مرورگر باز می‌شود و یک‌بار تأیید
+  می‌گیرید؛ توکن در `gmail_token.json` ذخیره و بعداً خودکار refresh می‌شود.
+* **IMAP/SMTP با App Password (بدون وابستگی جدید):** تأیید دومرحله‌ای
+  گوگل را فعال کنید و یک App Password ۱۶ رقمی بسازید؛ `username` (آدرس
+  جیمیل) و `app_password` را در config یا مودال تنظیمات وب وارد کنید.
+
+اکشن‌ها: `gmail.list_unread(limit)`، `gmail.search(query, limit)`،
+`gmail.read(id)` (Safe) و `gmail.send(to, subject, body)` (Destructive +
+تأیید، با احترام به `gmail.confirm_send`). دکمهٔ اتصال/قطع در مودال
+تنظیمات وب و وضعیت در `/api/status` موجود است.
+
+---
+
+### ۷) (اختیاری) دسترسی کامل سیستم (Admin/Root)
+
+فیلد `safety.full_system_access` (پیش‌فرض **خاموش**):
+
+* **خاموش (پیش‌فرض):** ابزارهای فایل فقط داخل `work_dir` و شل محدود به
+  فضای کاری (طبق `restrict_shell_to_workdir`).
+* **روشن:** ابزارهای فایل کل فایل‌سیستم را می‌بینند و شل با `working_dir`
+  (cd حالت‌دار) در هر پوشه‌ای اجرا می‌شود. فایل‌های حساس
+  (`.ssh`، `.env`، `credentials.json` و...) **در هر دو حالت** مسدودند و
+  کارهای مخرب همچنان تأیید می‌گیرند.
+
+سطح دسترسی واقعی فرایند (`admin`/`root`/`user`) در `/api/status` و مودال
+تنظیمات نمایش داده می‌شود؛ اگر دسترسی کامل فعال است ولی برنامه سطح
+پایین اجرا شده، دکمهٔ «اجرای دوباره به‌عنوان administrator» (ویندوز، UAC)
+یا راهنمای `sudo` (لینوکس) نشان داده می‌شود.
 
 ---
 
@@ -220,11 +286,16 @@ python -m local_agent
 | `/approve` | روشن/خاموش‌کردن auto-approve |
 | `/confirm MODE` | تنظیم confirm: `destructive` (پیش‌فرض) / `always` / `never` |
 | `/reset` | پاک‌کردن حافظهٔ گفتگو |
-| `/screenshot` | اسکرین‌شات از صفحه |
-| `/telegram connect` | اتصال به تلگرام شخصی |
+| `/screenshot` | اسکرین‌شات از صفحه (نام یکتا، بدون بازنویسی) |
+| `/telegram connect` | اتصال به تلگرام شخصی (کد SMS و در صورت نیاز 2FA) |
+| `/telegram status` | وضعیت اتصال تلگرام شخصی |
 | `/telegram chats` | لیست چت‌ها |
+| `/telegram disconnect` | قطع اتصال تلگرام شخصی |
 | `/send NAME TEXT` | ارسال سریع پیام |
 | `/quit` | خروج |
+
+> نکته: `/approve` و `/confirm` تنظیمات سطح Bridge هستند؛ از مودال تنظیمات
+> رابط وب یا `config.json` (فیلد `safety.confirm_mode`) تغییرشان دهید.
 
 ### مثال‌ها
 
@@ -383,13 +454,28 @@ python local_agent_setup.py build-desktop --installer  # + اینستالر
 - `get_mouse_position()`
 - `get_screen_size()`
 
-### تلگرام شخصی (نیاز به `/telegram connect`)
-- `telegram.list_chats(limit)`
-- `telegram.send_message(chat, text)` — Destructive
-- `telegram.send_photo(chat, path, caption)` — Destructive
-- `telegram.send_file(chat, path, caption)` — Destructive
+### تلگرام شخصی (نیاز به `/telegram connect` یا دکمهٔ اتصال در وب)
+- `telegram.list_chats(limit)` — Safe
 - `telegram.search_messages(chat, query, limit)` — Safe
 - `telegram.get_me()` — Safe
+- `telegram.send_message(chat, text)` — Destructive (احترام به `telegram.confirm_send`)
+- `telegram.send_photo(chat, path, caption)` — Destructive
+- `telegram.send_file(chat, path, caption)` — Destructive
+
+### جیمیل (نیاز به اتصال در مودال تنظیمات وب)
+- `gmail.list_unread(limit)` — Safe
+- `gmail.search(query, limit)` — Safe
+- `gmail.read(id)` — Safe
+- `gmail.send(to, subject, body)` — Destructive (احترام به `gmail.confirm_send`)
+
+### تنظیمات (persist بین ری‌استارت‌ها)
+- `config_set(path, value)` — نوشتن هر تنظیم نقطه‌چین (مثل `telegram.api_id`
+  یا `work_dir`) در `config.json` با نوشت اتومیک؛ مقادیر محرمانه در خروجی
+  چاپ نمی‌شوند.
+
+همهٔ تغییرات مودال تنظیمات وب (provider، مدل، کلید API، confirm mode،
+`work_dir`، تلگرام، جیمیل، `full_system_access`) بلافاصله در `config.json`
+ذخیره می‌شوند و بعد از ری‌استارت می‌مانند.
 
 ---
 

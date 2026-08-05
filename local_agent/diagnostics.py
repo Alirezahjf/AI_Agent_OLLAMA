@@ -22,13 +22,13 @@ import shutil
 import socket
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlparse
 
 from .core.config import AssistantSettings, load_settings
-
 
 OK = "ok"
 WARN = "warn"
@@ -200,7 +200,7 @@ def check_dependencies() -> CheckResult:
         return CheckResult(
             "deps", "وابستگی‌ها", FAIL,
             "بستهٔ ضروری غایب: " + "، ".join(missing),
-            "نصب کنید: pip install " + " ".join(missing),
+            f"نصب کنید: {sys.executable} -m pip install " + " ".join(missing),
             data,
         )
     if absent:
@@ -462,16 +462,93 @@ def check_screenshot(settings: AssistantSettings) -> CheckResult:
     )
 
 
+def _is_our_web_server(port: int, timeout: float = 1.5) -> bool:
+    """Best-effort: is the process listening on ``127.0.0.1:port`` ours?
+
+    Probes our own ``/healthz`` endpoint (``{"ok": true, ...}``) and the
+    page title.  Anything else — another program, a proxy, a firewall —
+    answers False so the user gets an honest warning instead of a wrong
+    diagnosis.
+    """
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as sock:
+            sock.sendall(
+                b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            )
+            data = sock.recv(512).decode("utf-8", "replace")
+        return '"ok"' in data and "true" in data.lower()
+    except OSError:
+        return False
+
+
 def check_port(settings: AssistantSettings, port: int = 7824) -> CheckResult:
     with socket.socket() as probe:
         try:
             probe.bind(("127.0.0.1", port))
         except OSError:
+            if _is_our_web_server(port):
+                return CheckResult(
+                    "port", "پورت رابط وب", OK,
+                    f"پورت {port} توسط همین دستیار در حال استفاده است",
+                    "", {"port": port, "ours": True},
+                )
             return CheckResult(
                 "port", "پورت رابط وب", WARN, f"پورت {port} مشغول است",
-                "یا دستیار از قبل باز است، یا با --port پورت دیگری بدهید.", {"port": port},
+                "یا دستیار از قبل باز است، یا با --port پورت دیگری بدهید.",
+                {"port": port, "ours": False},
             )
-    return CheckResult("port", "پورت رابط وب", OK, f"پورت {port} آزاد است", "", {"port": port})
+    return CheckResult(
+        "port", "پورت رابط وب", OK, f"پورت {port} آزاد است", "", {"port": port, "ours": False}
+    )
+
+
+def check_interpreter() -> CheckResult:
+    """Is the assistant running inside a virtual environment?
+
+    A venv that exists next to the project but is *not* activated is a
+    classic Windows trap (double-clicking the wrong python), so that
+    case is reported as FAIL with a fix hint.
+    """
+    prefix = getattr(sys, "prefix", "")
+    base_prefix = getattr(sys, "base_prefix", "")
+    data = {"venv": prefix != base_prefix, "prefix": prefix, "base_prefix": base_prefix}
+    if prefix != base_prefix:
+        return CheckResult(
+            "interpreter", "محیط پایتون", OK,
+            f"محیط مجازی فعال است ({prefix})", "", data,
+        )
+    root = Path(__file__).resolve().parent.parent
+    for candidate in (root, root.parent):
+        for name in (".venv", "venv"):
+            if (candidate / name).is_dir():
+                return CheckResult(
+                    "interpreter", "محیط پایتون", FAIL,
+                    "محیط مجازی (venv) ساخته شده ولی فعال نیست",
+                    "قبل از اجرای دستیار، محیط مجازی را فعال کنید "
+                    "(مثلاً .venv\\Scripts\\activate روی ویندوز).",
+                    data,
+                )
+    return CheckResult(
+        "interpreter", "محیط پایتون", WARN,
+        "محیط مجازی فعال نیست",
+        "توصیه می‌شود دستیار داخل یک venv اجرا شود تا وابستگی‌ها ایزوله بمانند.",
+        data,
+    )
+
+
+def check_encoding() -> CheckResult:
+    """Is stdout UTF-8?  Persian text garbles (mojibake) on cp720/cp1256."""
+    encoding = (getattr(sys.stdout, "encoding", "") or "").lower().replace("-", "")
+    data = {"encoding": encoding}
+    if encoding in {"utf8", "utf8sig"}:
+        return CheckResult("encoding", "رمزگذاری خروجی", OK, "UTF-8 فعال است", "", data)
+    return CheckResult(
+        "encoding", "رمزگذاری خروجی", WARN,
+        f"رمزگذاری فعلی: {encoding or 'نامشخص'}",
+        "در PowerShell: [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 "
+        "سپس chcp 65001 (OutputEncoding را UTF-8 کنید).",
+        data,
+    )
 
 
 def check_desktop() -> CheckResult:
@@ -552,6 +629,8 @@ def run_checks(
     checks: list[Callable[[], CheckResult]] = [
         check_python,
         check_platform,
+        check_interpreter,
+        check_encoding,
         check_dependencies,
         check_packaging,
         lambda: check_paths(settings),

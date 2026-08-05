@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import types
 from pathlib import Path
 
 from local_agent import diagnostics as dx
@@ -11,8 +12,12 @@ from local_agent.core.config import AssistantSettings, LLMSettings
 
 
 def _settings(tmp_path: Path, **llm: object) -> AssistantSettings:
-    base = dict(provider="openai_compatible", openai_base_url="http://127.0.0.1:1/v1",
-                openai_api_key="sk-test", openai_model="m")
+    base = {
+        "provider": "openai_compatible",
+        "openai_base_url": "http://127.0.0.1:1/v1",
+        "openai_api_key": "sk-test",
+        "openai_model": "m",
+    }
     base.update(llm)
     return AssistantSettings(
         data_dir=tmp_path, work_dir=tmp_path / "ws", llm=LLMSettings(**base)  # type: ignore[arg-type]
@@ -148,7 +153,7 @@ version = "1.0"
 """
 
 
-def test_packaging_check_passes_when_packages_are_explicit(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+def test_packaging_check_passes_when_packages_are_explicit(tmp_path, monkeypatch) -> None:
     probe = _write_project(tmp_path, _GOOD, ["agent", "local_agent", "tests_local_agent"])
     monkeypatch.setattr(dx, "__file__", str(probe))
     result = dx.check_packaging()
@@ -156,7 +161,7 @@ def test_packaging_check_passes_when_packages_are_explicit(tmp_path, monkeypatch
     assert result.data["explicit_packages"] is True
 
 
-def test_packaging_check_catches_the_flat_layout_error(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+def test_packaging_check_catches_the_flat_layout_error(tmp_path, monkeypatch) -> None:
     """This is the exact failure users hit: 'Multiple top-level packages'."""
     probe = _write_project(
         tmp_path, _FLAT_LAYOUT_TRAP, ["agent", "local_agent", "tests_local_agent"]
@@ -168,7 +173,7 @@ def test_packaging_check_catches_the_flat_layout_error(tmp_path, monkeypatch) ->
     assert set(result.data["top_level"]) == {"agent", "local_agent", "tests_local_agent"}
 
 
-def test_packaging_check_flags_a_missing_build_system(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+def test_packaging_check_flags_a_missing_build_system(tmp_path, monkeypatch) -> None:
     probe = _write_project(
         tmp_path,
         '[project]\nname = "x"\nversion = "1.0"\n[tool.setuptools.packages.find]\ninclude = ["a*"]\n',
@@ -180,7 +185,7 @@ def test_packaging_check_flags_a_missing_build_system(tmp_path, monkeypatch) -> 
     assert "build-system" in result.detail
 
 
-def test_packaging_check_allows_a_single_top_level_package(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+def test_packaging_check_allows_a_single_top_level_package(tmp_path, monkeypatch) -> None:
     probe = _write_project(
         tmp_path, "[build-system]\nrequires = []\n" + _FLAT_LAYOUT_TRAP, ["local_agent"]
     )
@@ -188,12 +193,12 @@ def test_packaging_check_allows_a_single_top_level_package(tmp_path, monkeypatch
     assert dx.check_packaging().status == dx.OK
 
 
-def test_dependency_check_marks_missing_web_deps_as_fatal(monkeypatch) -> None:  # noqa: ANN001
+def test_dependency_check_marks_missing_web_deps_as_fatal(monkeypatch) -> None:
     import importlib.util
 
     real = importlib.util.find_spec
 
-    def fake(name: str, *a, **k):  # noqa: ANN001, ANN202
+    def fake(name: str, *a, **k):
         if name in {"uvicorn", "fastapi"}:
             return None
         return real(name, *a, **k)
@@ -205,12 +210,12 @@ def test_dependency_check_marks_missing_web_deps_as_fatal(monkeypatch) -> None: 
     assert "[all]" in result.hint
 
 
-def test_dependency_check_groups_optional_extras(monkeypatch) -> None:  # noqa: ANN001
+def test_dependency_check_groups_optional_extras(monkeypatch) -> None:
     import importlib.util
 
     real = importlib.util.find_spec
 
-    def fake(name: str, *a, **k):  # noqa: ANN001, ANN202
+    def fake(name: str, *a, **k):
         if name in {"webview", "pystray"}:
             return None
         return real(name, *a, **k)
@@ -307,13 +312,15 @@ def test_check_port_other_program(monkeypatch):
 
 
 def test_check_encoding_utf8(monkeypatch):
-    monkeypatch.setattr(sys.stdout, "encoding", "utf-8")
+    # sys.stdout.encoding is read-only; mock the whole stdout object instead.
+    monkeypatch.setattr(dx.sys, "stdout", types.SimpleNamespace(encoding="utf-8"))
     result = dx.check_encoding()
     assert result.status == dx.OK
+    assert result.data.get("encoding") == "utf8"
 
 
 def test_check_encoding_cp720_warns(monkeypatch):
-    monkeypatch.setattr(sys.stdout, "encoding", "cp720")
+    monkeypatch.setattr(dx.sys, "stdout", types.SimpleNamespace(encoding="cp720"))
     result = dx.check_encoding()
     assert result.status == dx.WARN
     assert "OutputEncoding" in result.hint or "PowerShell" in result.hint

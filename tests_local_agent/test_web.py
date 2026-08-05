@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import socket
-import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -13,48 +10,7 @@ import requests
 
 from local_agent.bridge.server.server import BridgeServer
 from local_agent.core.config import AssistantSettings
-from local_agent.web.app import WebServer, create_app
-
-
-def _free_port() -> int:
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    return port
-
-
-def _wait_for_server(server: WebServer, *, timeout: float = 5.0) -> bool:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            r = requests.get(f"http://127.0.0.1:{server.port}/", timeout=1)
-            if r.status_code == 200:
-                return True
-        except requests.RequestException:
-            pass
-        time.sleep(0.1)
-    return False
-
-
-@pytest.fixture
-def web_server(tmp_path: Path) -> WebServer:
-    settings = AssistantSettings(data_dir=tmp_path, work_dir=tmp_path)
-    bridge = BridgeServer(settings)
-    bridge.start_in_process()
-    # Reuse the existing bridge for the web client
-    from local_agent.bridge.api.client import BridgeClient, _InProcessBackend, _welcome_to_info
-    backend = _InProcessBackend(bridge)
-    backend._started = True
-    client = BridgeClient(backend, _welcome_to_info(bridge.welcome()))
-
-    server = WebServer(settings, client, host="127.0.0.1", port=_free_port())
-    server.start_in_thread()
-    if not _wait_for_server(server):
-        server.stop()
-        pytest.fail("web server did not start")
-    yield server
-    server.stop()
+from local_agent.web.app import WebServer
 
 
 def test_root_endpoint_returns_html(web_server: WebServer) -> None:
@@ -228,7 +184,7 @@ def test_parse_action_line_handles_garbage() -> None:
 def test_upload_writes_into_the_workspace(web_server: WebServer, tmp_path: Path) -> None:
     import base64
 
-    payload = base64.b64encode("سلام".encode("utf-8")).decode("ascii")
+    payload = base64.b64encode("سلام".encode()).decode("ascii")
     r = requests.post(
         f"http://127.0.0.1:{web_server.port}/api/upload",
         json={"name": "uploaded.txt", "content_base64": payload},
@@ -394,6 +350,8 @@ def test_api_settings_persists_to_disk(web_server: WebServer, tmp_path: Path) ->
 @pytest.fixture
 def purge_server(tmp_path: Path) -> WebServer:
     """A web server whose data dir lives fully inside tmp_path."""
+    from tests_local_agent.conftest import _free_port, _wait_for_server
+
     data_dir = tmp_path / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "config.json").write_text("{}", encoding="utf-8")
@@ -524,3 +482,267 @@ def test_artifact_endpoint_missing_file_is_404_not_403(
     with pytest.raises(HTTPException) as excinfo2:
         resolve_artifact_path(work, data, "screenshots/../../../etc/passwd")
     assert excinfo2.value.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# P0 — global exception handler: no more HTML "Internal Server Error"
+# ---------------------------------------------------------------------------
+
+
+def test_unhandled_exception_returns_clean_persian_json() -> None:
+    """Every unhandled exception must become JSON, never an HTML 500 page."""
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from local_agent.web.app import register_exception_handlers
+
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.get("/boom")
+    def boom() -> None:
+        raise RuntimeError("secret-detail-sk-abc should never reach the client")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        r = client.get("/boom")
+        assert r.status_code == 500
+        assert "application/json" in r.headers.get("content-type", "")
+        body = r.json()
+        assert isinstance(body.get("detail"), str)
+        assert body["detail"], "پیام فارسی باید غیرخالی باشد"
+        # The raw exception text, paths and secret-looking values never leak.
+        assert "secret-detail-sk-abc" not in r.text
+        assert "Traceback" not in r.text
+        assert "RuntimeError" not in r.text
+
+
+def test_validation_error_returns_persian_json() -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from local_agent.web.app import register_exception_handlers
+
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.post("/echo")
+    async def echo(name: str) -> dict:
+        return {"name": name}
+
+    with TestClient(app) as client:
+        r = client.post("/echo", json={})
+        assert r.status_code == 422
+        body = r.json()
+        assert "نامعتبر" in body.get("detail", "")
+
+
+def test_artifact_windows_path_with_cwd_equal_workdir_regression(
+    tmp_path: Path, web_server: WebServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P0 regression: ``screenshots\\screen.png`` served from data_dir.
+
+    The production layout runs the process with cwd == work_dir.  The
+    file exists ONLY under data_dir/screenshots; the old resolver used to
+    answer 404 (or 500) for the backslashed path.  ``..`` escapes must
+    stay forbidden.
+    """
+    monkeypatch.chdir(tmp_path)  # cwd == work_dir, like the Windows build
+    shot = tmp_path / "screenshots" / "screen.png"
+    shot.parent.mkdir(exist_ok=True)
+    shot.write_bytes(b"P0-REAL")
+    base = f"http://127.0.0.1:{web_server.port}"
+
+    ok = requests.get(base + "/api/artifact", params={"path": "screenshots\\screen.png"}, timeout=3)
+    assert ok.status_code == 200, ok.text
+    assert ok.content == b"P0-REAL"
+
+    for escape in ("..\\..\\etc\\passwd", "screenshots/../../../etc/passwd"):
+        blocked = requests.get(base + "/api/artifact", params={"path": escape}, timeout=3)
+        assert blocked.status_code in {403, 404}, f"{escape} باید مسدود شود"
+
+
+# ---------------------------------------------------------------------------
+# P1 — personal Telegram connect flow over HTTP
+# ---------------------------------------------------------------------------
+
+
+def test_telegram_connect_without_credentials_returns_guidance(
+    web_server: WebServer,
+) -> None:
+    base = f"http://127.0.0.1:{web_server.port}"
+    r = requests.post(base + "/api/telegram/connect", timeout=5)
+    assert r.status_code == 400
+    body = r.json()
+    assert "my.telegram.org" in body.get("detail", "")
+    assert "config" in body.get("detail", "")
+
+
+def test_telegram_verify_without_login_flow_returns_400(web_server: WebServer) -> None:
+    base = f"http://127.0.0.1:{web_server.port}"
+    r = requests.post(base + "/api/telegram/verify", json={"code": "12345"}, timeout=5)
+    assert r.status_code == 400
+
+
+def test_telegram_full_login_flow_over_http(
+    web_server: WebServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """await_code -> await_2fa -> connected, driven purely over HTTP."""
+    import sys
+
+    import telethon
+
+    # Persist credentials through the settings endpoint first.
+    base = f"http://127.0.0.1:{web_server.port}"
+    r = requests.post(
+        base + "/api/settings",
+        json={
+            "telegram": {
+                "enabled": True,
+                "api_id": 12345,
+                "api_hash": "h" * 32,
+                "phone": "+10000000000",
+            }
+        },
+        timeout=5,
+    )
+    assert r.status_code == 200
+
+    # --- fake telethon client with 2FA -------------------------------
+    class _FakeUser:
+        id = 1
+        first_name = "Test"
+        username = "tester"
+        last_name = ""
+        phone = "+10000000000"
+
+    class _FakeTele:
+        def __init__(self, *args, **kwargs) -> None:
+            self.authorized = False
+            self.password_prompted = False
+
+        async def connect(self) -> None:
+            pass
+
+        async def is_user_authorized(self) -> bool:
+            return self.authorized
+
+        async def send_code_request(self, phone: str) -> Any:
+            return type("Sent", (), {"phone_code_hash": "hash"})()
+
+        async def sign_in(self, *args, **kwargs) -> _FakeUser:
+            if not kwargs.get("password"):
+                from telethon.errors import SessionPasswordNeededError
+
+                self.password_prompted = True
+                raise SessionPasswordNeededError(request=None)
+            self.authorized = True
+            return _FakeUser()
+
+        async def get_me(self) -> _FakeUser:
+            return _FakeUser()
+
+        async def disconnect(self) -> None:
+            pass
+
+    telethon_module = sys.modules.get("telethon") or telethon
+    monkeypatch.setattr(telethon_module, "TelegramClient", _FakeTele)
+
+    # --- state machine ------------------------------------------------
+    r = requests.post(base + "/api/telegram/connect", timeout=15)
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "await_code"
+
+    r = requests.post(base + "/api/telegram/verify", json={"code": "12345"}, timeout=15)
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "await_2fa"
+
+    r = requests.post(base + "/api/telegram/verify", json={"password": "p4ss"}, timeout=15)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["state"] == "connected"
+    assert body["connected"] is True
+
+    # Status now reports the connected client.
+    status = requests.get(base + "/api/status", timeout=5).json()
+    s = status["settings"]["settings"]
+    assert s["telegram_connected"] is True
+    assert s["telegram_state"] == "connected"
+
+    # Disconnect resets it.
+    r = requests.post(base + "/api/telegram/disconnect", timeout=5)
+    assert r.status_code == 200
+    assert r.json()["connected"] is False
+
+
+# ---------------------------------------------------------------------------
+# P1/P2/P3/P5 — settings modal covers the new sections
+# ---------------------------------------------------------------------------
+
+
+def test_index_settings_modal_has_new_sections() -> None:
+    html = (WEB_DIR / "templates" / "index.html").read_text(encoding="utf-8")
+    for marker in (
+        "set-workdir",          # P3: work_dir
+        "set-tg-enabled",       # P1: telegram section
+        "connectTelegram",      # P1: telegram connect flow
+        "telegramState === 'await_code'",
+        "set-gm-enabled",       # P5: gmail section
+        "connectGmail",
+        "set-fullaccess",       # P2: admin/root switch
+        "confirmFullAccess",    # P2: two-step confirm
+        "restartElevated",      # P2: restart-as-admin button
+        "elevationLabel",
+    ):
+        assert marker in html, f"missing UI region: {marker}"
+
+
+def test_app_js_exposes_new_behaviours() -> None:
+    js = (WEB_DIR / "static" / "app.js").read_text(encoding="utf-8")
+    for feature in (
+        "connectTelegram", "submitTelegramCode", "submitTelegramPassword",
+        "disconnectTelegram", "connectGmail", "disconnectGmail",
+        "onFullAccessToggle", "restartElevated", "applyTelegramState",
+    ):
+        assert feature in js, f"missing behaviour: {feature}"
+
+
+def test_elevate_endpoint_returns_guidance_on_posix(web_server: WebServer) -> None:
+    r = requests.post(f"http://127.0.0.1:{web_server.port}/api/elevate/restart", timeout=5)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["elevated"] is False
+    assert "sudo" in body.get("message", "")
+
+
+def test_telegram_connect_network_failure_is_400_not_500(
+    web_server: WebServer,
+) -> None:
+    """Telethon network errors must become a Persian 400, never a 500."""
+    import requests as _requests
+
+    base = f"http://127.0.0.1:{web_server.port}"
+    _requests.post(
+        base + "/api/settings",
+        json={"telegram": {"enabled": True, "api_id": 1, "api_hash": "h" * 32, "phone": "+100"}},
+        timeout=5,
+    )
+
+    class _BrokenClient:
+        is_connected = False
+        login_state = "disconnected"
+
+        def start_login(self) -> dict:
+            raise ConnectionError("connection reset by peer")
+
+    from local_agent.web.app import _server_of
+
+    server = _server_of(web_server.client)
+    assert server is not None
+    server.handlers.telegram = _BrokenClient()  # type: ignore[assignment]
+
+    r = _requests.post(base + "/api/telegram/connect", timeout=10)
+    assert r.status_code == 400, r.text
+    body = r.json()
+    assert "تلگرام" in body.get("detail", "") or "اینترنت" in body.get("detail", "")
+    assert "connection reset" not in r.text.lower()

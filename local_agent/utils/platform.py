@@ -15,12 +15,11 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from collections.abc import Iterable
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable
 
 from ..core.logging_setup import get_logger
-
 
 logger = get_logger("utils.platform")
 
@@ -70,6 +69,31 @@ def is_wsl() -> bool:
         return "microsoft" in version_text
     except OSError:
         return False
+
+
+def elevation_level() -> str:
+    """Report the process privilege level: ``admin`` | ``root`` | ``user``.
+
+    Windows answers through ``IsUserAnAdmin()`` (guarded with
+    ``getattr`` so the sandbox/CI never crashes), POSIX through
+    ``os.geteuid()``.  This tells the UI whether the assistant really
+    runs with administrator/root rights when ``full_system_access`` is
+    enabled — or whether the user still needs to restart it elevated.
+    """
+    if current_platform() == Platform.WINDOWS:
+        try:
+            import ctypes
+
+            shell32 = getattr(ctypes, "windll", None)
+            if shell32 is not None and hasattr(shell32, "shell32"):
+                return "admin" if bool(shell32.shell32.IsUserAnAdmin()) else "user"
+        except (OSError, AttributeError, ImportError):
+            pass
+        return "user"
+    try:
+        return "root" if os.geteuid() == 0 else "user"
+    except (AttributeError, OSError):
+        return "user"
 
 
 def has_display() -> bool:
@@ -282,8 +306,10 @@ def _resolve_uwp_executable(bare: str) -> str | None:
                 "powershell",
                 "-NoProfile",
                 "-Command",
-                f"Get-StartApps | Where-Object {{$_.Name -like '*{bare}*'}} "
-                "| Select-Object -First 1 -ExpandProperty AppID",
+                (
+                    f"Get-StartApps | Where-Object {{$_.Name -like '*{bare}*'}} "
+                    "| Select-Object -First 1 -ExpandProperty AppID"
+                ),
             ],
             capture_output=True,
             text=True,
@@ -457,8 +483,7 @@ def iter_windows_windows() -> Iterable[str]:
             return True
 
         EnumWindows(EnumWindowsProc(callback), 0)
-        for title in titles:
-            yield title
+        yield from titles
     except (OSError, AttributeError) as exc:
         logger.debug("iter_windows_windows failed: %s", exc)
 

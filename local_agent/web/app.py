@@ -43,16 +43,17 @@ from pathlib import Path
 from queue import Empty
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError, StarletteHTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ..bridge import BridgeClient
 from ..core.config import AssistantSettings
+from ..core.errors import AssistantError
 from ..core.logging_setup import get_logger, setup_logging
 from ..utils.paths import web_static_dir, web_templates_dir
-
 
 logger = get_logger("web")
 
@@ -85,6 +86,12 @@ class SettingsRequest(BaseModel):
     openai_base_url: str | None = None
     openai_api_key: str | None = None
     confirm_mode: str | None = None
+    work_dir: str | None = None
+    full_system_access: bool | None = None
+    # ``telegram`` / ``gmail`` accept a partial dict; only the given keys
+    # are applied (blank secret fields keep their stored value).
+    telegram: dict[str, Any] | None = None
+    gmail: dict[str, Any] | None = None
 
 
 class UploadRequest(BaseModel):
@@ -103,6 +110,11 @@ class PurgeRequest(BaseModel):
     # Exit the process after a successful wipe so the running app cannot
     # recreate the data directory it just deleted.
     shutdown: bool = True
+
+
+class TelegramVerifyRequest(BaseModel):
+    code: str | None = None
+    password: str | None = None
 
 
 def _schedule_process_exit(delay: float = 0.8) -> None:
@@ -217,6 +229,74 @@ def _server_of(client: BridgeClient) -> Any:
     return getattr(backend, "_server", None) if backend else None
 
 
+def _coerce_telegram_field(key: str, raw: Any) -> Any:
+    if key == "enabled" or key == "confirm_send":
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in {"true", "1", "yes", "on"}
+    if key == "api_id":
+        try:
+            return int(str(raw).strip())
+        except ValueError as exc:
+            raise HTTPException(400, "api_id باید عدد باشد") from exc
+    if key == "session_name":
+        value = str(raw).strip()
+        return value or "assistant"
+    return str(raw).strip()
+
+
+def _coerce_gmail_field(key: str, raw: Any) -> Any:
+    if key == "enabled" or key == "confirm_send":
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in {"true", "1", "yes", "on"}
+    return str(raw).strip()
+
+
+# ---------------------------------------------------------------------------
+# Global exception handling
+# ---------------------------------------------------------------------------
+
+
+def register_exception_handlers(app: FastAPI) -> None:
+    """Convert every unhandled failure into clean JSON, never HTML.
+
+    Without this, FastAPI answers unexpected exceptions with a bare
+    ``500 Internal Server Error`` HTML page — the bug this whole task
+    (P0) hunts.  The traceback is logged locally and the client only
+    ever sees a short Persian message; no exception text, no paths, no
+    secrets.
+    """
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(
+        _request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        messages: list[str] = []
+        for error in exc.errors()[:5]:
+            loc = ".".join(str(part) for part in error.get("loc", ()) if part != "body")
+            message = str(error.get("msg", "مقدار نامعتبر"))
+            messages.append(f"{loc}: {message}" if loc else message)
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "ورودی نامعتبر است — " + " | ".join(messages)},
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_exception(
+        _request: Request, exc: StarletteHTTPException
+    ) -> JSONResponse:
+        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc.detail)})
+
+    @app.exception_handler(Exception)
+    async def _unhandled(_request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("endpoint crashed (unhandled exception)")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "خطای داخلی سرور رخ داد؛ جزئیات در لاگ ثبت شد."},
+        )
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -224,6 +304,7 @@ def _server_of(client: BridgeClient) -> Any:
 
 def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
     app = FastAPI(title="Local Windows Assistant", version="2.0")
+    register_exception_handlers(app)
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
@@ -322,9 +403,18 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                 "error": "درگاه مالی فقط برای ارائه‌دهندگان ابری با کلید API در دسترس است",
             }
         hint = llm.provider if llm.provider == "ollama" else ""
-        return await asyncio.to_thread(
-            fetch_billing, llm.openai_base_url, llm.openai_api_key, provider_hint=hint
-        )
+        try:
+            return await asyncio.to_thread(
+                fetch_billing, llm.openai_base_url, llm.openai_api_key, provider_hint=hint
+            )
+        except Exception:
+            logger.exception("billing fetch failed")
+            return {
+                "provider": llm.provider,
+                "label": "",
+                "available": False,
+                "error": "دریافت اطلاعات مالی ناموفق بود؛ دوباره تلاش کنید یا لاگ را بررسی کنید.",
+            }
 
     @app.post("/api/purge")
     async def purge(req: PurgeRequest) -> dict[str, Any]:
@@ -364,35 +454,215 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
 
     @app.post("/api/settings")
     async def update_settings(req: SettingsRequest) -> dict[str, Any]:
-        payload: dict[str, Any] = {}
-        if req.provider:
-            payload["provider"] = req.provider
-        if req.model:
-            payload["model"] = req.model
+        """Apply + persist every setting the UI can edit.
+
+        Everything goes through ``BridgeHandlers._apply_settings`` so the
+        runtime, the tool context and ``config.json`` stay in sync, and
+        the write is atomic.  Secret values are never echoed back.
+        """
         server = _server_of(client)
-        if server is not None and (req.openai_base_url or req.openai_api_key or req.confirm_mode):
-            handlers = server.handlers
-            llm = dict(handlers.settings.llm.__dict__)
-            if req.openai_base_url:
-                llm["openai_base_url"] = req.openai_base_url
-            if req.openai_api_key:
-                llm["openai_api_key"] = req.openai_api_key
-            new_llm = type(handlers.settings.llm)(**llm)
-            new_settings = handlers.settings.with_overrides(llm=new_llm)
-            if req.confirm_mode in {"destructive", "always", "never"}:
-                safety = dict(handlers.settings.safety.__dict__)
-                safety["confirm_mode"] = req.confirm_mode
+        if server is None:
+            payload: dict[str, Any] = {}
+            if req.provider:
+                payload["provider"] = req.provider
+            if req.model:
+                payload["model"] = req.model
+            if not payload:
+                return {"provider": "", "model": ""}
+            try:
+                return client.set_model(**payload)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(400, str(exc))
+
+        handlers = server.handlers
+        new_settings = handlers.settings
+
+        # ---- LLM ------------------------------------------------------
+        llm_dict = dict(new_settings.llm.__dict__)
+        llm_changed = False
+        if req.provider:
+            llm_dict["provider"] = req.provider
+            llm_changed = True
+        if req.model:
+            llm_dict["ollama_model"] = req.model
+            llm_dict["openai_model"] = req.model
+            llm_changed = True
+        if req.openai_base_url is not None:
+            llm_dict["openai_base_url"] = req.openai_base_url.strip()
+            llm_changed = True
+        if req.openai_api_key is not None and req.openai_api_key.strip():
+            llm_dict["openai_api_key"] = req.openai_api_key.strip()
+            llm_changed = True
+        if llm_changed:
+            new_settings = new_settings.with_overrides(
+                llm=type(new_settings.llm)(**llm_dict)
+            )
+
+        # ---- safety ---------------------------------------------------
+        safety_dict = dict(new_settings.safety.__dict__)
+        safety_changed = False
+        if req.confirm_mode in {"destructive", "always", "never"}:
+            safety_dict["confirm_mode"] = req.confirm_mode
+            safety_changed = True
+        if req.full_system_access is not None:
+            safety_dict["full_system_access"] = bool(req.full_system_access)
+            safety_changed = True
+        if safety_changed:
+            new_settings = new_settings.with_overrides(
+                safety=type(new_settings.safety)(**safety_dict)
+            )
+
+        # ---- work dir (created on demand) ------------------------------
+        if req.work_dir is not None and req.work_dir.strip():
+            target = Path(req.work_dir).expanduser()
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise HTTPException(400, f"ساخت پوشهٔ کاری ممکن نشد: {exc}")
+            new_settings = new_settings.with_overrides(work_dir=target)
+
+        # ---- telegram --------------------------------------------------
+        if req.telegram:
+            tg_dict = dict(new_settings.telegram.__dict__)
+            tg_changed = False
+            for key in ("enabled", "api_id", "api_hash", "phone", "session_name", "confirm_send"):
+                if key in req.telegram:
+                    raw = req.telegram[key]
+                    # Blank scalar = keep the stored value (the UI never
+                    # echoes secrets back, so an empty hash is not a change).
+                    if key != "enabled" and key != "confirm_send" and (not raw or not str(raw).strip()):
+                        continue
+                    tg_dict[key] = _coerce_telegram_field(key, raw)
+                    tg_changed = True
+            if tg_changed:
                 new_settings = new_settings.with_overrides(
-                    safety=type(handlers.settings.safety)(**safety)
+                    telegram=type(new_settings.telegram)(**tg_dict)
                 )
-            handlers.settings = new_settings
-            handlers._persist_settings()
-        if not payload:
-            return {"provider": req.provider or "", "model": req.model or ""}
+
+        # ---- gmail -----------------------------------------------------
+        if req.gmail:
+            gm_dict = dict(new_settings.gmail.__dict__)
+            gm_changed = False
+            for key in ("enabled", "credentials_file", "token_file", "username", "app_password", "confirm_send"):
+                if key in req.gmail:
+                    raw = req.gmail[key]
+                    if key == "app_password" and (not raw or not str(raw).strip()):
+                        continue  # blank = keep the stored password
+                    gm_dict[key] = _coerce_gmail_field(key, raw)
+                    gm_changed = True
+            if gm_changed:
+                new_settings = new_settings.with_overrides(
+                    gmail=type(new_settings.gmail)(**gm_dict)
+                )
+
+        handlers._apply_settings(new_settings)
+        llm = new_settings.llm
+        model = llm.openai_model if llm.provider != "ollama" else llm.ollama_model
+        return {
+            "provider": llm.provider,
+            "model": model or "",
+            "saved": {
+                "work_dir": str(new_settings.work_dir),
+                "confirm_mode": new_settings.safety.confirm_mode,
+                "full_system_access": bool(new_settings.safety.full_system_access),
+                "telegram_enabled": bool(new_settings.telegram.enabled),
+                "gmail_enabled": bool(new_settings.gmail.enabled),
+                # API key is only acknowledged, never returned.
+                "openai_api_key_set": bool(llm.openai_api_key),
+            },
+        }
+
+    @app.post("/api/telegram/connect")
+    async def telegram_connect() -> dict[str, Any]:
+        """Start the personal-Telegram login flow (state: await_code → await_2fa → connected)."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "telegram needs an in-process bridge")
         try:
-            return client.set_model(**payload)
-        except Exception as exc:  # noqa: BLE001
+            return server.handlers.start_telegram_login()
+        except AssistantError as exc:
             raise HTTPException(400, str(exc))
+
+    @app.post("/api/telegram/verify")
+    async def telegram_verify(req: TelegramVerifyRequest) -> dict[str, Any]:
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "telegram needs an in-process bridge")
+        state = server.handlers.telegram_status()["state"]
+        try:
+            if state == "await_code":
+                if not req.code:
+                    raise HTTPException(400, "کد تأیید را وارد کنید")
+                return server.handlers.submit_telegram_code(req.code)
+            if state == "await_2fa":
+                if not req.password:
+                    raise HTTPException(400, "رمز دوم‌مرحله‌ای (2FA) را وارد کنید")
+                return server.handlers.submit_telegram_password(req.password)
+            raise HTTPException(400, "هیچ فرایند ورودی در جریان نیست؛ دکمهٔ اتصال تلگرام را بزنید")
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.post("/api/telegram/disconnect")
+    async def telegram_disconnect() -> dict[str, Any]:
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "telegram needs an in-process bridge")
+        return server.handlers.disconnect_telegram()
+
+    @app.post("/api/gmail/connect")
+    async def gmail_connect() -> dict[str, Any]:
+        """Connect Gmail (OAuth browser flow or IMAP/SMTP App Password)."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "gmail needs an in-process bridge")
+        try:
+            return server.handlers.connect_gmail()
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.post("/api/gmail/disconnect")
+    async def gmail_disconnect() -> dict[str, Any]:
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "gmail needs an in-process bridge")
+        return server.handlers.disconnect_gmail()
+
+    @app.post("/api/elevate/restart")
+    async def elevate_restart() -> dict[str, Any]:
+        """Relaunch the assistant with administrator rights (best-effort).
+
+        Windows: ``ShellExecuteW(..., "runas", ...)`` re-spawns the app
+        elevated (UAC prompt).  On POSIX we cannot elevate a running
+        process, so we return guidance to restart with sudo.
+        """
+        from ..utils.platform import Platform, current_platform
+
+        if current_platform() != Platform.WINDOWS:
+            return {
+                "elevated": False,
+                "message": "در لینوکس/مک، برنامه را با sudo دوباره اجرا کنید: "
+                "sudo python -m local_agent.web",
+            }
+        try:
+            import ctypes
+
+            argv = list(sys.argv[1:]) if not getattr(sys, "frozen", False) else []
+            params = " ".join(argv) if argv else ""
+            result = ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, params, None, 1
+            )
+            if int(result) <= 32:
+                return {
+                    "elevated": False,
+                    "message": "اجرای دوباره به‌عنوان administrator ممکن نشد (شاید تأیید UAC لغو شد).",
+                }
+            return {
+                "elevated": True,
+                "message": "برنامه با سطح administrator دوباره اجرا می‌شود؛ این پنجره را ببندید.",
+            }
+        except Exception as exc:
+            logger.exception("elevate/restart failed")
+            return {"elevated": False, "message": f"اجرای دوباره ممکن نشد: {exc}"}
 
     @app.post("/api/chat")
     async def chat(req: ChatRequest) -> dict[str, Any]:
@@ -521,6 +791,14 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                     await websocket.send_text(json.dumps({"type": "pong", "ts": time.time()}))
         except WebSocketDisconnect:
             return
+        except Exception:
+            logger.exception("websocket handler crashed")
+            try:
+                await websocket.send_text(
+                    json.dumps({"type": "error", "message": "خطای داخلی سرور رخ داد؛ اتصال دوباره برقرار می‌شود"})
+                )
+            except Exception:  # noqa: BLE001, S110 - socket already gone
+                pass
 
     # Static assets
     if STATIC.is_dir():

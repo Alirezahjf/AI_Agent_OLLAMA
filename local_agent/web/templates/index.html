@@ -58,6 +58,11 @@
         <svg viewBox="0 0 24 24" class="icon icon--sm"><path d="M12 2a4 4 0 014 4v1h1a3 3 0 013 3v3a5 5 0 01-5 5h-.5l-2.5 4-2.5-4H9a5 5 0 01-5-5v-3a3 3 0 013-3h1V6a4 4 0 014-4z"/></svg>
         <span x-text="model"></span>
       </div>
+      <div class="pill pill--muted hide-sm" x-show="elevation === 'admin' || elevation === 'root'" x-cloak
+           :title="'سطح دسترسی: ' + elevationLabel" role="status">
+        <span aria-hidden="true">🛡</span>
+        <span x-text="elevationLabel"></span>
+      </div>
     </div>
 
     <div class="topbar__group topbar__group--end">
@@ -625,6 +630,102 @@
             <option value="always">همیشه بپرس</option>
             <option value="never">هرگز نپرس (فقط ماشین آزمایشی)</option>
           </select>
+        </div>
+        <div class="field">
+          <label for="set-workdir">پوشهٔ کاری (workspace)</label>
+          <input id="set-workdir" x-model="form.work_dir" placeholder="مثلاً C:\Users\you\projects" dir="ltr">
+          <p class="field__hint">همهٔ فایل‌ها به‌طور پیش‌فرض داخل همین پوشه ساخته می‌شوند؛ اگر وجود نداشته باشد، ساخته می‌شود.</p>
+        </div>
+        <div class="field">
+          <label>📱 تلگرام شخصی</label>
+          <div class="field field--switch">
+            <label for="set-tg-enabled">فعال</label>
+            <input id="set-tg-enabled" type="checkbox" class="switch" x-model="form.telegram.enabled">
+          </div>
+          <div class="field__row">
+            <input x-model="form.telegram.api_id" placeholder="api_id" dir="ltr" aria-label="api_id">
+            <input x-model="form.telegram.phone" placeholder="شماره (مثلاً +98912...)" dir="ltr" aria-label="شماره تلفن">
+          </div>
+          <input x-model="form.telegram.api_hash" type="password" placeholder="api_hash (فقط هنگام تغییر پر کنید)" dir="ltr" autocomplete="off">
+          <p class="field__hint">
+            api_id و api_hash را از <a href="https://my.telegram.org" target="_blank" rel="noopener">my.telegram.org</a> بگیرید.
+            بعد از ذخیره، دکمهٔ «اتصال» را بزنید؛ کد SMS و در صورت نیاز رمز 2FA پرسیده می‌شود و
+            سشن ذخیره می‌شود تا بعد از ری‌استارت نیازی به لاگین دوباره نباشد.
+          </p>
+          <div class="field__row">
+            <button class="btn btn--ghost btn--sm" type="button" @click="connectTelegram()" :disabled="telegramBusy">
+              <span x-show="!telegramBusy">🔌 اتصال به تلگرام</span>
+              <span x-show="telegramBusy" x-cloak>در حال اتصال…</span>
+            </button>
+            <button class="btn btn--ghost btn--sm" type="button" @click="disconnectTelegram()" x-show="telegramConnected" x-cloak>قطع اتصال</button>
+            <span class="field__hint" x-text="telegramStateLabel"></span>
+          </div>
+          <div class="field" x-show="telegramState === 'await_code'" x-cloak>
+            <label for="tg-code">کد تأیید ارسال‌شده به تلگرام</label>
+            <div class="field__row">
+              <input id="tg-code" x-model="telegramCode" placeholder="کد ۵ رقمی" dir="ltr" inputmode="numeric">
+              <button class="btn btn--primary btn--sm" type="button" @click="submitTelegramCode()" :disabled="telegramBusy">تأیید کد</button>
+            </div>
+          </div>
+          <div class="field" x-show="telegramState === 'await_2fa'" x-cloak>
+            <label for="tg-2fa">رمز دوم‌مرحله‌ای (2FA)</label>
+            <div class="field__row">
+              <input id="tg-2fa" type="password" x-model="telegramPassword" placeholder="رمز 2FA" dir="ltr">
+              <button class="btn btn--primary btn--sm" type="button" @click="submitTelegramPassword()" :disabled="telegramBusy">تأیید رمز</button>
+            </div>
+          </div>
+        </div>
+        <div class="field">
+          <label>📧 جیمیل</label>
+          <div class="field field--switch">
+            <label for="set-gm-enabled">فعال</label>
+            <input id="set-gm-enabled" type="checkbox" class="switch" x-model="form.gmail.enabled">
+          </div>
+          <input x-model="form.gmail.username" placeholder="آدرس جیمیل (برای IMAP/SMTP)" dir="ltr" aria-label="آدرس جیمیل">
+          <div class="field__row">
+            <input x-model="form.gmail.credentials_file" placeholder="credentials.json (مسیر یا نام فایل)" dir="ltr" aria-label="فایل اعتبار OAuth">
+            <input x-model="form.gmail.token_file" placeholder="token_file (اختیاری)" dir="ltr" aria-label="فایل توکن">
+          </div>
+          <input x-model="form.gmail.app_password" type="password" placeholder="App Password ۱۶ رقمی (مسیر جایگزین)" dir="ltr" autocomplete="off">
+          <p class="field__hint">
+            روش ترجیحی: در Google Cloud Console یک OAuth Client (Desktop app) بسازید و
+            credentials.json را در پوشهٔ داده بگذارید. بدون OAuth می‌توانید «App Password» گوگل را
+            (با فعال‌کردن تأیید دومرحله‌ای) در اینجا وارد کنید.
+          </p>
+          <div class="field__row">
+            <button class="btn btn--ghost btn--sm" type="button" @click="connectGmail()" :disabled="gmailBusy">
+              <span x-show="!gmailBusy">🔌 اتصال به جیمیل</span>
+              <span x-show="gmailBusy" x-cloak>در حال اتصال…</span>
+            </button>
+            <button class="btn btn--ghost btn--sm" type="button" @click="disconnectGmail()" x-show="gmailConnected" x-cloak>قطع اتصال</button>
+            <span class="field__hint" x-text="gmailStateLabel"></span>
+          </div>
+        </div>
+        <div class="field field--danger">
+          <div class="field__row">
+            <label for="set-fullaccess">🛡 دسترسی کامل سیستم (Admin/Root)</label>
+            <input id="set-fullaccess" type="checkbox" class="switch" x-model="fullAccessWanted" @change="onFullAccessToggle()">
+          </div>
+          <p class="field__hint">
+            وقتی فعال باشد، ایجنت می‌تواند هر پوشه‌ای از سیستم را بخواند/بنویسد و شل را در هر
+            جایی اجرا کند. فایل‌های حساس (.ssh، .env، credentials و...) در هر حالتی مسدود می‌مانند
+            و کارهای مخرب همچنان تأیید می‌گیرند.
+          </p>
+          <p class="field__hint" x-show="elevation && elevation !== 'admin' && elevation !== 'root'">
+            ⚠️ سطح دسترسی فعلی برنامه: <strong x-text="elevationLabel"></strong> — برای مدیریت کامل
+            سیستم، برنامه را «به‌عنوان administrator» (ویندوز) یا با sudo (لینوکس) اجرا کنید.
+            <button class="btn btn--ghost btn--sm" type="button" @click="restartElevated()" :disabled="elevating">
+              <span x-show="!elevating">↻ اجرای دوباره به‌عنوان administrator</span>
+              <span x-show="elevating" x-cloak>در حال اجرا…</span>
+            </button>
+          </p>
+          <div class="purge-confirm" x-show="fullAccessArmed" x-cloak>
+            <p class="purge-confirm__warn">⚠️ مطمئن هستید؟ دسترسی کامل سیستم به ایجنت می‌دهد همهٔ فایل‌های شما را مدیریت کند.</p>
+            <div class="field__row">
+              <button class="btn btn--danger btn--sm" type="button" @click="confirmFullAccess()">بله، فعال کن</button>
+              <button class="btn btn--ghost btn--sm" type="button" @click="cancelFullAccess()">انصراف</button>
+            </div>
+          </div>
         </div>
         <div class="field field--switch">
           <label for="set-sound">صدای اعلان</label>

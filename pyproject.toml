@@ -38,6 +38,14 @@ desktop = [
   "uiautomation>=2.0; sys_platform == 'win32'",
 ]
 
+# Gmail (OAuth2 installed-app).  Kept out of the base install so the
+# Windows build stays light; the IMAP/SMTP App-Password fallback needs
+# nothing extra.
+gmail = [
+  "google-api-python-client>=2.100",
+  "google-auth-oauthlib>=1.1",
+]
+
 # The native window + tray icon.
 app = [
   "persian-ollama-coding-agent[desktop]",

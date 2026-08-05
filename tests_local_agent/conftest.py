@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import socket
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -10,6 +12,53 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import pytest
+import requests
+
+
+def _free_port() -> int:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+def _wait_for_server(server, *, timeout: float = 5.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            r = requests.get(f"http://127.0.0.1:{server.port}/", timeout=1)
+            if r.status_code == 200:
+                return True
+        except requests.RequestException:
+            pass
+        time.sleep(0.1)
+    return False
+
+
+@pytest.fixture
+def web_server(tmp_path: Path):
+    """A real FastAPI web server with an in-process Bridge."""
+    from local_agent.bridge.server.server import BridgeServer
+    from local_agent.core.config import AssistantSettings
+    from local_agent.web.app import WebServer
+
+    settings = AssistantSettings(data_dir=tmp_path, work_dir=tmp_path)
+    bridge = BridgeServer(settings)
+    bridge.start_in_process()
+    from local_agent.bridge.api.client import BridgeClient, _InProcessBackend, _welcome_to_info
+
+    backend = _InProcessBackend(bridge)
+    backend._started = True
+    client = BridgeClient(backend, _welcome_to_info(bridge.welcome()))
+
+    server = WebServer(settings, client, host="127.0.0.1", port=_free_port())
+    server.start_in_thread()
+    if not _wait_for_server(server):
+        server.stop()
+        pytest.fail("web server did not start")
+    yield server
+    server.stop()
 
 
 @pytest.fixture(autouse=True)

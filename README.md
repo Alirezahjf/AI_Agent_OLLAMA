@@ -274,6 +274,13 @@ persian-agent-bale
 
 ## معماری
 
+> **دو بستهٔ مجزا در این ریپو:** پوشهٔ `agent/` (قدیمی‌تر) همان ربات
+> تلگرام/بله است که در این README توضیح داده شده. پوشهٔ `local_agent/`
+> «دستیار محلی دسکتاپ» (Bridge + وب‌اپ FastAPI + CLI + اپ دسکتاپ ویندوز)
+> است — راهنمای کاملش در [local_agent/README.md](local_agent/README.md)
+> است و از طریق `python local_agent_setup.py` نصب/اجرا می‌شود. هر دو
+> مستقل کار می‌کنند و کد مشترکی ندارند.
+
 ```text
 agent/config.py     تنظیمات محیطی و حدها
 agent/providers.py  adapterهای Ollama و OpenAI-compatible (GapGPT/AvalAI)
