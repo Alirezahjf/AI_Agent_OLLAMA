@@ -99,8 +99,12 @@ class PersonalTelegram:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._connected = False
+        # Stepwise login state machine:
+        #   disconnected -> await_code -> await_2fa -> connected
+        self._login_state = "disconnected"
+        self._login_ctx: dict[str, Any] = {}
 
     # ---------------------------------------------------------------- I/O
 
@@ -111,6 +115,70 @@ class PersonalTelegram:
     @property
     def is_connected(self) -> bool:
         return self._connected
+
+    @property
+    def login_state(self) -> str:
+        """One of ``disconnected`` | ``await_code`` | ``await_2fa`` | ``connected``."""
+        return "connected" if self._connected else self._login_state
+
+    # ------------------------------------------------------ stepwise login
+
+    def start_login(self) -> dict[str, Any]:
+        """Begin the interactive login: connect the session and ask for an SMS code.
+
+        Returns ``{"state": "await_code", "message": ...}``.  The caller
+        then submits the code with :meth:`submit_code` and, if Telegram
+        asks for 2FA, :meth:`submit_password`.  A valid session file on
+        disk skips the code step entirely and returns ``connected``.
+        """
+        with self._lock:
+            if self._connected:
+                return {"state": "connected", "message": "already connected"}
+            if self._login_state != "disconnected":
+                return {"state": self._login_state, "message": "login already in progress"}
+            self._start_loop()
+            assert self._loop is not None
+            future = asyncio.run_coroutine_threadsafe(self._begin_login(), self._loop)
+            return future.result(timeout=180)
+
+    def submit_code(self, code: str) -> dict[str, Any]:
+        """Submit the SMS code received after :meth:`start_login`."""
+        with self._lock:
+            if self._connected:
+                return {"state": "connected", "message": "already connected"}
+            if self._login_state != "await_code":
+                raise TelegramError("هیچ درخواست کدی در جریان نیست؛ ابتدا اتصال را شروع کنید")
+            assert self._loop is not None
+            future = asyncio.run_coroutine_threadsafe(
+                self._submit_code(str(code or "").strip()), self._loop
+            )
+            return future.result(timeout=120)
+
+    def submit_password(self, password: str) -> dict[str, Any]:
+        """Submit the 2FA password when the code was accepted but 2FA is on."""
+        with self._lock:
+            if self._connected:
+                return {"state": "connected", "message": "already connected"}
+            if self._login_state != "await_2fa":
+                raise TelegramError("تلگرام رمز دوم‌مرحله‌ای نخواسته است")
+            assert self._loop is not None
+            future = asyncio.run_coroutine_threadsafe(
+                self._submit_password(str(password)), self._loop
+            )
+            return future.result(timeout=120)
+
+    def cancel_login(self) -> None:
+        """Abort an in-progress login and close the temporary session."""
+        with self._lock:
+            if self._login_state in {"await_code", "await_2fa"}:
+                assert self._loop is not None
+                future = asyncio.run_coroutine_threadsafe(self._abort_login(), self._loop)
+                try:
+                    future.result(timeout=15)
+                except Exception:  # noqa: BLE001
+                    pass
+            self._login_state = "disconnected"
+            self._login_ctx = {}
 
     def connect(self, *, code_callback=None, password_callback=None) -> str:
         """Connect and (if needed) complete the interactive login.
@@ -123,12 +191,16 @@ class PersonalTelegram:
         with self._lock:
             if self._connected:
                 return "already connected"
-            self._start_loop()
-            assert self._loop is not None
-            future = asyncio.run_coroutine_threadsafe(
-                self._connect(code_callback, password_callback), self._loop
-            )
-            return future.result(timeout=180)
+            result = self.start_login()
+            while result.get("state") == "await_code":
+                code = (code_callback or (lambda: input("Telegram code: ")))()
+                result = self.submit_code(code)
+            if result.get("state") == "await_2fa":
+                password = (password_callback or (lambda: input("2FA password: ")))()
+                result = self.submit_password(password)
+            if result.get("state") != "connected":
+                raise TelegramError(str(result.get("error") or result.get("message") or "login failed"))
+            return str(result.get("message") or "connected")
 
     def disconnect(self) -> None:
         with self._lock:
@@ -140,6 +212,8 @@ class PersonalTelegram:
                 future.result(timeout=15)
             except Exception:  # noqa: BLE001
                 pass
+            self._login_state = "disconnected"
+            self._login_ctx = {}
 
     # ----------------------------------------------------------- Actions
 
@@ -202,7 +276,7 @@ class PersonalTelegram:
 
     # -------------------------------------------------------- Async core
 
-    async def _connect(self, code_callback, password_callback) -> str:
+    async def _begin_login(self) -> dict[str, Any]:
         try:
             from telethon import TelegramClient  # type: ignore
         except ImportError as exc:
@@ -216,25 +290,78 @@ class PersonalTelegram:
             self._api_hash,
         )
         await client.connect()
-        if not await client.is_user_authorized():
-            code_callback = code_callback or (lambda: input("Telegram code: "))
-            sent = await client.send_code_request(self._phone)
-            code = str(code_callback() or "").strip()
-            try:
-                await client.sign_in(self._phone, code, phone_code_hash=sent.phone_code_hash)
-            except Exception as sign_in_exc:  # noqa: BLE001
-                # SessionPasswordNeededError means 2FA is on.
-                if "SessionPasswordNeededError" in type(sign_in_exc).__name__:
-                    pwd_callback = password_callback or (
-                        lambda: input("2FA password: ")
-                    )
-                    await client.sign_in(password=pwd_callback())
-                else:
-                    raise TelegramError(f"sign-in failed: {sign_in_exc}") from sign_in_exc
         self._client = client
+        if await client.is_user_authorized():
+            # Session file is already valid — no re-login needed.
+            self._login_state = "connected"
+            self._connected = True
+            me = await client.get_me()
+            return {
+                "state": "connected",
+                "message": f"connected as {getattr(me, 'username', None) or me.first_name}",
+            }
+        sent = await client.send_code_request(self._phone)
+        self._login_state = "await_code"
+        self._login_ctx = {"phone_code_hash": sent.phone_code_hash}
+        return {
+            "state": "await_code",
+            "message": "کد تأیید به تلگرام شما ارسال شد؛ آن را وارد کنید.",
+        }
+
+    async def _submit_code(self, code: str) -> dict[str, Any]:
+        if not code:
+            raise TelegramError("کد وارد نشده است")
+        client = self._client
+        if client is None:
+            raise TelegramError("ابتدا اتصال را شروع کنید")
+        phone_code_hash = self._login_ctx.get("phone_code_hash")
+        try:
+            await client.sign_in(self._phone, code, phone_code_hash=phone_code_hash)
+        except Exception as sign_in_exc:  # noqa: BLE001
+            # SessionPasswordNeededError means 2FA is on.
+            if "SessionPasswordNeededError" in type(sign_in_exc).__name__:
+                self._login_state = "await_2fa"
+                return {
+                    "state": "await_2fa",
+                    "message": "حساب شما رمز دوم‌مرحله‌ای (2FA) دارد؛ رمز را وارد کنید.",
+                }
+            if "PhoneCodeInvalidError" in type(sign_in_exc).__name__:
+                raise TelegramError("کد واردشده صحیح نیست؛ دوباره تلاش کنید")
+            raise TelegramError(f"ورود ناموفق بود: {sign_in_exc}") from sign_in_exc
+        return await self._finish_login()
+
+    async def _submit_password(self, password: str) -> dict[str, Any]:
+        if not password:
+            raise TelegramError("رمز 2FA وارد نشده است")
+        client = self._client
+        if client is None:
+            raise TelegramError("ابتدا اتصال را شروع کنید")
+        try:
+            await client.sign_in(password=password)
+        except Exception as sign_in_exc:  # noqa: BLE001
+            if "PasswordHashInvalidError" in type(sign_in_exc).__name__:
+                raise TelegramError("رمز 2FA صحیح نیست؛ دوباره تلاش کنید")
+            raise TelegramError(f"ورود با رمز 2FA ناموفق بود: {sign_in_exc}") from sign_in_exc
+        return await self._finish_login()
+
+    async def _finish_login(self) -> dict[str, Any]:
+        self._login_state = "connected"
         self._connected = True
-        me = await client.get_me()
-        return f"connected as {getattr(me, 'username', None) or me.first_name}"
+        me = await self._get_me()
+        return {
+            "state": "connected",
+            "message": f"connected as {me.get('username') or me.get('first_name') or '?'}",
+            "user": me,
+        }
+
+    async def _abort_login(self) -> None:
+        if self._client is not None:
+            try:
+                await self._client.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+            self._client = None
+            self._connected = False
 
     async def _disconnect(self) -> None:
         if self._client is not None:

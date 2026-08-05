@@ -16,47 +16,6 @@ from local_agent.core.config import AssistantSettings
 from local_agent.web.app import WebServer, create_app
 
 
-def _free_port() -> int:
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    return port
-
-
-def _wait_for_server(server: WebServer, *, timeout: float = 5.0) -> bool:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            r = requests.get(f"http://127.0.0.1:{server.port}/", timeout=1)
-            if r.status_code == 200:
-                return True
-        except requests.RequestException:
-            pass
-        time.sleep(0.1)
-    return False
-
-
-@pytest.fixture
-def web_server(tmp_path: Path) -> WebServer:
-    settings = AssistantSettings(data_dir=tmp_path, work_dir=tmp_path)
-    bridge = BridgeServer(settings)
-    bridge.start_in_process()
-    # Reuse the existing bridge for the web client
-    from local_agent.bridge.api.client import BridgeClient, _InProcessBackend, _welcome_to_info
-    backend = _InProcessBackend(bridge)
-    backend._started = True
-    client = BridgeClient(backend, _welcome_to_info(bridge.welcome()))
-
-    server = WebServer(settings, client, host="127.0.0.1", port=_free_port())
-    server.start_in_thread()
-    if not _wait_for_server(server):
-        server.stop()
-        pytest.fail("web server did not start")
-    yield server
-    server.stop()
-
-
 def test_root_endpoint_returns_html(web_server: WebServer) -> None:
     r = requests.get(f"http://127.0.0.1:{web_server.port}/", timeout=3)
     assert r.status_code == 200
@@ -394,6 +353,8 @@ def test_api_settings_persists_to_disk(web_server: WebServer, tmp_path: Path) ->
 @pytest.fixture
 def purge_server(tmp_path: Path) -> WebServer:
     """A web server whose data dir lives fully inside tmp_path."""
+    from tests_local_agent.conftest import _free_port, _wait_for_server
+
     data_dir = tmp_path / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "config.json").write_text("{}", encoding="utf-8")
@@ -603,3 +564,116 @@ def test_artifact_windows_path_with_cwd_equal_workdir_regression(
     for escape in ("..\\..\\etc\\passwd", "screenshots/../../../etc/passwd"):
         blocked = requests.get(base + "/api/artifact", params={"path": escape}, timeout=3)
         assert blocked.status_code in {403, 404}, f"{escape} باید مسدود شود"
+
+
+# ---------------------------------------------------------------------------
+# P1 — personal Telegram connect flow over HTTP
+# ---------------------------------------------------------------------------
+
+
+def test_telegram_connect_without_credentials_returns_guidance(
+    web_server: WebServer,
+) -> None:
+    base = f"http://127.0.0.1:{web_server.port}"
+    r = requests.post(base + "/api/telegram/connect", timeout=5)
+    assert r.status_code == 400
+    body = r.json()
+    assert "my.telegram.org" in body.get("detail", "")
+    assert "config" in body.get("detail", "")
+
+
+def test_telegram_verify_without_login_flow_returns_400(web_server: WebServer) -> None:
+    base = f"http://127.0.0.1:{web_server.port}"
+    r = requests.post(base + "/api/telegram/verify", json={"code": "12345"}, timeout=5)
+    assert r.status_code == 400
+
+
+def test_telegram_full_login_flow_over_http(
+    web_server: WebServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """await_code -> await_2fa -> connected, driven purely over HTTP."""
+    import sys
+
+    import telethon
+
+    # Persist credentials through the settings endpoint first.
+    base = f"http://127.0.0.1:{web_server.port}"
+    r = requests.post(
+        base + "/api/settings",
+        json={
+            "telegram": {
+                "enabled": True,
+                "api_id": 12345,
+                "api_hash": "h" * 32,
+                "phone": "+10000000000",
+            }
+        },
+        timeout=5,
+    )
+    assert r.status_code == 200
+
+    # --- fake telethon client with 2FA -------------------------------
+    class _FakeUser:
+        id = 1
+        first_name = "Test"
+        username = "tester"
+        last_name = ""
+        phone = "+10000000000"
+
+    class _FakeTele:
+        def __init__(self, *args, **kwargs) -> None:
+            self.authorized = False
+            self.password_prompted = False
+
+        async def connect(self) -> None:
+            pass
+
+        async def is_user_authorized(self) -> bool:
+            return self.authorized
+
+        async def send_code_request(self, phone: str) -> Any:
+            return type("Sent", (), {"phone_code_hash": "hash"})()
+
+        async def sign_in(self, *args, **kwargs) -> _FakeUser:
+            if not kwargs.get("password"):
+                from telethon.errors import SessionPasswordNeededError
+
+                self.password_prompted = True
+                raise SessionPasswordNeededError(request=None)
+            self.authorized = True
+            return _FakeUser()
+
+        async def get_me(self) -> _FakeUser:
+            return _FakeUser()
+
+        async def disconnect(self) -> None:
+            pass
+
+    telethon_module = sys.modules.get("telethon") or telethon
+    monkeypatch.setattr(telethon_module, "TelegramClient", _FakeTele)
+
+    # --- state machine ------------------------------------------------
+    r = requests.post(base + "/api/telegram/connect", timeout=15)
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "await_code"
+
+    r = requests.post(base + "/api/telegram/verify", json={"code": "12345"}, timeout=15)
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "await_2fa"
+
+    r = requests.post(base + "/api/telegram/verify", json={"password": "p4ss"}, timeout=15)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["state"] == "connected"
+    assert body["connected"] is True
+
+    # Status now reports the connected client.
+    status = requests.get(base + "/api/status", timeout=5).json()
+    s = status["settings"]["settings"]
+    assert s["telegram_connected"] is True
+    assert s["telegram_state"] == "connected"
+
+    # Disconnect resets it.
+    r = requests.post(base + "/api/telegram/disconnect", timeout=5)
+    assert r.status_code == 200
+    assert r.json()["connected"] is False

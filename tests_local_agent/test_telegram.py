@@ -89,6 +89,7 @@ class _FakeTelegramClient:
         self.search_results: list[_FakeMessage] = []
         self.sent: list[tuple[Any, str]] = []
         self.uploaded: list[tuple[Any, str]] = []
+        self.password_prompted = False
 
     async def connect(self) -> None:
         self.connected = True
@@ -141,11 +142,22 @@ class _FakeTelegramClient:
             yield message
 
 
-@pytest.fixture
-def patched_telethon(monkeypatch: pytest.MonkeyPatch) -> _FakeTelegramClient:
+class _FakeTelegramClient2FA(_FakeTelegramClient):
+    """Same fake, but the account has 2FA enabled."""
+
+    async def sign_in(self, *args, **kwargs) -> Any:
+        if not kwargs.get("password"):
+            from telethon.errors import SessionPasswordNeededError
+
+            self.password_prompted = True
+            raise SessionPasswordNeededError(request=None)
+        self.authorized = True
+        return self.user
+
+
+def _patch_telethon(monkeypatch: pytest.MonkeyPatch, fake: _FakeTelegramClient) -> _FakeTelegramClient:
     """Replace telethon.TelegramClient with our fake."""
     import sys
-    fake = _FakeTelegramClient()
 
     class _FakeTelegramClientClass:
         def __init__(self, *args, **kwargs) -> None:
@@ -162,6 +174,18 @@ def patched_telethon(monkeypatch: pytest.MonkeyPatch) -> _FakeTelegramClient:
     telethon_module = sys.modules.get("telethon") or telethon
     monkeypatch.setattr(telethon_module, "TelegramClient", _FakeTelegramClientClass)
     return fake
+
+
+@pytest.fixture
+def patched_telethon(monkeypatch: pytest.MonkeyPatch) -> _FakeTelegramClient:
+    """Replace telethon.TelegramClient with our fake."""
+    return _patch_telethon(monkeypatch, _FakeTelegramClient())
+
+
+@pytest.fixture
+def patched_telethon_2fa(monkeypatch: pytest.MonkeyPatch) -> _FakeTelegramClient:
+    """Same, but the fake account requires a 2FA password."""
+    return _patch_telethon(monkeypatch, _FakeTelegramClient2FA())
 
 
 def test_connect_succeeds(patched_telethon: _FakeTelegramClient, tmp_path: Path) -> None:
@@ -293,3 +317,112 @@ def test_search_messages_returns_results(patched_telethon: _FakeTelegramClient, 
     messages = client.search_messages("Alice", "hit", limit=10)
     assert len(messages) == 2
     assert messages[0].text == "first hit"
+
+
+# ---------------------------------------------------------------------------
+# Stepwise login (web UI state machine): await_code -> await_2fa -> connected
+# ---------------------------------------------------------------------------
+
+
+def _client(tmp_path: Path) -> PersonalTelegram:
+    return PersonalTelegram(
+        api_id=12345,
+        api_hash="hash",
+        phone="+10000000000",
+        session_path=tmp_path / "tg.session",
+    )
+
+
+def test_stepwise_login_code_then_connected(patched_telethon: _FakeTelegramClient, tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    first = client.start_login()
+    assert first["state"] == "await_code"
+    assert client.login_state == "await_code"
+
+    second = client.submit_code("12345")
+    assert second["state"] == "connected"
+    assert client.is_connected
+    assert client.login_state == "connected"
+    assert "user" in second
+
+
+def test_stepwise_login_with_2fa(patched_telethon_2fa: _FakeTelegramClient, tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    assert client.start_login()["state"] == "await_code"
+    # Code accepted, but Telegram asks for the 2FA password next.
+    second = client.submit_code("12345")
+    assert second["state"] == "await_2fa"
+    assert client.login_state == "await_2fa"
+    assert not client.is_connected
+
+    third = client.submit_password("secret-password")
+    assert third["state"] == "connected"
+    assert client.is_connected
+    assert patched_telethon_2fa.password_prompted
+
+
+def test_submit_code_without_started_login_raises(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    with pytest.raises(TelegramError):
+        client.submit_code("12345")
+
+
+def test_wrong_2fa_password_raises_and_stays_await_2fa(
+    patched_telethon_2fa: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    from telethon.errors import PasswordHashInvalidError
+
+    real_sign_in = patched_telethon_2fa.sign_in
+
+    async def reject_password(*args, **kwargs) -> Any:
+        if kwargs.get("password"):
+            raise PasswordHashInvalidError(request=None)
+        return await real_sign_in(*args, **kwargs)
+
+    patched_telethon_2fa.sign_in = reject_password
+    client = _client(tmp_path)
+    client.start_login()
+    client.submit_code("12345")
+    with pytest.raises(TelegramError):
+        client.submit_password("wrong")
+    assert client.login_state == "await_2fa"
+
+
+def test_cancel_login_aborts_flow(patched_telethon: _FakeTelegramClient, tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    client.start_login()
+    assert client.login_state == "await_code"
+    client.cancel_login()
+    assert client.login_state == "disconnected"
+    with pytest.raises(TelegramError):
+        client.submit_code("12345")
+
+
+def test_session_reuse_skips_code(patched_telethon: _FakeTelegramClient, tmp_path: Path) -> None:
+    """A valid session file must reconnect without any login round-trip."""
+    patched_telethon.authorized = True
+    client = _client(tmp_path)
+    result = client.start_login()
+    assert result["state"] == "connected"
+    assert client.is_connected
+    # send_code_request was never called (session file was reused).
+    assert not hasattr(patched_telethon, "_phone")
+
+
+def test_connect_callback_flow_with_2fa(
+    patched_telethon_2fa: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    client = _client(tmp_path)
+    calls: list[str] = []
+
+    def code_cb() -> str:
+        calls.append("code")
+        return "12345"
+
+    def password_cb() -> str:
+        calls.append("password")
+        return "p4ss"
+
+    status = client.connect(code_callback=code_cb, password_callback=password_cb)
+    assert "connected" in status.lower()
+    assert calls == ["code", "password"]

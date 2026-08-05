@@ -69,6 +69,7 @@ class EventType(str, Enum):
     CHAT_DONE = "chat_done"
     CHAT_FAILED = "chat_failed"
     LOG = "log"
+    TELEGRAM_STATE = "telegram_state"
 
 
 @dataclass

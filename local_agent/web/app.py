@@ -51,6 +51,7 @@ from pydantic import BaseModel
 
 from ..bridge import BridgeClient
 from ..core.config import AssistantSettings
+from ..core.errors import AssistantError
 from ..core.logging_setup import get_logger, setup_logging
 from ..utils.paths import web_static_dir, web_templates_dir
 
@@ -86,6 +87,12 @@ class SettingsRequest(BaseModel):
     openai_base_url: str | None = None
     openai_api_key: str | None = None
     confirm_mode: str | None = None
+    work_dir: str | None = None
+    full_system_access: bool | None = None
+    # ``telegram`` / ``gmail`` accept a partial dict; only the given keys
+    # are applied (blank secret fields keep their stored value).
+    telegram: dict[str, Any] | None = None
+    gmail: dict[str, Any] | None = None
 
 
 class UploadRequest(BaseModel):
@@ -104,6 +111,11 @@ class PurgeRequest(BaseModel):
     # Exit the process after a successful wipe so the running app cannot
     # recreate the data directory it just deleted.
     shutdown: bool = True
+
+
+class TelegramVerifyRequest(BaseModel):
+    code: str | None = None
+    password: str | None = None
 
 
 def _schedule_process_exit(delay: float = 0.8) -> None:
@@ -216,6 +228,30 @@ def resolve_artifact_path(work_dir: Path, data_dir: Path, candidate: str) -> Pat
 def _server_of(client: BridgeClient) -> Any:
     backend = getattr(client, "_backend", None)
     return getattr(backend, "_server", None) if backend else None
+
+
+def _coerce_telegram_field(key: str, raw: Any) -> Any:
+    if key == "enabled" or key == "confirm_send":
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in {"true", "1", "yes", "on"}
+    if key == "api_id":
+        try:
+            return int(str(raw).strip())
+        except ValueError as exc:
+            raise HTTPException(400, "api_id باید عدد باشد") from exc
+    if key == "session_name":
+        value = str(raw).strip()
+        return value or "assistant"
+    return str(raw).strip()
+
+
+def _coerce_gmail_field(key: str, raw: Any) -> Any:
+    if key == "enabled" or key == "confirm_send":
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().lower() in {"true", "1", "yes", "on"}
+    return str(raw).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -419,35 +455,158 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
 
     @app.post("/api/settings")
     async def update_settings(req: SettingsRequest) -> dict[str, Any]:
-        payload: dict[str, Any] = {}
-        if req.provider:
-            payload["provider"] = req.provider
-        if req.model:
-            payload["model"] = req.model
+        """Apply + persist every setting the UI can edit.
+
+        Everything goes through ``BridgeHandlers._apply_settings`` so the
+        runtime, the tool context and ``config.json`` stay in sync, and
+        the write is atomic.  Secret values are never echoed back.
+        """
         server = _server_of(client)
-        if server is not None and (req.openai_base_url or req.openai_api_key or req.confirm_mode):
-            handlers = server.handlers
-            llm = dict(handlers.settings.llm.__dict__)
-            if req.openai_base_url:
-                llm["openai_base_url"] = req.openai_base_url
-            if req.openai_api_key:
-                llm["openai_api_key"] = req.openai_api_key
-            new_llm = type(handlers.settings.llm)(**llm)
-            new_settings = handlers.settings.with_overrides(llm=new_llm)
-            if req.confirm_mode in {"destructive", "always", "never"}:
-                safety = dict(handlers.settings.safety.__dict__)
-                safety["confirm_mode"] = req.confirm_mode
+        if server is None:
+            payload: dict[str, Any] = {}
+            if req.provider:
+                payload["provider"] = req.provider
+            if req.model:
+                payload["model"] = req.model
+            if not payload:
+                return {"provider": "", "model": ""}
+            try:
+                return client.set_model(**payload)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(400, str(exc))
+
+        handlers = server.handlers
+        new_settings = handlers.settings
+
+        # ---- LLM ------------------------------------------------------
+        llm_dict = dict(new_settings.llm.__dict__)
+        llm_changed = False
+        if req.provider:
+            llm_dict["provider"] = req.provider
+            llm_changed = True
+        if req.model:
+            llm_dict["ollama_model"] = req.model
+            llm_dict["openai_model"] = req.model
+            llm_changed = True
+        if req.openai_base_url is not None:
+            llm_dict["openai_base_url"] = req.openai_base_url.strip()
+            llm_changed = True
+        if req.openai_api_key is not None and req.openai_api_key.strip():
+            llm_dict["openai_api_key"] = req.openai_api_key.strip()
+            llm_changed = True
+        if llm_changed:
+            new_settings = new_settings.with_overrides(
+                llm=type(new_settings.llm)(**llm_dict)
+            )
+
+        # ---- safety ---------------------------------------------------
+        safety_dict = dict(new_settings.safety.__dict__)
+        safety_changed = False
+        if req.confirm_mode in {"destructive", "always", "never"}:
+            safety_dict["confirm_mode"] = req.confirm_mode
+            safety_changed = True
+        if req.full_system_access is not None:
+            safety_dict["full_system_access"] = bool(req.full_system_access)
+            safety_changed = True
+        if safety_changed:
+            new_settings = new_settings.with_overrides(
+                safety=type(new_settings.safety)(**safety_dict)
+            )
+
+        # ---- work dir (created on demand) ------------------------------
+        if req.work_dir is not None and req.work_dir.strip():
+            target = Path(req.work_dir).expanduser()
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise HTTPException(400, f"ساخت پوشهٔ کاری ممکن نشد: {exc}")
+            new_settings = new_settings.with_overrides(work_dir=target)
+
+        # ---- telegram --------------------------------------------------
+        if req.telegram:
+            tg_dict = dict(new_settings.telegram.__dict__)
+            tg_changed = False
+            for key in ("enabled", "api_id", "api_hash", "phone", "session_name", "confirm_send"):
+                if key in req.telegram:
+                    raw = req.telegram[key]
+                    if key == "api_hash" and (not raw or not str(raw).strip()):
+                        continue  # blank = keep the stored hash
+                    tg_dict[key] = _coerce_telegram_field(key, raw)
+                    tg_changed = True
+            if tg_changed:
                 new_settings = new_settings.with_overrides(
-                    safety=type(handlers.settings.safety)(**safety)
+                    telegram=type(new_settings.telegram)(**tg_dict)
                 )
-            handlers.settings = new_settings
-            handlers._persist_settings()
-        if not payload:
-            return {"provider": req.provider or "", "model": req.model or ""}
+
+        # ---- gmail -----------------------------------------------------
+        if req.gmail:
+            gm_dict = dict(new_settings.gmail.__dict__)
+            gm_changed = False
+            for key in ("enabled", "credentials_file", "token_file", "app_password", "confirm_send"):
+                if key in req.gmail:
+                    raw = req.gmail[key]
+                    if key == "app_password" and (not raw or not str(raw).strip()):
+                        continue  # blank = keep the stored password
+                    gm_dict[key] = _coerce_gmail_field(key, raw)
+                    gm_changed = True
+            if gm_changed:
+                new_settings = new_settings.with_overrides(
+                    gmail=type(new_settings.gmail)(**gm_dict)
+                )
+
+        handlers._apply_settings(new_settings)
+        llm = new_settings.llm
+        model = llm.openai_model if llm.provider != "ollama" else llm.ollama_model
+        return {
+            "provider": llm.provider,
+            "model": model or "",
+            "saved": {
+                "work_dir": str(new_settings.work_dir),
+                "confirm_mode": new_settings.safety.confirm_mode,
+                "full_system_access": bool(new_settings.safety.full_system_access),
+                "telegram_enabled": bool(new_settings.telegram.enabled),
+                "gmail_enabled": bool(new_settings.gmail.enabled),
+                # API key is only acknowledged, never returned.
+                "openai_api_key_set": bool(llm.openai_api_key),
+            },
+        }
+
+    @app.post("/api/telegram/connect")
+    async def telegram_connect() -> dict[str, Any]:
+        """Start the personal-Telegram login flow (state: await_code → await_2fa → connected)."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "telegram needs an in-process bridge")
         try:
-            return client.set_model(**payload)
-        except Exception as exc:  # noqa: BLE001
+            return server.handlers.start_telegram_login()
+        except AssistantError as exc:
             raise HTTPException(400, str(exc))
+
+    @app.post("/api/telegram/verify")
+    async def telegram_verify(req: TelegramVerifyRequest) -> dict[str, Any]:
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "telegram needs an in-process bridge")
+        state = server.handlers.telegram_status()["state"]
+        try:
+            if state == "await_code":
+                if not req.code:
+                    raise HTTPException(400, "کد تأیید را وارد کنید")
+                return server.handlers.submit_telegram_code(req.code)
+            if state == "await_2fa":
+                if not req.password:
+                    raise HTTPException(400, "رمز دوم‌مرحله‌ای (2FA) را وارد کنید")
+                return server.handlers.submit_telegram_password(req.password)
+            raise HTTPException(400, "هیچ فرایند ورودی در جریان نیست؛ دکمهٔ اتصال تلگرام را بزنید")
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.post("/api/telegram/disconnect")
+    async def telegram_disconnect() -> dict[str, Any]:
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "telegram needs an in-process bridge")
+        return server.handlers.disconnect_telegram()
 
     @app.post("/api/chat")
     async def chat(req: ChatRequest) -> dict[str, Any]:

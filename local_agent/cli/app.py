@@ -35,7 +35,6 @@ from ..core.errors import ActionRefused, AssistantError, DependencyMissing
 from ..core.logging_setup import get_logger, setup_logging
 from ..llm import LLMClient, create_client
 from ..llm.client import ToolDefinition
-from ..telegram import PersonalTelegram
 from .render import Renderer
 from .prompts import build_system_prompt
 
@@ -332,12 +331,73 @@ class _REPL:
         self.renderer.info(f"screenshot saved: {target}  ({image.width}x{image.height})")
 
     def _cmd_telegram(self, args: list[str]) -> None:
-        if not args or args[0] == "status":
-            status = self.client.get_status()
-            tg = status.get("settings", {}).get("telegram_enabled")
-            self.renderer.info(f"telegram enabled: {tg}")
+        """/telegram connect | status | disconnect | chats"""
+        sub = args[0] if args else "status"
+        handlers = self._bridge_handlers()
+        if handlers is None:
+            self.renderer.warn("bridge in-process در دسترس نیست")
             return
-        self.renderer.warn("telegram interactions go through chat; ask the agent to send a message.")
+        try:
+            if sub == "status":
+                self._telegram_status(handlers)
+            elif sub == "connect":
+                self._telegram_connect(handlers)
+            elif sub == "disconnect":
+                result = handlers.disconnect_telegram()
+                self.renderer.info(f"تلگرام قطع شد (state={result.get('state')})")
+            elif sub == "chats":
+                self._telegram_chats(handlers)
+            else:
+                self.renderer.warn("usage: /telegram connect | status | disconnect | chats")
+        except AssistantError as exc:
+            self.renderer.warn(str(exc))
+
+    def _bridge_handlers(self) -> Any:
+        """Reach the in-process BridgeHandlers from the CLI client."""
+        backend = getattr(self.client, "_backend", None)
+        server = getattr(backend, "_server", None)
+        return getattr(server, "handlers", None) if server is not None else None
+
+    def _telegram_status(self, handlers: Any) -> None:
+        state = handlers.telegram_status()
+        self.renderer.section("تلگرام شخصی")
+        self.renderer.info(f"  enabled: {state['enabled']}")
+        self.renderer.info(f"  state: {state['state']}")
+        self.renderer.info(f"  connected: {state['connected']}")
+        self.renderer.info(f"  phone: {state['phone'] or '—'}")
+        self.renderer.info(f"  session: {state['session_path']}")
+        if not state["has_credentials"]:
+            self.renderer.warn(
+                "  credential تنظیم نشده است. از https://my.telegram.org یک app بسازید و "
+                "api_id / api_hash / phone را در config.json (یا از چت با «به تلگرامم وصل شو») ثبت کنید."
+            )
+
+    def _telegram_connect(self, handlers: Any) -> None:
+        self.renderer.info("در حال اتصال به تلگرام شخصی…")
+        try:
+            result = handlers.connect_telegram(
+                code_callback=lambda: self.renderer.prompt("کد تأیید تلگرام (SMS)"),
+                password_callback=lambda: self.renderer.prompt("رمز دوم‌مرحله‌ای (2FA)"),
+            )
+        except AssistantError as exc:
+            self.renderer.warn(f"اتصال ناموفق بود: {exc}")
+            return
+        self.renderer.info(f"✅ {result.get('message', 'connected')}")
+
+    def _telegram_chats(self, handlers: Any) -> None:
+        client = handlers.telegram
+        if client is None or not client.is_connected:
+            self.renderer.warn("تلگرام وصل نیست؛ اول /telegram connect")
+            return
+        try:
+            chats = client.list_chats(limit=30)
+        except Exception as exc:  # noqa: BLE001
+            self.renderer.warn(f"گرفتن لیست گفتگوها ناموفق بود: {exc}")
+            return
+        self.renderer.section("گفتگوهای اخیر")
+        for chat in chats:
+            group = " [گروه]" if chat.is_group else ""
+            self.renderer.info(f"  • {chat.title} (id={chat.id}){group}")
 
     def _cmd_send(self, args: list[str]) -> None:
         if len(args) < 2:
