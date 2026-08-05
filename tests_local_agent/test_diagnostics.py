@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import types
 import sys
 from pathlib import Path
 
@@ -307,13 +308,15 @@ def test_check_port_other_program(monkeypatch):
 
 
 def test_check_encoding_utf8(monkeypatch):
-    monkeypatch.setattr(sys.stdout, "encoding", "utf-8")
+    # sys.stdout.encoding is read-only; mock the whole stdout object instead.
+    monkeypatch.setattr(dx.sys, "stdout", types.SimpleNamespace(encoding="utf-8"))
     result = dx.check_encoding()
     assert result.status == dx.OK
+    assert result.data.get("encoding") == "utf8"
 
 
 def test_check_encoding_cp720_warns(monkeypatch):
-    monkeypatch.setattr(sys.stdout, "encoding", "cp720")
+    monkeypatch.setattr(dx.sys, "stdout", types.SimpleNamespace(encoding="cp720"))
     result = dx.check_encoding()
     assert result.status == dx.WARN
     assert "OutputEncoding" in result.hint or "PowerShell" in result.hint
