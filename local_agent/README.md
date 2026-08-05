@@ -182,31 +182,64 @@ python -m local_agent
 ### ۵) (اختیاری) اتصال تلگرام شخصی
 
 در [my.telegram.org](https://my.telegram.org) یک app بسازید و `api_id` و
-`api_hash` بگیرید. سپس در `config.json`:
+`api_hash` بگیرید (یک بار برای همهٔ اکانت‌ها کافی است). سپس در
+`config.json`:
 
 ```json
 {
   "telegram": {
     "enabled": true,
-    "api_id": 123456,
-    "api_hash": "abcdef1234567890abcdef",
-    "phone": "+98912..."
+    "active_account": "اصلی",
+    "accounts": [
+      {
+        "name": "اصلی",
+        "enabled": true,
+        "api_id": 123456,
+        "api_hash": "abcdef1234567890abcdef",
+        "phone": "+98912...",
+        "session_name": "main",
+        "confirm_send": true
+      },
+      {
+        "name": "کار",
+        "enabled": true,
+        "api_id": 123456,
+        "api_hash": "abcdef1234567890abcdef",
+        "phone": "+98915...",
+        "session_name": "work",
+        "confirm_send": false
+      }
+    ]
   }
 }
 ```
 
-سپس در CLI بنویسید:
+با این ساختار چند اکانت دارید؛ هر اکانت یک **سشن جدا** در
+`data_dir/sessions/<session_name>.session` دارد و مستقل لاگین می‌شود.
+(اگر فیلد `accounts` خالی باشد، از فیلدهای قدیمیِ تک‌اکانتی
+`enabled/api_id/api_hash/phone/...` یک اکانت به نام «اصلی» ساخته می‌شود؛
+بنابراین configهای قبلی بدون تغییر کار می‌کنند.)
+
+سپس در CLI:
 
 ```
-/telegram connect
+/telegram list              لیست اکانت‌ها و اکانت فعال
+/telegram use کار           تعویض اکانت فعال
+/telegram connect [name]    اتصال به اکانت (کد SMS و در صورت نیاز 2FA)
+/telegram status [name]     وضعیت یک اکانت
+/telegram disconnect [name] قطع اتصال
+/telegram chats             لیست چت‌های اکانت فعال
 ```
 
 یک‌بار SMS code از شما می‌پرسد (و اگر حساب 2FA دارد، رمز دوم‌مرحله‌ای)؛
-session در `data_dir/<session_name>.session` ذخیره می‌شود و بعد از
+سشن در `data_dir/sessions/<session_name>.session` ذخیره می‌شود و بعد از
 ری‌استارت **بدون لاگین دوباره** وصل می‌مانید.
 
-در رابط وب هم مودال تنظیمات → بخش «📱 تلگرام شخصی» همین فلوی
-`await_code → await_2fa → connected` را دارد (دکمهٔ «اتصال به تلگرام»).
+در رابط وب هم مودال تنظیمات → بخش «📱 تلگرام شخصی» فلوی
+`await_code → await_2fa → connected` را دارد (دکمهٔ «اتصال به تلگرام»)،
+یک منوی اکانت‌ها (نام/شماره/وضعیت + دکمهٔ «اتصال» و «فعال کن») برای
+چند-اکانتی، و سوییچ **«تأیید قبل از ارسال پیام تلگرام»** که معادل
+`telegram.confirm_send` است.
 
 **خود-تنظیم با چت:** اگر به ایجنت بگویید «به تلگرامم وصل شو»، خودش چک
 می‌کند که `api_id`/`api_hash`/`phone` ثبت شده‌اند یا نه؛ اگر نه، از شما
@@ -455,18 +488,42 @@ python local_agent_setup.py build-desktop --installer  # + اینستالر
 - `get_screen_size()`
 
 ### تلگرام شخصی (نیاز به `/telegram connect` یا دکمهٔ اتصال در وب)
+همهٔ اکشن‌ها یک پارامتر اختیاری `account` دارند (پیش‌فرض: اکانت فعال) و
+اکشن‌های ارسال به `confirm_send` همان اکانت احترام می‌گذارند.
+
+- `telegram.list_accounts()` — Safe
+- `telegram.switch_account(name)` — Safe
 - `telegram.list_chats(limit)` — Safe
 - `telegram.search_messages(chat, query, limit)` — Safe
 - `telegram.get_me()` — Safe
+- `telegram.search_contacts(query, limit)` — Safe
+- `telegram.get_chat_history(chat, limit, offset_id)` — Safe
+- `telegram.get_profile(chat)` — Safe (عکس → `data_dir/media/`)
+- `telegram.download_media(chat, msg_id, filename)` — Safe (به `data_dir/media/`)
+- `telegram.mark_read(chat)` — Safe
+- `telegram.resolve_username(username)` — Safe
 - `telegram.send_message(chat, text)` — Destructive (احترام به `telegram.confirm_send`)
 - `telegram.send_photo(chat, path, caption)` — Destructive
 - `telegram.send_file(chat, path, caption)` — Destructive
+- `telegram.send_video / send_voice / send_audio / send_document / send_sticker / send_animation` — Destructive
+- `telegram.send_location(chat, lat, lng)` — Destructive
+- `telegram.reply_to(chat, msg_id, text)` — Destructive
+- `telegram.forward_message(chat, from_chat, msg_id)` — Destructive
+
+«Saved Messages» خودِ شما با نام‌های «خودم» / «Saved Messages» / «saved»
+قابل هدف است. وقتی Telethon فعال است، ابزار `send_telegram_desktop`
+(GUI) از کار می‌افتد تا مدل فقط از `telegram.*` استفاده کند.
 
 ### جیمیل (نیاز به اتصال در مودال تنظیمات وب)
 - `gmail.list_unread(limit)` — Safe
 - `gmail.search(query, limit)` — Safe
-- `gmail.read(id)` — Safe
-- `gmail.send(to, subject, body)` — Destructive (احترام به `gmail.confirm_send`)
+- `gmail.read(id)` — Safe (متن کامل + فهرست پیوست‌ها)
+- `gmail.send(to, subject, body, attachments)` — Destructive (احترام به `gmail.confirm_send`)
+- `gmail.download_attachment(id, filename)` — Safe (به `data_dir/gmail/`)
+- `gmail.reply(id, body, attachments)` — Destructive
+
+سوییچ «تأیید قبل از ارسال ایمیل» در مودال تنظیمات وب معادل
+`gmail.confirm_send` است.
 
 ### تنظیمات (persist بین ری‌استارت‌ها)
 - `config_set(path, value)` — نوشتن هر تنظیم نقطه‌چین (مثل `telegram.api_id`
@@ -475,7 +532,15 @@ python local_agent_setup.py build-desktop --installer  # + اینستالر
 
 همهٔ تغییرات مودال تنظیمات وب (provider، مدل، کلید API، confirm mode،
 `work_dir`، تلگرام، جیمیل، `full_system_access`) بلافاصله در `config.json`
-ذخیره می‌شوند و بعد از ری‌استارت می‌مانند.
+ذخیره می‌شوند و بعد از ری‌استارت می‌مانند. فایل تنظیمات **یک منبع حقیقت**
+دارد: مسیر ثابت `LOCAL_AGENT_CONFIG` یا `~/.local_assistant/config.json`
+(مستقل از `data_dir`) و همیشه همان‌جا خوانده/نوشته می‌شود؛ `data_dir` فقط
+محل لاگ/تاریخچه/سشن/اسکرین‌شات است.
+
+**هر تب چت یک سشن مستقل است:** تاریخچهٔ هر تب در
+`data_dir/history/<session_id>.jsonl` ذخیره می‌شود و ران‌های تب‌های
+هم‌زمان با هم تداخل ندارند (حداکثر ۲۰ سشن زنده؛ سشن‌های ۲۴ ساعت
+بلااستفاده بسته می‌شوند).
 
 ---
 
