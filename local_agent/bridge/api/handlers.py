@@ -286,7 +286,7 @@ class BridgeHandlers:
                 "llm_model": self.settings.llm.ollama_model or self.settings.llm.openai_model,
                 "openai_base_url": self.settings.llm.openai_base_url,
                 "openai_api_key_set": bool(self.settings.llm.openai_api_key),
-                "telegram_enabled": telegram_state["enabled"],
+                "telegram_enabled": telegram_state["feature_enabled"],
                 "telegram_connected": telegram_state["connected"],
                 "telegram_state": telegram_state["state"],
                 "telegram_phone": telegram_state["phone"],
@@ -587,7 +587,12 @@ class BridgeHandlers:
         return name, self._telegram_accounts[name]
 
     def telegram_status(self, account: str | None = None) -> dict[str, Any]:
-        """Connection state for one account (default: active) — no secrets."""
+        """Connection state for one account (default: active) — no secrets.
+
+        ``enabled`` is the *per-account* flag; ``feature_enabled`` is the
+        global Telegram toggle.  The two are deliberately separate so the
+        UI can show «فعال» per account while the master switch stays global.
+        """
         tg = self.settings.telegram
         name = (account or tg.active_account) or "اصلی"
         acc = tg.account(name)
@@ -600,7 +605,8 @@ class BridgeHandlers:
             state = "disabled"
         return {
             "account": name,
-            "enabled": bool(tg.enabled),
+            "enabled": bool(acc.enabled),
+            "feature_enabled": bool(tg.enabled),
             "connected": bool(client and client.is_connected),
             "state": state,
             "phone": acc.phone,
@@ -610,24 +616,58 @@ class BridgeHandlers:
         }
 
     def telegram_accounts_status(self) -> dict[str, Any]:
-        """Status of every account (no secrets) plus the active one."""
+        """Status of every account (no secrets) plus the active one.
+
+        When settings were constructed directly (no ``accounts`` materialised
+        yet), the active account is synthesised so the UI never renders an
+        empty list.
+        """
         tg = self.settings.telegram
-        accounts = [self.telegram_status(a.name) for a in tg.accounts]
+        names = [a.name for a in tg.accounts]
+        if not names:
+            names = [tg.active_account or "اصلی"]
+        accounts = [self.telegram_status(name) for name in names]
         return {
             "enabled": bool(tg.enabled),
             "active_account": tg.active_account,
             "accounts": accounts,
         }
 
+    def _mark_account_enabled(self, name: str) -> None:
+        """Persist ``enabled=True`` for one account (and the feature).
+
+        Called the moment a login flow reaches ``connected`` so that after
+        a restart :meth:`_sync_telegram_accounts` rebuilds a client for the
+        account instead of leaving it in the "disabled" state.
+        """
+        tg = self.settings.telegram
+        acc = replace(tg.account(name), enabled=True)
+        accounts = [replace(a, enabled=True) if a.name == name else a for a in tg.accounts]
+        if not any(a.name == name for a in accounts):
+            accounts.append(acc)
+        new_tg = TelegramSettings(
+            enabled=True, active_account=tg.active_account, accounts=tuple(accounts),
+        )
+        self._apply_settings(self.settings.with_overrides(telegram=new_tg))
+
     def switch_telegram_account(self, name: str) -> dict[str, Any]:
-        """Make ``name`` the active account (persisted)."""
+        """Make ``name`` the active account and enable it (persisted).
+
+        «فعال کن/تعویض» must also flip the account's ``enabled`` flag,
+        otherwise ``_sync_telegram_accounts`` never builds a client for it
+        after a restart and the account stays "disabled".
+        """
         tg = self.settings.telegram
         if not any(a.name == name for a in tg.accounts):
-            raise AssistantError(f"اکانت تلگرام «{name}» وجود ندارد")
-        if name == tg.active_account:
-            return self.telegram_accounts_status()
+            # No accounts materialised yet — activating the current active
+            # account is still a valid enable operation.
+            if name != tg.active_account:
+                raise AssistantError(f"اکانت تلگرام «{name}» وجود ندارد")
+            accounts = [replace(tg.account(name), enabled=True)]
+        else:
+            accounts = [replace(a, enabled=True) if a.name == name else a for a in tg.accounts]
         new_tg = TelegramSettings(
-            enabled=tg.enabled, active_account=name, accounts=tg.accounts,
+            enabled=tg.enabled, active_account=name, accounts=tuple(accounts),
         )
         self._apply_settings(self.settings.with_overrides(telegram=new_tg))
         return self.telegram_accounts_status()
@@ -645,6 +685,10 @@ class BridgeHandlers:
                 "اتصال به سرور تلگرام ممکن نشد؛ اتصال اینترنت را بررسی کنید "
                 "(در صورت نیاز فیلترشکن) و دوباره تلاش کنید."
             ) from exc
+        if result.get("state") == "connected":
+            # A valid session file skipped the code step — persist enabled so
+            # the client survives restarts.
+            self._mark_account_enabled(name)
         self._publish_telegram_state()
         return {**result, **self.telegram_status(name)}
 
@@ -661,6 +705,9 @@ class BridgeHandlers:
             raise AssistantError(
                 "ارسال کد به سرور تلگرام ناموفق بود؛ اتصال اینترنت را بررسی کنید."
             ) from exc
+        if result.get("state") == "connected":
+            # No 2FA on the account — the code completed the login.
+            self._mark_account_enabled(name)
         self._publish_telegram_state()
         return {**result, **self.telegram_status(name)}
 
@@ -677,6 +724,10 @@ class BridgeHandlers:
             raise AssistantError(
                 "ارسال رمز 2FA به سرور تلگرام ناموفق بود؛ اتصال اینترنت را بررسی کنید."
             ) from exc
+        if result.get("state") == "connected":
+            # Login complete — persist enabled=True for this account so the
+            # session is rebuilt automatically after a restart.
+            self._mark_account_enabled(name)
         self._publish_telegram_state()
         return {**result, **self.telegram_status(name)}
 
@@ -695,6 +746,7 @@ class BridgeHandlers:
                 "اتصال به سرور تلگرام ممکن نشد؛ اتصال اینترنت را بررسی کنید "
                 "(در صورت نیاز فیلترشکن) و دوباره تلاش کنید."
             ) from exc
+        self._mark_account_enabled(name)
         self._publish_telegram_state()
         return {"state": "connected", "message": message, **self.telegram_status(name)}
 
