@@ -646,14 +646,18 @@
       },
 
       get telegramStateLabel() {
+        return this.accountStateLabel(this.telegramState);
+      },
+
+      accountStateLabel(state) {
         const labels = {
-          disabled: "",
+          disabled: "غیرفعال",
           disconnected: "وصل نیست",
           await_code: "منتظر کد…",
           await_2fa: "منتظر رمز 2FA…",
           connected: "✅ متصل",
         };
-        return labels[this.telegramState] || "";
+        return labels[state] || "";
       },
 
       get gmailStateLabel() {
@@ -697,6 +701,23 @@
           this.refreshStatus();
         } catch (err) {
           this.toast("bad", "⚠️", "تعویض اکانت ناموفق بود — " + err.message);
+        } finally {
+          this.switchingTelegram = false;
+        }
+      },
+
+      async toggleAccountEnabled(acc) {
+        if (this.connection === "offline") return;
+        this.switchingTelegram = true;
+        try {
+          await this.api("/api/telegram/account", {
+            method: "POST",
+            body: JSON.stringify({ name: acc.account, enabled: !acc.enabled }),
+          });
+          this.toast("ok", "✅", "وضعیت «فعال» اکانت " + acc.account + " تغییر کرد");
+          this.refreshStatus();
+        } catch (err) {
+          this.toast("bad", "⚠️", "تغییر وضعیت اکانت ناموفق بود — " + err.message);
         } finally {
           this.switchingTelegram = false;
         }

@@ -633,6 +633,26 @@ class BridgeHandlers:
             "accounts": accounts,
         }
 
+    def set_telegram_account_enabled(self, name: str, enabled: bool) -> dict[str, Any]:
+        """Toggle one account's ``enabled`` flag (persisted, secrets untouched).
+
+        The web UI switch sends only ``{name, enabled}`` — credentials stay
+        in the stored config and are never round-tripped through the UI.
+        """
+        tg = self.settings.telegram
+        if not any(a.name == name for a in tg.accounts):
+            raise AssistantError(f"اکانت تلگرام «{name}» وجود ندارد")
+        accounts = [
+            replace(a, enabled=bool(enabled)) if a.name == name else a
+            for a in tg.accounts
+        ]
+        new_tg = TelegramSettings(
+            enabled=tg.enabled, active_account=tg.active_account,
+            accounts=tuple(accounts),
+        )
+        self._apply_settings(self.settings.with_overrides(telegram=new_tg))
+        return self.telegram_accounts_status()
+
     def _mark_account_enabled(self, name: str) -> None:
         """Persist ``enabled=True`` for one account (and the feature).
 

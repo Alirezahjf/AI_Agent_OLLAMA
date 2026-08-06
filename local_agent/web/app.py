@@ -127,6 +127,11 @@ class TelegramSwitchRequest(BaseModel):
     name: str
 
 
+class TelegramAccountToggleRequest(BaseModel):
+    name: str
+    enabled: bool = False
+
+
 class ConfirmRequest(BaseModel):
     request_id: str
     approved: bool = False
@@ -652,6 +657,19 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         if server is None:
             raise HTTPException(503, "telegram needs an in-process bridge")
         return server.handlers.telegram_accounts_status()
+
+    @app.post("/api/telegram/account")
+    async def telegram_account_toggle(req: TelegramAccountToggleRequest) -> dict[str, Any]:
+        """Toggle one account's ``enabled`` flag (name + bool only, no secrets)."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "telegram needs an in-process bridge")
+        try:
+            return server.handlers.set_telegram_account_enabled(
+                str(req.name), bool(req.enabled)
+            )
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc))
 
     @app.post("/api/gmail/connect")
     async def gmail_connect() -> dict[str, Any]:

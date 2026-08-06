@@ -220,3 +220,91 @@ def test_non_network_failure_keeps_generic_message(tmp_path: Path) -> None:
     with pytest.raises(AssistantError) as exc:
         handlers.start_telegram_login("اصلی")
     assert "VPN" not in str(exc.value)  # پیام شبکهٔ اختصاصی نیست
+
+
+# ===========================================================================
+# گ ۷) منوی اکانت‌های تلگرام در تنظیمات وب
+# ===========================================================================
+
+
+def test_accounts_status_synthesizes_active_account_when_list_empty(tmp_path: Path) -> None:
+    """config مستقیم (accounts خالی) → حداقل ردیف «اکانت فعال» ساخته شود."""
+    settings = AssistantSettings(
+        data_dir=tmp_path, work_dir=tmp_path,
+        telegram=TelegramSettings(enabled=True, active_account="اصلی", accounts=()),
+    )
+    handlers = BridgeHandlers.build(settings)
+    status = handlers.telegram_accounts_status()
+    assert status["active_account"] == "اصلی"
+    assert len(status["accounts"]) == 1
+    assert status["accounts"][0]["account"] == "اصلی"
+
+
+def test_web_status_includes_telegram_accounts(web_server) -> None:
+    import requests
+
+    body = requests.get(f"http://127.0.0.1:{web_server.port}/api/status", timeout=5).json()
+    settings_block = body["settings"]["settings"]
+    assert "telegram_accounts" in settings_block
+    assert isinstance(settings_block["telegram_accounts"]["accounts"], list)
+    assert settings_block["telegram_active_account"]
+
+
+def test_web_toggle_account_enabled_keeps_secrets(web_server) -> None:
+    import requests
+
+    backend = web_server.client._backend
+    handlers = backend._server.handlers
+
+    # یک اکانت واقعی با اعتبارنامه ثبت کن (فعالیت پیش‌فرض خاموش است)
+    settings = handlers.settings.with_overrides(
+        telegram=handlers.settings.telegram.updated({
+            "api_id": 123, "api_hash": "s" * 32, "phone": "+989120000000",
+        })
+    )
+    handlers._apply_settings(settings)
+    assert handlers.settings.telegram.account("اصلی").enabled is False
+
+    # روشن کن از طریق endpoint (فقط name + enabled)
+    r = requests.post(
+        f"http://127.0.0.1:{web_server.port}/api/telegram/account",
+        json={"name": "اصلی", "enabled": True}, timeout=5,
+    )
+    assert r.status_code == 200, r.text
+    assert handlers.settings.telegram.account("اصلی").enabled is True
+    # اعتبارنامه‌ها دست‌نخورده‌اند
+    assert handlers.settings.telegram.account("اصلی").api_hash == "s" * 32
+    assert handlers.settings.telegram.account("اصلی").phone == "+989120000000"
+
+    # خاموشش کن
+    r = requests.post(
+        f"http://127.0.0.1:{web_server.port}/api/telegram/account",
+        json={"name": "اصلی", "enabled": False}, timeout=5,
+    )
+    assert r.status_code == 200
+    assert handlers.settings.telegram.account("اصلی").enabled is False
+    assert handlers.settings.telegram.account("اصلی").api_hash == "s" * 32
+
+
+def test_web_toggle_unknown_account_returns_400(web_server) -> None:
+    import requests
+
+    r = requests.post(
+        f"http://127.0.0.1:{web_server.port}/api/telegram/account",
+        json={"name": "ghost", "enabled": True}, timeout=5,
+    )
+    assert r.status_code == 400
+    assert "وجود ندارد" in r.text
+
+
+def test_index_html_renders_account_row_controls() -> None:
+    """مودال تنظیمات باید نام/شماره/وضعیت/اتصال/فعال/فعال‌کن را داشته باشد."""
+    from local_agent.utils.paths import web_templates_dir
+
+    html = (web_templates_dir() / "index.html").read_text(encoding="utf-8")
+    assert "telegramAccounts" in html
+    assert "toggleAccountEnabled" in html
+    assert "connectTelegram(acc.account)" in html
+    assert "switchAccount(acc.account)" in html
+    assert "accountStateLabel(acc.state)" in html
+    assert "اکانت فعال: " in html
