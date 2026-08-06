@@ -19,7 +19,9 @@ from __future__ import annotations
 import base64
 import email
 import email.message
+import html
 import imaplib
+import re
 import smtplib
 import ssl
 import threading
@@ -469,6 +471,59 @@ def _build_backend(
 
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024  # 25 MB per attachment
 
+# HTML tags that are unlikely to appear in an ordinary plain-text email.
+_HTML_TAG_NAMES = {
+    "html", "body", "div", "p", "table", "tr", "td", "th", "thead", "tbody",
+    "h1", "h2", "h3", "h4", "h5", "h6", "a", "b", "strong", "em", "i", "u",
+    "ul", "ol", "li", "br", "hr", "img", "span", "section", "header",
+    "footer", "style", "blockquote", "pre", "font", "center", "button",
+    "form", "input", "label", "video", "iframe",
+}
+
+
+def _looks_like_html(body: Any) -> bool:
+    """Best-effort detection of HTML content in an email body.
+
+    An explicit ``<!DOCTYPE html>`` / ``<html ...>`` opening wins, otherwise
+    the body must contain at least one tag from a known HTML set so that
+    plain text like ``a < b`` is never misdetected.
+    """
+    if not isinstance(body, str) or not body.strip():
+        return False
+    text = body.lstrip()
+    if re.match(r"<!doctype\s+html", text, re.IGNORECASE) or re.match(r"<html[\s>]", text, re.IGNORECASE):
+        return True
+    # No whitespace after ``<``: ``a < b`` is not HTML, ``<b>`` is.
+    tags = set(re.findall(r"</?([a-zA-Z][a-zA-Z0-9-]*)\b", text))
+    return bool(tags & _HTML_TAG_NAMES)
+
+
+def _html_to_text(html_body: str) -> str:
+    """Strip an HTML body down to readable plain text (best-effort)."""
+    text = re.sub(r"(?is)<(script|style)\b[^>]*>.*?</\1>", " ", html_body)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</(p|div|tr|li|h[1-6]|blockquote|section|table|ul|ol)>", "\n", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    return text.strip()
+
+
+def _set_body(message: email.message.EmailMessage, body: str) -> None:
+    """Put ``body`` into the message, detecting HTML automatically.
+
+    HTML bodies become ``multipart/alternative`` with a plain-text fallback
+    (stripped from the HTML) plus the ``text/html`` part, so weak mail
+    clients still see readable text.  Plain bodies stay a single
+    ``text/plain`` part exactly as before.
+    """
+    if _looks_like_html(body):
+        message.set_content(_html_to_text(body))
+        message.add_alternative(body, subtype="html")
+    else:
+        message.set_content(body)
+
 
 def _build_mime(to: str, subject: str, body: str,
                 attachments: list[str] | None = None) -> email.message.EmailMessage:
@@ -476,7 +531,7 @@ def _build_mime(to: str, subject: str, body: str,
     message["To"] = to
     message["Subject"] = subject
     message["From"] = "me"
-    message.set_content(body)
+    _set_body(message, body)
     _attach_files(message, attachments or [])
     return message
 
@@ -486,7 +541,7 @@ def _build_mime_reply(subject: str, body: str,
     message = email.message.EmailMessage()
     message["Subject"] = subject
     message["From"] = "me"
-    message.set_content(body)
+    _set_body(message, body)
     _attach_files(message, attachments or [])
     return message
 
