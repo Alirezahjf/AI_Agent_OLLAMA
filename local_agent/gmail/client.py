@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import email
+import email.header
 import email.message
 import html
 import imaplib
@@ -194,8 +195,8 @@ class _OAuthGmailBackend(GmailBackend):
         attachments = _extract_attachments(payload.get("payload", {}))
         return GmailMessage(
             id=msg_id,
-            subject=headers.get("subject", ""),
-            sender=headers.get("from", ""),
+            subject=_decode_header_value(headers.get("subject", "")),
+            sender=_decode_header_value(headers.get("from", "")),
             snippet=f"{body[:300]}" if body else payload.get("snippet", ""),
             date=headers.get("date", ""),
             is_unread=False,
@@ -213,7 +214,7 @@ class _OAuthGmailBackend(GmailBackend):
         original = self._users().messages().get(userId="me", id=msg_id, format="metadata",
                                                 metadataHeaders=["Subject", "References", "Message-ID"]).execute()
         headers = {h["name"].lower(): h["value"] for h in original.get("payload", {}).get("headers", [])}
-        subject = headers.get("subject", "")
+        subject = _decode_header_value(headers.get("subject", ""))
         if not subject.lower().startswith("re:"):
             subject = "Re: " + subject
         message = _build_mime_reply(subject, body, attachments)
@@ -237,8 +238,8 @@ class _OAuthGmailBackend(GmailBackend):
         headers = {h["name"].lower(): h["value"] for h in payload.get("payload", {}).get("headers", [])}
         return GmailMessage(
             id=msg["id"],
-            subject=headers.get("subject", "(بدون موضوع)"),
-            sender=headers.get("from", "?"),
+            subject=_decode_header_value(headers.get("subject", "(بدون موضوع)")),
+            sender=_decode_header_value(headers.get("from", "?")),
             snippet=payload.get("snippet", ""),
             date=headers.get("date", ""),
             is_unread=True,
@@ -327,8 +328,8 @@ class _ImapGmailBackend(GmailBackend):
             attachments = _rfc822_attachments(parsed)
             return GmailMessage(
                 id=str(msg_id),
-                subject=str(parsed.get("Subject", "")),
-                sender=str(parsed.get("From", "?")),
+                subject=_decode_header_value(parsed.get("Subject", "")),
+                sender=_decode_header_value(parsed.get("From", "?")),
                 snippet=body[:300],
                 date=str(parsed.get("Date", "")),
                 is_unread=False,
@@ -559,6 +560,30 @@ def _attach_files(message: email.message.EmailMessage, attachments: list[str]) -
                                filename=path.name)
 
 
+def _decode_header_value(raw: Any) -> str:
+    """Decode an RFC 2047-encoded header (``=?UTF-8?B?...?=``) to text.
+
+    Persian subjects arrive base64-encoded from both IMAP and the Gmail
+    API; without decoding they render as mojibake.  Undecodable bytes are
+    replaced instead of raising so a hostile header can never crash a read.
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    text = str(raw)
+    if "=?" not in text:
+        return text
+    parts: list[str] = []
+    for part, encoding in email.header.decode_header(text):
+        if isinstance(part, bytes):
+            parts.append(part.decode(encoding or "utf-8", errors="replace"))
+        else:
+            parts.append(str(part))
+    joined = "".join(parts).strip()
+    return joined or text
+
+
 def _extract_body(payload: dict[str, Any]) -> str:
     if payload.get("body", {}).get("data"):
         try:
@@ -592,8 +617,8 @@ def _message_from_rfc822(msg_id: str, parsed: email.message.Message) -> GmailMes
     body = _rfc822_body(parsed)
     return GmailMessage(
         id=msg_id,
-        subject=str(parsed.get("Subject", "(بدون موضوع)")),
-        sender=str(parsed.get("From", "?")),
+        subject=_decode_header_value(parsed.get("Subject", "(بدون موضوع)")),
+        sender=_decode_header_value(parsed.get("From", "?")),
         snippet=body[:200],
         date=str(parsed.get("Date", "")),
         is_unread=True,
@@ -612,7 +637,10 @@ def _extract_attachments(payload: dict[str, Any]) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     for part in _walk_payload_parts(payload):
         if part.get("filename") and part.get("body", {}).get("attachmentId"):
-            out.append({"id": part["body"]["attachmentId"], "name": part["filename"]})
+            out.append({
+                "id": part["body"]["attachmentId"],
+                "name": _decode_header_value(part["filename"]),
+            })
     return out
 
 
@@ -648,7 +676,7 @@ def _rfc822_attachments(parsed: email.message.Message) -> list[dict[str, str]]:
     for part in parsed.walk():
         if part.get_content_maintype() == "multipart":
             continue
-        filename = part.get_filename()
+        filename = _decode_header_value(part.get_filename())
         if filename:
             out.append({"id": filename, "name": filename})
     return out

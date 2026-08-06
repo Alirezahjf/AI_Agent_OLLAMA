@@ -1,12 +1,15 @@
-"""Offline tests — گ ۱: ارسال ایمیل HTML باید multipart/alternative شود.
+"""Offline tests — رفع‌های باقی‌ماندهٔ جیمیل (HTML، RFC 2047، گیرندهٔ markdown و...).
 
-قبلاً هر body با ``set_content`` به‌صورت text/plain می‌رفت و گیرنده کدِ HTML
-را می‌دید. حالا خود برنامه تشخیص می‌دهد و برای HTML یک بخش text/plain
-(سلب‌شده) + یک بخش text/html می‌سازد.
+گ ۱: ارسال ایمیل HTML باید multipart/alternative شود — قبلاً هر body با
+``set_content`` به‌صورت text/plain می‌رفت و گیرنده کدِ HTML را می‌دید.
+گ ۲: هدرهای RFC 2047 باید دیکد شوند تا موضوع فارسی مُخ نشود.
 """
 
 from __future__ import annotations
 
+import email
+import email.message
+import email.policy
 from pathlib import Path
 
 import pytest
@@ -14,8 +17,10 @@ import pytest
 from local_agent.gmail.client import (
     _build_mime,
     _build_mime_reply,
+    _decode_header_value,
     _html_to_text,
     _looks_like_html,
+    _message_from_rfc822,
 )
 
 
@@ -83,3 +88,53 @@ def test_html_to_text_strips_tags_and_keeps_meaning() -> None:
     assert "خط دوم" in out
     assert "سوم" in out
     assert "<" not in out
+
+
+# ===========================================================================
+# گ ۲) هدرهای RFC 2047 باید به متن فارسی واقعی دیکد شوند
+# ===========================================================================
+
+
+def test_decode_header_value_base64_persian() -> None:
+    # دقیقاً همان رشتهٔ مُخ دیده‌شده در خروجی کاربر (لاگ قبلی).
+    raw = "=?UTF-8?B?2YfYtNiv2KfYsSDYp9mF2YbbjNiq24w=?="
+    decoded = _decode_header_value(raw)
+    assert decoded == "هشدار امنیتی"
+    assert "?" not in decoded and "=" not in decoded
+
+
+def test_decode_header_value_plain_text_passthrough() -> None:
+    assert _decode_header_value("سلام دنیا") == "سلام دنیا"
+    assert _decode_header_value(None) == ""
+    assert _decode_header_value("") == ""
+
+
+def test_decode_header_value_q_encoded() -> None:
+    raw = "=?utf-8?q?=D8=B3=D9=84=D8=A7=D9=85?="
+    assert _decode_header_value(raw) == "سلام"
+
+
+def test_rfc822_message_subject_and_sender_decoded() -> None:
+    msg = email.message.Message(policy=email.policy.default)
+    msg["Subject"] = "=?UTF-8?B?2YfYtNiv2KfYsSDYp9mF2YbbjNiq24w=?="
+    msg["From"] = "=?UTF-8?B?2LnZhNuM?= <boss@example.com>"
+    parsed = _message_from_rfc822("1", msg)
+    assert parsed.subject == "هشدار امنیتی"
+    assert "علی" in parsed.sender
+
+
+def test_rfc822_bad_encoding_does_not_crash() -> None:
+    msg = email.message.Message(policy=email.policy.default)
+    msg["Subject"] = "=?UTF-8?B?%%%invalid%%%?="
+    parsed = _message_from_rfc822("1", msg)
+    # نباید خطا بدهد؛ متن best-effort کافی است.
+    assert isinstance(parsed.subject, str)
+
+
+def test_imap_message_from_bytes_decoded() -> None:
+    raw = (
+        b"Subject: =?UTF-8?B?2YfYtNiv2KfYsSDYp9mF2YbbjNiq24w=?=\r\n"
+        b"From: x@example.com\r\n\r\nbody\r\n"
+    )
+    parsed = email.message_from_bytes(raw)
+    assert _decode_header_value(parsed.get("Subject")) == "هشدار امنیتی"
