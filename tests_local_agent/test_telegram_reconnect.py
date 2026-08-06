@@ -161,3 +161,62 @@ def test_accounts_status_never_leaks_secrets(tmp_path: Path) -> None:
     blob = json.dumps(handlers.telegram_accounts_status())
     assert "a" * 32 not in blob
     assert "+989120000000" in blob  # phone is fine (it is not a secret)
+
+
+# ===========================================================================
+# گ ۶-ب) خطای شبکهٔ تلگرام باید پیام فارسی جدا و روشن بدهد
+# ===========================================================================
+
+
+def test_start_login_network_error_gives_persian_hint(tmp_path: Path) -> None:
+    from local_agent.core.errors import AssistantError
+
+    class _NetworkFailingClient:
+        is_connected = False
+        login_state = "disconnected"
+
+        def start_login(self) -> dict[str, Any]:
+            raise ConnectionError("Connection to Telegram failed 5 time(s)")
+
+    handlers = BridgeHandlers.build(_settings_with_disabled_account(tmp_path))
+    handlers._telegram_accounts["اصلی"] = _NetworkFailingClient()
+
+    with pytest.raises(AssistantError) as exc:
+        handlers.start_telegram_login("اصلی")
+    assert "فیلترشکن" in str(exc.value) or "اینترنت" in str(exc.value)
+
+
+def test_submit_code_network_error_gives_persian_hint(tmp_path: Path) -> None:
+    from local_agent.core.errors import AssistantError
+
+    class _NetworkFailingClient:
+        is_connected = False
+        login_state = "await_code"
+
+        def submit_code(self, code: str) -> dict[str, Any]:
+            raise TimeoutError("timed out")
+
+    handlers = BridgeHandlers.build(_settings_with_disabled_account(tmp_path))
+    handlers._telegram_accounts["اصلی"] = _NetworkFailingClient()
+
+    with pytest.raises(AssistantError) as exc:
+        handlers.submit_telegram_code("12345", "اصلی")
+    assert "فیلترشکن" in str(exc.value) or "اینترنت" in str(exc.value)
+
+
+def test_non_network_failure_keeps_generic_message(tmp_path: Path) -> None:
+    from local_agent.core.errors import AssistantError
+
+    class _WeirdFailingClient:
+        is_connected = False
+        login_state = "disconnected"
+
+        def start_login(self) -> dict[str, Any]:
+            raise RuntimeError("weird local error")
+
+    handlers = BridgeHandlers.build(_settings_with_disabled_account(tmp_path))
+    handlers._telegram_accounts["اصلی"] = _WeirdFailingClient()
+
+    with pytest.raises(AssistantError) as exc:
+        handlers.start_telegram_login("اصلی")
+    assert "VPN" not in str(exc.value)  # پیام شبکهٔ اختصاصی نیست

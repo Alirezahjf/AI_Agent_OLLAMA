@@ -680,6 +680,9 @@ class BridgeHandlers:
         except TelegramError as exc:
             raise AssistantError(str(exc)) from exc
         except Exception as exc:
+            if _is_telegram_network_error(exc):
+                logger.warning("telegram start_login network failure: %s", exc)
+                raise AssistantError(_TELEGRAM_NETWORK_HINT) from exc
             logger.warning("telegram start_login failed: %s", exc)
             raise AssistantError(
                 "اتصال به سرور تلگرام ممکن نشد؛ اتصال اینترنت را بررسی کنید "
@@ -701,6 +704,9 @@ class BridgeHandlers:
         except TelegramError as exc:
             raise AssistantError(str(exc)) from exc
         except Exception as exc:
+            if _is_telegram_network_error(exc):
+                logger.warning("telegram submit_code network failure: %s", exc)
+                raise AssistantError(_TELEGRAM_NETWORK_HINT) from exc
             logger.warning("telegram submit_code failed: %s", exc)
             raise AssistantError(
                 "ارسال کد به سرور تلگرام ناموفق بود؛ اتصال اینترنت را بررسی کنید."
@@ -720,6 +726,9 @@ class BridgeHandlers:
         except TelegramError as exc:
             raise AssistantError(str(exc)) from exc
         except Exception as exc:
+            if _is_telegram_network_error(exc):
+                logger.warning("telegram submit_password network failure: %s", exc)
+                raise AssistantError(_TELEGRAM_NETWORK_HINT) from exc
             logger.warning("telegram submit_password failed: %s", exc)
             raise AssistantError(
                 "ارسال رمز 2FA به سرور تلگرام ناموفق بود؛ اتصال اینترنت را بررسی کنید."
@@ -741,6 +750,9 @@ class BridgeHandlers:
         except TelegramError as exc:
             raise AssistantError(str(exc)) from exc
         except Exception as exc:
+            if _is_telegram_network_error(exc):
+                logger.warning("telegram connect network failure: %s", exc)
+                raise AssistantError(_TELEGRAM_NETWORK_HINT) from exc
             logger.warning("telegram connect failed: %s", exc)
             raise AssistantError(
                 "اتصال به سرور تلگرام ممکن نشد؛ اتصال اینترنت را بررسی کنید "
@@ -1140,6 +1152,32 @@ class PendingConfirmation:
     approved: bool = False
     run_id: str = ""
     event: threading.Event = field(default_factory=threading.Event)
+
+
+_TELEGRAM_NETWORK_HINT = (
+    "اتصال به سرور تلگرام برقرار نشد؛ اتصال اینترنت را بررسی کنید و در صورت "
+    "نیاز از فیلترشکن/VPN استفاده کنید، سپس دوباره تلاش کنید."
+)
+
+
+def _is_telegram_network_error(exc: Exception) -> bool:
+    """Is the failure a network/connectivity problem, not bad credentials?
+
+    Telethon retries its connection and finally raises a plain
+    ``ConnectionError`` ("Connection to Telegram failed 5 time(s)") — a
+    completely different situation from «account not enabled/configured»,
+    so it deserves its own readable Persian message.
+    """
+    name = type(exc).__name__
+    text = str(exc).lower()
+    return (
+        isinstance(exc, ConnectionError)
+        or "connection" in name.lower()
+        or "connection to telegram failed" in text
+        or "timed out" in text
+        or "network" in text
+        or "dns" in text
+    )
 
 
 def _coerce_setting_value(value: Any, current: Any) -> Any:
