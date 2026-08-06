@@ -378,3 +378,35 @@ def test_gmail_send_absolute_attachment_used_as_is(tmp_path: Path) -> None:
         handlers.context,
     )
     assert seen["attachments"] == [str(outside)]
+
+
+# ===========================================================================
+# گ ۱۰) هشدار «gmail client not built» نباید اسپم و گمراه‌کننده باشد
+# ===========================================================================
+
+
+def test_build_gmail_client_incomplete_config_logs_debug_not_warning(caplog) -> None:
+    import logging
+
+    from local_agent.bridge.api import handlers as h
+    from local_agent.core.config import AssistantSettings, GmailSettings
+
+    settings = AssistantSettings(
+        data_dir=Path("/tmp/la_x"), work_dir=Path("/tmp/la_x"),
+    ).with_overrides(gmail=GmailSettings(enabled=True))
+    with caplog.at_level(logging.WARNING, logger="bridge.handlers"):
+        client = h._build_gmail_client(settings)
+    assert client is None
+    assert "gmail client not built" not in caplog.text
+
+
+def test_status_warnings_explain_gmail_missing_config(tmp_path: Path) -> None:
+    from local_agent.bridge.api.handlers import BridgeHandlers
+    from local_agent.core.config import AssistantSettings, GmailSettings
+
+    settings = AssistantSettings(
+        data_dir=tmp_path, work_dir=tmp_path,
+    ).with_overrides(gmail=GmailSettings(enabled=True))
+    handlers = BridgeHandlers.build(settings)
+    warnings = handlers._warnings()
+    assert any("جیمیل" in w and "username" in w for w in warnings)

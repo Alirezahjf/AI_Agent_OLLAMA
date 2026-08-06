@@ -329,6 +329,12 @@ class BridgeHandlers:
                 )
         if llm.provider == "openai_compatible" and not llm.openai_api_key:
             out.append("کلید API تنظیم نشده است. در تنظیمات، کلید AvalAI خود را وارد کنید.")
+        if self.settings.gmail.enabled and self.context.extra.get("gmail") is None:
+            out.append(
+                "جیمیل فعال است ولی اتصالش کامل نیست. برای اتصال جیمیل، username و "
+                "App Password (یا credentials.json) را در تنظیمات ست کنید و دکمهٔ "
+                "«اتصال جیمیل» را بزنید."
+            )
         return out
 
     def _set_model(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1259,13 +1265,19 @@ def _ollama_reachable(base_url: str, timeout: float = 1.5) -> bool:
 def _build_gmail_client(
     settings: AssistantSettings, *, force: bool = False
 ) -> GmailClient | None:
-    """Build the Gmail client when enabled (or when ``force``); never touches the network."""
+    """Build the Gmail client when enabled (or when ``force``); never touches the network.
+
+    Missing/incomplete config is expected while the user has not finished
+    the settings form (e.g. no username yet), so it is logged at DEBUG —
+    a WARNING here repeated on every startup only confused users.  The UI
+    banner (:meth:`BridgeHandlers._warnings`) explains what to fill in.
+    """
     if not settings.gmail.enabled and not force:
         return None
     try:
         return GmailClient.from_settings(settings.gmail, settings.data_dir)
     except GmailError as exc:
-        logger.warning("gmail client not built: %s", exc)
+        logger.debug("gmail client not built: %s", exc)
         return None
 
 
