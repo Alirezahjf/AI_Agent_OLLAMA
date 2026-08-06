@@ -375,8 +375,11 @@ def list_accounts(*, context: ActionContext) -> str:
     tg = context.runtime.settings.telegram
     if owner is not None:
         data = owner.telegram_accounts_status()
-        lines = [f"  • {a['account']} — {a['phone'] or 'شماره ندارد'} — {a['state']}"
-                 for a in data["accounts"]]
+        lines = [
+            f"  • {a['account']} — {a['phone'] or 'شماره ندارد'} — {a['state']}"
+            f" — {'فعال' if a['enabled'] else 'غیرفعال'}"
+            for a in data["accounts"]
+        ]
         active = data["active_account"]
         return (
             f"اکانت فعال: {active}\n"

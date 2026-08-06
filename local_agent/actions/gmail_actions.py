@@ -7,6 +7,7 @@ The client lives in ``context.extra["gmail"]`` and is owned by
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -61,13 +62,15 @@ def register_gmail(registry: ActionRegistry, context: ActionContext) -> None:
     registry.decorator(
         name="gmail.send",
         description=(
-            "ارسال ایمیل از حساب جیمیل کاربر. attachments اختیاری است (فهرست مسیر فایل‌ها، "
-            "حداکثر ۲۵ مگابایت هرکدام). DESTRUCTIVE — همیشه تأیید می‌خواهد."
+            "ارسال ایمیل از حساب جیمیل کاربر. to فقط به‌صورت خام name@domain (بدون Markdown). "
+            "body می‌تواند HTML باشد؛ خود برنامه تشخیص می‌دهد. attachments اختیاری است: فهرست "
+            "مسیر فایل‌ها (حداکثر ۲۵ مگابایت هرکدام)؛ فایل‌های ضمیمه‌شدهٔ چت در پوشهٔ کاری "
+            "ذخیره شده‌اند و کافی است نامشان را بدهی. DESTRUCTIVE — همیشه تأیید می‌خواهد."
         ),
         parameters={
-            "to": {"type": "string", "description": "آدرس گیرنده"},
+            "to": {"type": "string", "description": "آدرس گیرنده (فقط name@domain)"},
             "subject": {"type": "string", "description": "موضوع"},
-            "body": {"type": "string", "description": "متن ایمیل"},
+            "body": {"type": "string", "description": "متن ایمیل (می‌تواند HTML باشد)"},
             "attachments": {"type": "array", "items": {"type": "string"},
                             "description": "فهرست مسیر فایل‌های پیوست (اختیاری)"},
         },
@@ -81,10 +84,12 @@ def register_gmail(registry: ActionRegistry, context: ActionContext) -> None:
         name="gmail.download_attachment",
         description=(
             "دانلود یک پیوست ایمیل (با نام فایل) به پوشهٔ data_dir/gmail و برگرداندن مسیر "
-            "واقعی. اگر filename خالی باشد اولین پیوست دانلود می‌شود. SAFE."
+            "واقعی. id باید شناسهٔ عددی خودِ ایمیل باشد (از gmail.list_unread / gmail.search "
+            "بگیر)، نه نام فایل. اگر filename خالی باشد اولین پیوست دانلود می‌شود. برای ارسال "
+            "فایل‌های ضمیمه‌شدهٔ چت از gmail.send با attachments استفاده کن، نه این ابزار. SAFE."
         ),
         parameters={
-            "id": {"type": "string", "description": "شناسهٔ ایمیل"},
+            "id": {"type": "string", "description": "شناسهٔ عددی ایمیل"},
             "filename": {"type": "string", "description": "نام پیوست (اختیاری)"},
         },
         required=("id",),
@@ -136,6 +141,49 @@ def _format_messages(messages: list[Any]) -> str:
     return f"تعداد {len(messages)} ایمیل:\n" + "\n".join(lines)
 
 
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_MAILTO_LINK_RE = re.compile(r"\[[^\]]*\]\(mailto:([^)]+)\)")
+
+
+def _extract_email(raw: Any) -> str:
+    """Extract a clean ``name@domain`` address from a model-supplied value.
+
+    The model sometimes wraps the address in Markdown
+    (``[a@b.com](mailto:a@b.com)``) or free text; the plain ``\"@\" in to``
+    check used to accept those and a broken address went out.  A valid
+    email must match the regex, otherwise a Persian error is raised.
+    """
+    if not isinstance(raw, str):
+        raise AssistantError("آدرس گیرندهٔ ایمیل نامعتبر است")
+    value = raw.strip()
+    link = _MAILTO_LINK_RE.search(value)
+    if link:
+        value = link.group(1).strip()
+    match = _EMAIL_RE.search(value)
+    if not match:
+        raise AssistantError(
+            "آدرس گیرندهٔ ایمیل نامعتبر است. آدرس را فقط به‌صورت خام "
+            "name@domain بدهید (بدون Markdown و بدون متن اضافه)."
+        )
+    return match.group(0)
+
+
+def _resolve_attachments(raw: list[str] | None, work_dir: Any) -> list[str]:
+    """Resolve attachment paths against the workspace.
+
+    Files the user attaches in the chat are saved into ``work_dir``, so a
+    bare name (``tokpypl.txt``) must resolve there; absolute paths are used
+    as-is.  The backend validates existence and raises a Persian error.
+    """
+    out: list[str] = []
+    for item in raw or []:
+        path = Path(str(item)).expanduser()
+        if not path.is_absolute():
+            path = Path(work_dir) / path
+        out.append(str(path))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Implementations
 # ---------------------------------------------------------------------------
@@ -177,12 +225,14 @@ def read(*, id: str, context: ActionContext) -> str:
 @risk(Risk.DESTRUCTIVE)
 def send(*, to: str, subject: str, body: str, attachments: list[str] | None = None,
          context: ActionContext) -> str:
-    if not isinstance(to, str) or "@" not in to:
-        raise AssistantError("آدرس گیرندهٔ ایمیل نامعتبر است")
+    clean_to = _extract_email(to)
     if not isinstance(subject, str) or not subject.strip():
         raise AssistantError("subject must be a non-empty string")
-    result = _client(context).send(to.strip(), subject, body, attachments=list(attachments or []))
-    return f"✅ ایمیل به «{to}» ارسال شد ({result})"
+    result = _client(context).send(
+        clean_to, subject, body,
+        attachments=_resolve_attachments(attachments, context.work_dir),
+    )
+    return f"✅ ایمیل به «{clean_to}» ارسال شد ({result})"
 
 
 @risk(Risk.SAFE)
@@ -197,5 +247,8 @@ def reply(*, id: str, body: str, attachments: list[str] | None = None,
           context: ActionContext) -> str:
     if not isinstance(id, str) or not id.strip():
         raise AssistantError("id must be a non-empty string")
-    result = _client(context).reply(id.strip(), body, attachments=list(attachments or []))
+    result = _client(context).reply(
+        id.strip(), body,
+        attachments=_resolve_attachments(attachments, context.work_dir),
+    )
     return f"✅ پاسخ به ایمیل {id} ارسال شد ({result})"

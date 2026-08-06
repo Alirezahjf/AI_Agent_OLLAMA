@@ -63,6 +63,11 @@
         <span aria-hidden="true">🛡</span>
         <span x-text="elevationLabel"></span>
       </div>
+      <div class="pill pill--muted hide-sm" x-show="activeTelegramAccount" x-cloak
+           :title="'اکانت فعال تلگرام: ' + activeTelegramAccount" role="status">
+        <span aria-hidden="true">✈️</span>
+        <span x-text="'تلگرام: ' + activeTelegramAccount"></span>
+      </div>
     </div>
 
     <div class="topbar__group topbar__group--end">
@@ -669,9 +674,14 @@
             <p class="field__hint" x-text="activeTelegramAccount ? ('اکانت فعال: ' + activeTelegramAccount) : ''"></p>
             <template x-for="acc in telegramAccounts" :key="acc.account">
               <div class="field__row">
-                <span class="field__hint">
-                  {{ acc.account }} — {{ acc.phone || 'شماره ندارد' }} — {{ acc.state }}
+                <span class="field__hint" :class="{ 'field__hint--strong': acc.account === activeTelegramAccount }">
+                  {{ acc.account }} — {{ acc.phone || 'شماره ندارد' }} — {{ accountStateLabel(acc.state) }}
                 </span>
+                <label class="field__switch-inline" :title="acc.enabled ? 'فعال — خاموش کن' : 'غیرفعال — روشن کن'">
+                  <input type="checkbox" class="switch switch--sm" :checked="Boolean(acc.enabled)"
+                         @change="toggleAccountEnabled(acc)" :disabled="switchingTelegram">
+                  <span>فعال</span>
+                </label>
                 <button class="btn btn--ghost btn--sm" type="button"
                         @click="connectTelegram(acc.account)" :disabled="telegramBusy">
                   <span x-show="!telegramBusy">🔌 اتصال</span>

@@ -348,27 +348,25 @@ def check_config_consistency(settings: AssistantSettings) -> CheckResult:
             data,
         )
     data["writable"] = True
-    # 2) stray legacy config left over from the old write target?
-    from .core.config import _read_json
+    # 2) stray legacy config left over from the old write targets
+    #    (``<data_dir>/config.json``, the project folder, ...)?
+    from .core.config import _legacy_config_paths
 
-    legacy_data_dir = None
+    strays: list[Path] = []
     try:
-        payload = _read_json(path)
-        legacy_data_dir = payload.get("data_dir")
+        for candidate in _legacy_config_paths(path):
+            if candidate.is_file():
+                strays.append(candidate)
     except Exception:  # noqa: BLE001 - best-effort
-        legacy_data_dir = None
-    stray: Path | None = None
-    if legacy_data_dir:
-        candidate = Path(str(legacy_data_dir)).expanduser() / "config.json"
-        if candidate.is_file() and candidate.resolve() != path.resolve():
-            stray = candidate
-    data["legacy_config"] = str(stray) if stray else None
-    if stray is not None:
+        strays = []
+    data["legacy_config"] = str(strays[0]) if strays else None
+    data["legacy_configs"] = [str(s) for s in strays]
+    if strays:
         return CheckResult(
             "config.path", "فایل تنظیمات", WARN,
-            f"فایل تنظیمات قدیمی در {stray} سرگردان است",
+            "فایل تنظیمات قدیمی سرگردان است: " + "، ".join(str(s) for s in strays[:3]),
             "این همان باگ «تنظیمات بعد از ری‌استارت پریده» است. تنظیمات آن به فایل "
-            "اصلی منتقل شده؛ در صورت اطمینان می‌توانید این فایل را حذف کنید.",
+            "اصلی منتقل شده؛ در صورت اطمینان می‌توانید این فایل‌ها را حذف کنید.",
             data,
         )
     return CheckResult(
@@ -530,9 +528,19 @@ def _is_our_web_server(port: int, timeout: float = 1.5) -> bool:
             sock.sendall(
                 b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
             )
-            data = sock.recv(512).decode("utf-8", "replace")
-        return '"ok"' in data and "true" in data.lower()
-    except OSError:
+            chunks: list[bytes] = []
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                if sum(len(c) for c in chunks) > 65536:
+                    break
+            data = b"".join(chunks).decode("utf-8", "replace")
+        body = data.split("\r\n\r\n", 1)[-1] if "\r\n\r\n" in data else data
+        payload = json.loads(body)
+        return isinstance(payload, dict) and payload.get("ok") is True
+    except (OSError, ValueError):
         return False
 
 

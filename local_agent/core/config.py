@@ -32,21 +32,116 @@ def _default_data_dir() -> Path:
     return Path(raw).expanduser() if raw else _DEFAULT_DATA_DIR
 
 
+def _project_root() -> Path:
+    """The project folder the package was launched from (best-effort)."""
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _try_resolve(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:
+        return path.absolute()
+
+
+def _looks_like_assistant_config(payload: dict) -> bool:
+    """Heuristic: is this JSON dict one of *our* config files?
+
+    Guards the fallback search / migration against picking up a foreign
+    project's ``config.json`` (a repo the user happens to run the app
+    from).  A dict carrying any of our known sections is treated as ours.
+    """
+    return any(
+        key in payload
+        for key in ("llm", "telegram", "gmail", "safety",
+                    "allowed_user_ids", "telegram_token", "bale_token")
+    )
+
+
+def _has_real_settings(payload: dict) -> bool:
+    """A config file worth using as the source of truth.
+
+    «تنظیمات واقعی» = at least one non-default value or a meaningful
+    ``data_dir`` pointer.  A file that only repeats defaults (the first-run
+    template) is not real user data and must not win over a genuine config.
+    """
+    if not isinstance(payload, dict) or not payload:
+        return False
+    if _looks_like_assistant_config(payload):
+        for key in ("llm", "telegram", "gmail", "safety",
+                    "allowed_user_ids", "telegram_token", "bale_token"):
+            value = payload.get(key)
+            if value not in (None, "", False, 0, [], {}, ()):
+                return True
+    raw = payload.get("data_dir")
+    if raw:
+        try:
+            if Path(str(raw)).expanduser() != _DEFAULT_DATA_DIR:
+                return True
+        except OSError:
+            pass
+    return False
+
+
 def _default_config_path() -> Path:
     """Resolve the single source of truth for the settings file.
 
-    This is **fixed** and deliberately independent of the ``data_dir``
-    field read from the file: either ``LOCAL_AGENT_CONFIG`` when set, or
-    ``~/.local_assistant/config.json``.  A user whose config contains a
-    ``data_dir`` pointing at an old project folder must still have their
-    settings read *and* written here — ``data_dir`` only says where logs,
-    history, sessions and screenshots live.  (Setting ``LOCAL_AGENT_DATA_DIR``
-    moves the *data* directory, never this settings file.)
+    Priority:
+
+    1. ``LOCAL_AGENT_CONFIG`` — explicit override.
+    2. The fixed default ``~/.local_assistant/config.json`` when it exists.
+    3. Fallback **search** for a real user config left next to the app:
+       ``LOCAL_AGENT_DATA_DIR/config.json``, then ``config.json`` in the
+       current folder / project folder (and the ``data_dir`` each one
+       points at).  The first file with *real* settings wins — this is what
+       keeps a user whose config lives inside the project folder (the old
+       write target) from losing every setting after an upgrade.
+    4. Last resort: the fixed default (a template is created on first run).
+
+    ``data_dir`` inside the file only says where logs/history/sessions/
+    screenshots live; it never redirects the settings file.
     """
     explicit = os.environ.get("LOCAL_AGENT_CONFIG", "").strip()
     if explicit:
         return Path(explicit).expanduser()
-    return _DEFAULT_DATA_DIR / "config.json"
+    default = _DEFAULT_DATA_DIR / "config.json"
+    if default.is_file():
+        return default
+
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(candidate: Path) -> None:
+        candidate = Path(candidate).expanduser()
+        resolved = _try_resolve(candidate)
+        if resolved not in seen:
+            seen.add(resolved)
+            candidates.append(candidate)
+
+    env_data = os.environ.get("LOCAL_AGENT_DATA_DIR", "").strip()
+    if env_data:
+        _add(Path(env_data) / "config.json")
+    for base in (Path.cwd(), _project_root()):
+        cfg = base / "config.json"
+        if cfg.is_file():
+            _add(cfg)
+            try:
+                payload = _read_json(cfg)
+            except ConfigError:
+                continue
+            dd = payload.get("data_dir")
+            if dd:
+                _add(Path(str(dd)) / "config.json")
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            payload = _read_json(candidate)
+        except ConfigError:
+            continue
+        if _has_real_settings(payload):
+            return candidate
+    return default
 
 
 @dataclass(frozen=True)
@@ -497,10 +592,13 @@ def load_settings(
         target_path.write_text(template, encoding="utf-8")
         payload = json.loads(_strip_template_comments(template))
 
-    # Migrate settings that a previous version wrote into
-    # ``<data_dir>/config.json`` (the old write target) so existing users
-    # whose ``data_dir`` points at an old project folder don't lose data.
-    _migrate_old_config(target_path, _legacy_config_path(target_path))
+    # Migrate settings that a previous version wrote elsewhere (the old
+    # write target ``<data_dir>/config.json``, the project folder, ...) so
+    # existing users never lose their data after an upgrade.
+    _migrate_old_config(target_path, _legacy_config_paths(target_path))
+    # Migration may have folded values into the file — re-read it so THIS
+    # process sees them immediately (not only after the next restart).
+    payload = _read_json(target_path) or payload
 
     payload = _apply_env_overrides(payload)
     payload.setdefault("data_dir", str(target_dir))
@@ -515,32 +613,64 @@ def load_settings(
     return settings
 
 
-def _legacy_config_path(target_path: Path) -> Path:
-    """The old (buggy) write location: ``<data_dir>/config.json``.
+def _legacy_config_paths(target_path: Path) -> list[Path]:
+    """Every place a previous version may have written a real config.
 
-    When ``target_path`` is the fixed settings file and ``data_dir`` in the
-    file differs from its parent, previous versions wrote settings to
-    ``data_dir/config.json`` — a file ``load_settings`` never read.  This is
-    the file we look for when migrating.
+    The old (buggy) write target was ``<data_dir>/config.json`` where
+    ``data_dir`` came from the file itself; versions before that simply
+    wrote into the project folder next to the app.  All candidates are
+    checked so a user whose config lives in any of those places keeps it
+    after an upgrade.  Foreign ``config.json`` files (from another repo the
+    user happens to run the app from) are filtered out.
     """
-    # A previous version wrote settings to ``<data_dir>/config.json`` (the
-    # ``config_path`` property), so compute that legacy location from the
-    # ``data_dir`` recorded in the file we actually read.
-    payload = _read_json(target_path)
+    out: list[Path] = []
+    seen: set[Path] = set()
+    target_resolved = _try_resolve(target_path)
+
+    def _add(candidate: Path) -> None:
+        candidate = Path(candidate).expanduser()
+        resolved = _try_resolve(candidate)
+        if resolved == target_resolved or resolved in seen:
+            return
+        seen.add(resolved)
+        out.append(candidate)
+
+    try:
+        payload = _read_json(target_path)
+    except ConfigError:
+        payload = {}
     data_dir = payload.get("data_dir")
     if data_dir:
-        legacy = Path(str(data_dir)).expanduser() / "config.json"
-        if legacy != target_path:
-            return legacy
-    # No data_dir override → the legacy path equals the fixed one; nothing to
-    # migrate.
-    return target_path
+        _add(Path(str(data_dir)) / "config.json")
+    env_data = os.environ.get("LOCAL_AGENT_DATA_DIR", "").strip()
+    if env_data:
+        _add(Path(env_data) / "config.json")
+    for base in (Path.cwd(), _project_root()):
+        cfg = base / "config.json"
+        if not cfg.is_file():
+            continue
+        try:
+            candidate_payload = _read_json(cfg)
+        except ConfigError:
+            continue
+        if not _looks_like_assistant_config(candidate_payload):
+            continue
+        _add(cfg)
+        candidate_data_dir = candidate_payload.get("data_dir")
+        if candidate_data_dir:
+            _add(Path(str(candidate_data_dir)) / "config.json")
+    return out
 
 
-def _migrate_old_config(target_path: Path, legacy_path: Path) -> None:
-    """Fold non-default settings from the old ``<data_dir>/config.json`` into
-    the fixed settings file (once, idempotently, with a clear Persian log)."""
-    if legacy_path == target_path or not legacy_path.is_file():
+def _migrate_old_config(target_path: Path, legacy_paths: list[Path]) -> None:
+    """Fold non-default settings from older config locations into the primary
+    settings file (once, idempotently, with a clear Persian log)."""
+    for legacy_path in legacy_paths:
+        _migrate_one_config(target_path, legacy_path)
+
+
+def _migrate_one_config(target_path: Path, legacy_path: Path) -> None:
+    if not legacy_path.is_file():
         return
     try:
         legacy = _read_json(legacy_path)

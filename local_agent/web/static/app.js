@@ -367,6 +367,16 @@
           case "telegram_state":
             this.applyTelegramState(p.telegram || {});
             break;
+          case "scheduled_fired": {
+            const job = p.job || {};
+            const kind = job.type === "task" ? "کار زمان‌بندی‌شده" : "یادآوری";
+            const text = job.message || (job.action_name ? "اجرای " + job.action_name : "");
+            this.notifyDesktop("⏰ " + kind, text || p.result || "");
+            this.pushNote("system", "⏰ " + kind + (text ? ": " + text : "") +
+              (p.success === false ? " — خطا: " + (p.result || "") : ""));
+            this.beep("done");
+            break;
+          }
           case "chat_started":
             this.runId = msg.run_id;
             this.busy = true;
@@ -646,14 +656,18 @@
       },
 
       get telegramStateLabel() {
+        return this.accountStateLabel(this.telegramState);
+      },
+
+      accountStateLabel(state) {
         const labels = {
-          disabled: "",
+          disabled: "غیرفعال",
           disconnected: "وصل نیست",
           await_code: "منتظر کد…",
           await_2fa: "منتظر رمز 2FA…",
           connected: "✅ متصل",
         };
-        return labels[this.telegramState] || "";
+        return labels[state] || "";
       },
 
       get gmailStateLabel() {
@@ -697,6 +711,23 @@
           this.refreshStatus();
         } catch (err) {
           this.toast("bad", "⚠️", "تعویض اکانت ناموفق بود — " + err.message);
+        } finally {
+          this.switchingTelegram = false;
+        }
+      },
+
+      async toggleAccountEnabled(acc) {
+        if (this.connection === "offline") return;
+        this.switchingTelegram = true;
+        try {
+          await this.api("/api/telegram/account", {
+            method: "POST",
+            body: JSON.stringify({ name: acc.account, enabled: !acc.enabled }),
+          });
+          this.toast("ok", "✅", "وضعیت «فعال» اکانت " + acc.account + " تغییر کرد");
+          this.refreshStatus();
+        } catch (err) {
+          this.toast("bad", "⚠️", "تغییر وضعیت اکانت ناموفق بود — " + err.message);
         } finally {
           this.switchingTelegram = false;
         }

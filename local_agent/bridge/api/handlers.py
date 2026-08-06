@@ -25,6 +25,7 @@ from ...actions import build_default_registry, describe_action, run_action
 from ...actions.config_actions import register_config
 from ...actions.gmail_actions import register_gmail
 from ...actions.registry import ActionContext, ConfirmationGate
+from ...actions.scheduler_actions import register_scheduler
 from ...actions.telegram_actions import register_telegram
 from ...automation import is_gui_available, register_gui
 from ...core.config import (
@@ -36,6 +37,8 @@ from ...core.config import (
 from ...core.context import ConversationMessage, RuntimeContext
 from ...core.errors import ActionRefused, AssistantError, DependencyMissing
 from ...core.logging_setup import get_logger
+from ...core.notify import notify_desktop
+from ...core.scheduler import ScheduledJob, Scheduler
 from ...gmail import GmailClient
 from ...gmail.client import GmailError
 from ...llm import create_client
@@ -175,7 +178,9 @@ class BridgeHandlers:
         register_telegram(registry, context)
         register_config(registry, context)
         register_gmail(registry, context)
+        register_scheduler(registry, context)
         context.extra["telegram"] = None
+        context.extra["registry"] = registry
         gmail = _build_gmail_client(settings)
         context.extra["gmail"] = gmail
         handlers = cls(
@@ -190,6 +195,12 @@ class BridgeHandlers:
         # a way to persist + apply settings from inside the action layer.
         context.extra["settings_owner"] = handlers
         handlers._sync_telegram_accounts()
+        # Scheduled reminders/tasks: persisted in data_dir/scheduled.json,
+        # fired by a daemon thread, streamed to every frontend.
+        scheduler = Scheduler(settings.data_dir)
+        context.extra["scheduler"] = scheduler
+        scheduler.set_fire_callback(handlers._on_scheduled_fired)
+        scheduler.start()
         runtime.set_system_prompt(_build_system_prompt(
             registry, settings, is_gui_available(), telegram_has_clients(handlers),
         ))
@@ -286,7 +297,7 @@ class BridgeHandlers:
                 "llm_model": self.settings.llm.ollama_model or self.settings.llm.openai_model,
                 "openai_base_url": self.settings.llm.openai_base_url,
                 "openai_api_key_set": bool(self.settings.llm.openai_api_key),
-                "telegram_enabled": telegram_state["enabled"],
+                "telegram_enabled": telegram_state["feature_enabled"],
                 "telegram_connected": telegram_state["connected"],
                 "telegram_state": telegram_state["state"],
                 "telegram_phone": telegram_state["phone"],
@@ -329,6 +340,12 @@ class BridgeHandlers:
                 )
         if llm.provider == "openai_compatible" and not llm.openai_api_key:
             out.append("کلید API تنظیم نشده است. در تنظیمات، کلید AvalAI خود را وارد کنید.")
+        if self.settings.gmail.enabled and self.context.extra.get("gmail") is None:
+            out.append(
+                "جیمیل فعال است ولی اتصالش کامل نیست. برای اتصال جیمیل، username و "
+                "App Password (یا credentials.json) را در تنظیمات ست کنید و دکمهٔ "
+                "«اتصال جیمیل» را بزنید."
+            )
         return out
 
     def _set_model(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -581,7 +598,12 @@ class BridgeHandlers:
         return name, self._telegram_accounts[name]
 
     def telegram_status(self, account: str | None = None) -> dict[str, Any]:
-        """Connection state for one account (default: active) — no secrets."""
+        """Connection state for one account (default: active) — no secrets.
+
+        ``enabled`` is the *per-account* flag; ``feature_enabled`` is the
+        global Telegram toggle.  The two are deliberately separate so the
+        UI can show «فعال» per account while the master switch stays global.
+        """
         tg = self.settings.telegram
         name = (account or tg.active_account) or "اصلی"
         acc = tg.account(name)
@@ -594,7 +616,8 @@ class BridgeHandlers:
             state = "disabled"
         return {
             "account": name,
-            "enabled": bool(tg.enabled),
+            "enabled": bool(acc.enabled),
+            "feature_enabled": bool(tg.enabled),
             "connected": bool(client and client.is_connected),
             "state": state,
             "phone": acc.phone,
@@ -604,24 +627,78 @@ class BridgeHandlers:
         }
 
     def telegram_accounts_status(self) -> dict[str, Any]:
-        """Status of every account (no secrets) plus the active one."""
+        """Status of every account (no secrets) plus the active one.
+
+        When settings were constructed directly (no ``accounts`` materialised
+        yet), the active account is synthesised so the UI never renders an
+        empty list.
+        """
         tg = self.settings.telegram
-        accounts = [self.telegram_status(a.name) for a in tg.accounts]
+        names = [a.name for a in tg.accounts]
+        if not names:
+            names = [tg.active_account or "اصلی"]
+        accounts = [self.telegram_status(name) for name in names]
         return {
             "enabled": bool(tg.enabled),
             "active_account": tg.active_account,
             "accounts": accounts,
         }
 
-    def switch_telegram_account(self, name: str) -> dict[str, Any]:
-        """Make ``name`` the active account (persisted)."""
+    def set_telegram_account_enabled(self, name: str, enabled: bool) -> dict[str, Any]:
+        """Toggle one account's ``enabled`` flag (persisted, secrets untouched).
+
+        The web UI switch sends only ``{name, enabled}`` — credentials stay
+        in the stored config and are never round-tripped through the UI.
+        """
         tg = self.settings.telegram
         if not any(a.name == name for a in tg.accounts):
             raise AssistantError(f"اکانت تلگرام «{name}» وجود ندارد")
-        if name == tg.active_account:
-            return self.telegram_accounts_status()
+        accounts = [
+            replace(a, enabled=bool(enabled)) if a.name == name else a
+            for a in tg.accounts
+        ]
         new_tg = TelegramSettings(
-            enabled=tg.enabled, active_account=name, accounts=tg.accounts,
+            enabled=tg.enabled, active_account=tg.active_account,
+            accounts=tuple(accounts),
+        )
+        self._apply_settings(self.settings.with_overrides(telegram=new_tg))
+        return self.telegram_accounts_status()
+
+    def _mark_account_enabled(self, name: str) -> None:
+        """Persist ``enabled=True`` for one account (and the feature).
+
+        Called the moment a login flow reaches ``connected`` so that after
+        a restart :meth:`_sync_telegram_accounts` rebuilds a client for the
+        account instead of leaving it in the "disabled" state.
+        """
+        tg = self.settings.telegram
+        acc = replace(tg.account(name), enabled=True)
+        accounts = [replace(a, enabled=True) if a.name == name else a for a in tg.accounts]
+        if not any(a.name == name for a in accounts):
+            accounts.append(acc)
+        new_tg = TelegramSettings(
+            enabled=True, active_account=tg.active_account, accounts=tuple(accounts),
+        )
+        self._apply_settings(self.settings.with_overrides(telegram=new_tg))
+
+    def switch_telegram_account(self, name: str) -> dict[str, Any]:
+        """Make ``name`` the active account and enable it (persisted).
+
+        «فعال کن/تعویض» must also flip the account's ``enabled`` flag,
+        otherwise ``_sync_telegram_accounts`` never builds a client for it
+        after a restart and the account stays "disabled".
+        """
+        tg = self.settings.telegram
+        if not any(a.name == name for a in tg.accounts):
+            # No accounts materialised yet — activating the current active
+            # account is still a valid enable operation.
+            if name != tg.active_account:
+                raise AssistantError(f"اکانت تلگرام «{name}» وجود ندارد")
+            accounts = [replace(tg.account(name), enabled=True)]
+        else:
+            accounts = [replace(a, enabled=True) if a.name == name else a for a in tg.accounts]
+        new_tg = TelegramSettings(
+            enabled=tg.enabled, active_account=name, accounts=tuple(accounts),
         )
         self._apply_settings(self.settings.with_overrides(telegram=new_tg))
         return self.telegram_accounts_status()
@@ -634,11 +711,18 @@ class BridgeHandlers:
         except TelegramError as exc:
             raise AssistantError(str(exc)) from exc
         except Exception as exc:
+            if _is_telegram_network_error(exc):
+                logger.warning("telegram start_login network failure: %s", exc)
+                raise AssistantError(_TELEGRAM_NETWORK_HINT) from exc
             logger.warning("telegram start_login failed: %s", exc)
             raise AssistantError(
                 "اتصال به سرور تلگرام ممکن نشد؛ اتصال اینترنت را بررسی کنید "
                 "(در صورت نیاز فیلترشکن) و دوباره تلاش کنید."
             ) from exc
+        if result.get("state") == "connected":
+            # A valid session file skipped the code step — persist enabled so
+            # the client survives restarts.
+            self._mark_account_enabled(name)
         self._publish_telegram_state()
         return {**result, **self.telegram_status(name)}
 
@@ -651,10 +735,16 @@ class BridgeHandlers:
         except TelegramError as exc:
             raise AssistantError(str(exc)) from exc
         except Exception as exc:
+            if _is_telegram_network_error(exc):
+                logger.warning("telegram submit_code network failure: %s", exc)
+                raise AssistantError(_TELEGRAM_NETWORK_HINT) from exc
             logger.warning("telegram submit_code failed: %s", exc)
             raise AssistantError(
                 "ارسال کد به سرور تلگرام ناموفق بود؛ اتصال اینترنت را بررسی کنید."
             ) from exc
+        if result.get("state") == "connected":
+            # No 2FA on the account — the code completed the login.
+            self._mark_account_enabled(name)
         self._publish_telegram_state()
         return {**result, **self.telegram_status(name)}
 
@@ -667,10 +757,17 @@ class BridgeHandlers:
         except TelegramError as exc:
             raise AssistantError(str(exc)) from exc
         except Exception as exc:
+            if _is_telegram_network_error(exc):
+                logger.warning("telegram submit_password network failure: %s", exc)
+                raise AssistantError(_TELEGRAM_NETWORK_HINT) from exc
             logger.warning("telegram submit_password failed: %s", exc)
             raise AssistantError(
                 "ارسال رمز 2FA به سرور تلگرام ناموفق بود؛ اتصال اینترنت را بررسی کنید."
             ) from exc
+        if result.get("state") == "connected":
+            # Login complete — persist enabled=True for this account so the
+            # session is rebuilt automatically after a restart.
+            self._mark_account_enabled(name)
         self._publish_telegram_state()
         return {**result, **self.telegram_status(name)}
 
@@ -684,11 +781,15 @@ class BridgeHandlers:
         except TelegramError as exc:
             raise AssistantError(str(exc)) from exc
         except Exception as exc:
+            if _is_telegram_network_error(exc):
+                logger.warning("telegram connect network failure: %s", exc)
+                raise AssistantError(_TELEGRAM_NETWORK_HINT) from exc
             logger.warning("telegram connect failed: %s", exc)
             raise AssistantError(
                 "اتصال به سرور تلگرام ممکن نشد؛ اتصال اینترنت را بررسی کنید "
                 "(در صورت نیاز فیلترشکن) و دوباره تلاش کنید."
             ) from exc
+        self._mark_account_enabled(name)
         self._publish_telegram_state()
         return {"state": "connected", "message": message, **self.telegram_status(name)}
 
@@ -707,6 +808,38 @@ class BridgeHandlers:
         self.event_bus.publish(Event(
             type=EventType.TELEGRAM_STATE.value,
             payload={"telegram": self.telegram_status(), "accounts": self.telegram_accounts_status()},
+            run_id="",
+        ))
+
+    # ---------------------------------------------------------- scheduler
+
+    def _on_scheduled_fired(self, job: ScheduledJob) -> None:
+        """Callback از ریسمان زمان‌بند: اعلان/اجرای کار و انتشار رویداد.
+
+        ``reminder`` → اعلان دسکتاپ + رویداد ``scheduled_fired``.
+        ``task`` → اجرای اکشن (با auto_confirm، چون تأیید هنگام ثبت گرفته
+        شده) و نتیجهٔ موفق/ناموفق همان رویداد می‌شود.
+        """
+        if job.type == "task":
+            try:
+                result = self._invoke_action_sync(ActionInvocation(
+                    name=job.action_name, arguments=job.arguments or {}, auto_confirm=True,
+                ))
+                payload = {
+                    "job": job.to_dict(),
+                    "success": result.success,
+                    "result": result.text,
+                }
+            except Exception as exc:
+                logger.exception("scheduled task %s crashed", job.id)
+                payload = {"job": job.to_dict(), "success": False, "result": f"خطا: {exc}"}
+        else:
+            payload = {"job": job.to_dict(), "success": True, "result": ""}
+        notify_desktop("⏰ یادآوری" if job.type == "reminder" else f"⏰ کار زمان‌بندی‌شده: {job.action_name}",
+                       job.message or payload.get("result") or "")
+        self.event_bus.publish(Event(
+            type=EventType.SCHEDULED_FIRED.value,
+            payload=payload,
             run_id="",
         ))
 
@@ -1084,6 +1217,32 @@ class PendingConfirmation:
     event: threading.Event = field(default_factory=threading.Event)
 
 
+_TELEGRAM_NETWORK_HINT = (
+    "اتصال به سرور تلگرام برقرار نشد؛ اتصال اینترنت را بررسی کنید و در صورت "
+    "نیاز از فیلترشکن/VPN استفاده کنید، سپس دوباره تلاش کنید."
+)
+
+
+def _is_telegram_network_error(exc: Exception) -> bool:
+    """Is the failure a network/connectivity problem, not bad credentials?
+
+    Telethon retries its connection and finally raises a plain
+    ``ConnectionError`` ("Connection to Telegram failed 5 time(s)") — a
+    completely different situation from «account not enabled/configured»,
+    so it deserves its own readable Persian message.
+    """
+    name = type(exc).__name__
+    text = str(exc).lower()
+    return (
+        isinstance(exc, ConnectionError)
+        or "connection" in name.lower()
+        or "connection to telegram failed" in text
+        or "timed out" in text
+        or "network" in text
+        or "dns" in text
+    )
+
+
 def _coerce_setting_value(value: Any, current: Any) -> Any:
     """Coerce a raw ``config_set`` value to the type currently stored."""
     if isinstance(current, bool):
@@ -1259,13 +1418,19 @@ def _ollama_reachable(base_url: str, timeout: float = 1.5) -> bool:
 def _build_gmail_client(
     settings: AssistantSettings, *, force: bool = False
 ) -> GmailClient | None:
-    """Build the Gmail client when enabled (or when ``force``); never touches the network."""
+    """Build the Gmail client when enabled (or when ``force``); never touches the network.
+
+    Missing/incomplete config is expected while the user has not finished
+    the settings form (e.g. no username yet), so it is logged at DEBUG —
+    a WARNING here repeated on every startup only confused users.  The UI
+    banner (:meth:`BridgeHandlers._warnings`) explains what to fill in.
+    """
     if not settings.gmail.enabled and not force:
         return None
     try:
         return GmailClient.from_settings(settings.gmail, settings.data_dir)
     except GmailError as exc:
-        logger.warning("gmail client not built: %s", exc)
+        logger.debug("gmail client not built: %s", exc)
         return None
 
 
