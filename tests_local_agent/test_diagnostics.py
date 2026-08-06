@@ -380,3 +380,62 @@ def test_config_consistency_fails_on_unwritable_config_path(tmp_path: Path, monk
     result = check_config_consistency(settings)
     assert result.status == "fail"
     assert result.data["writable"] is False
+
+
+def test_is_our_web_server_detects_live_instance(web_server) -> None:
+    """یک نمونهٔ واقعی از سرور خودمان روی پورت → پروب /healthz ما را می‌شناسد."""
+    assert dx._is_our_web_server(web_server.port) is True
+
+
+def test_is_our_web_server_rejects_foreign_json() -> None:
+    """بدنهٔ JSON با ok=false یا بدون ok نباید «خودمان» تشخیص داده شود."""
+    import json as _json
+
+    class _Sock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+        def sendall(self, data):
+            self._data = data
+
+        def recv(self, size):
+            body = _json.dumps({"ok": False, "ts": 1}).encode()
+            return b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body) + body
+
+    def _connect(*a, **k):
+        return _Sock()
+
+    monkeypatch = __import__("pytest").MonkeyPatch()
+    monkeypatch.setattr(dx.socket, "create_connection", _connect)
+    try:
+        assert dx._is_our_web_server(9999) is False
+    finally:
+        monkeypatch.undo()
+
+
+def test_is_our_web_server_rejects_non_json() -> None:
+    class _Sock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+        def sendall(self, data):
+            pass
+
+        def recv(self, size):
+            return b"HTTP/1.1 200 OK\r\n\r\n<html>not ours</html>"
+
+    def _connect(*a, **k):
+        return _Sock()
+
+    monkeypatch = __import__("pytest").MonkeyPatch()
+    monkeypatch.setattr(dx.socket, "create_connection", _connect)
+    try:
+        assert dx._is_our_web_server(9999) is False
+    finally:
+        monkeypatch.undo()

@@ -528,9 +528,19 @@ def _is_our_web_server(port: int, timeout: float = 1.5) -> bool:
             sock.sendall(
                 b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
             )
-            data = sock.recv(512).decode("utf-8", "replace")
-        return '"ok"' in data and "true" in data.lower()
-    except OSError:
+            chunks: list[bytes] = []
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                if sum(len(c) for c in chunks) > 65536:
+                    break
+            data = b"".join(chunks).decode("utf-8", "replace")
+        body = data.split("\r\n\r\n", 1)[-1] if "\r\n\r\n" in data else data
+        payload = json.loads(body)
+        return isinstance(payload, dict) and payload.get("ok") is True
+    except (OSError, ValueError):
         return False
 
 
