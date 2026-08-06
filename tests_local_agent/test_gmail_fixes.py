@@ -309,3 +309,72 @@ def test_download_attachment_action_non_numeric_id_is_clean_error(
             )
     assert "عددی" in str(exc.value)
     assert "crashed" not in caplog.text
+
+
+# ===========================================================================
+# گ ۵) مسیر نسبی پیوست باید از پوشهٔ کاری (workspace) باز شود
+# ===========================================================================
+
+
+def test_gmail_send_resolves_relative_attachment_from_work_dir(tmp_path: Path) -> None:
+    from local_agent.actions import run_action
+    from local_agent.bridge.api.handlers import BridgeHandlers
+    from local_agent.core.config import AssistantSettings
+    from local_agent.gmail.client import GmailClient
+
+    attached = tmp_path / "tokpypl.txt"
+    attached.write_text("data", encoding="utf-8")
+
+    seen: dict[str, object] = {}
+
+    class _Backend:
+        is_connected = True
+
+        def send(self, to, subject, body, attachments=None):
+            seen["to"] = to
+            seen["attachments"] = list(attachments or [])
+            return "sent"
+
+    handlers = BridgeHandlers.build(AssistantSettings(data_dir=tmp_path, work_dir=tmp_path))
+    handlers.context.extra["gmail"] = GmailClient(backend=_Backend())
+    handlers.gate.auto_approve()
+
+    run_action(
+        handlers.registry,
+        "gmail.send",
+        {"to": "a@b.com", "subject": "s", "body": "b", "attachments": ["tokpypl.txt"]},
+        handlers.context,
+    )
+    assert seen["to"] == "a@b.com"
+    assert seen["attachments"] == [str(attached)]
+
+
+def test_gmail_send_absolute_attachment_used_as_is(tmp_path: Path) -> None:
+    from local_agent.actions import run_action
+    from local_agent.bridge.api.handlers import BridgeHandlers
+    from local_agent.core.config import AssistantSettings
+    from local_agent.gmail.client import GmailClient
+
+    outside = tmp_path / "abs.txt"
+    outside.write_text("x", encoding="utf-8")
+
+    seen: dict[str, object] = {}
+
+    class _Backend:
+        is_connected = True
+
+        def send(self, to, subject, body, attachments=None):
+            seen["attachments"] = list(attachments or [])
+            return "sent"
+
+    handlers = BridgeHandlers.build(AssistantSettings(data_dir=tmp_path, work_dir=tmp_path))
+    handlers.context.extra["gmail"] = GmailClient(backend=_Backend())
+    handlers.gate.auto_approve()
+
+    run_action(
+        handlers.registry,
+        "gmail.send",
+        {"to": "a@b.com", "subject": "s", "body": "b", "attachments": [str(outside)]},
+        handlers.context,
+    )
+    assert seen["attachments"] == [str(outside)]

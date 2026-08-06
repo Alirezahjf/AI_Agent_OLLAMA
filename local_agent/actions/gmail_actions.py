@@ -62,13 +62,15 @@ def register_gmail(registry: ActionRegistry, context: ActionContext) -> None:
     registry.decorator(
         name="gmail.send",
         description=(
-            "ارسال ایمیل از حساب جیمیل کاربر. attachments اختیاری است (فهرست مسیر فایل‌ها، "
-            "حداکثر ۲۵ مگابایت هرکدام). DESTRUCTIVE — همیشه تأیید می‌خواهد."
+            "ارسال ایمیل از حساب جیمیل کاربر. to فقط به‌صورت خام name@domain (بدون Markdown). "
+            "body می‌تواند HTML باشد؛ خود برنامه تشخیص می‌دهد. attachments اختیاری است: فهرست "
+            "مسیر فایل‌ها (حداکثر ۲۵ مگابایت هرکدام)؛ فایل‌های ضمیمه‌شدهٔ چت در پوشهٔ کاری "
+            "ذخیره شده‌اند و کافی است نامشان را بدهی. DESTRUCTIVE — همیشه تأیید می‌خواهد."
         ),
         parameters={
-            "to": {"type": "string", "description": "آدرس گیرنده"},
+            "to": {"type": "string", "description": "آدرس گیرنده (فقط name@domain)"},
             "subject": {"type": "string", "description": "موضوع"},
-            "body": {"type": "string", "description": "متن ایمیل"},
+            "body": {"type": "string", "description": "متن ایمیل (می‌تواند HTML باشد)"},
             "attachments": {"type": "array", "items": {"type": "string"},
                             "description": "فهرست مسیر فایل‌های پیوست (اختیاری)"},
         },
@@ -166,6 +168,22 @@ def _extract_email(raw: Any) -> str:
     return match.group(0)
 
 
+def _resolve_attachments(raw: list[str] | None, work_dir: Any) -> list[str]:
+    """Resolve attachment paths against the workspace.
+
+    Files the user attaches in the chat are saved into ``work_dir``, so a
+    bare name (``tokpypl.txt``) must resolve there; absolute paths are used
+    as-is.  The backend validates existence and raises a Persian error.
+    """
+    out: list[str] = []
+    for item in raw or []:
+        path = Path(str(item)).expanduser()
+        if not path.is_absolute():
+            path = Path(work_dir) / path
+        out.append(str(path))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Implementations
 # ---------------------------------------------------------------------------
@@ -210,7 +228,10 @@ def send(*, to: str, subject: str, body: str, attachments: list[str] | None = No
     clean_to = _extract_email(to)
     if not isinstance(subject, str) or not subject.strip():
         raise AssistantError("subject must be a non-empty string")
-    result = _client(context).send(clean_to, subject, body, attachments=list(attachments or []))
+    result = _client(context).send(
+        clean_to, subject, body,
+        attachments=_resolve_attachments(attachments, context.work_dir),
+    )
     return f"✅ ایمیل به «{clean_to}» ارسال شد ({result})"
 
 
@@ -226,5 +247,8 @@ def reply(*, id: str, body: str, attachments: list[str] | None = None,
           context: ActionContext) -> str:
     if not isinstance(id, str) or not id.strip():
         raise AssistantError("id must be a non-empty string")
-    result = _client(context).reply(id.strip(), body, attachments=list(attachments or []))
+    result = _client(context).reply(
+        id.strip(), body,
+        attachments=_resolve_attachments(attachments, context.work_dir),
+    )
     return f"✅ پاسخ به ایمیل {id} ارسال شد ({result})"
