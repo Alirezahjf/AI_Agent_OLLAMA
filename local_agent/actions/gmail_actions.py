@@ -82,10 +82,12 @@ def register_gmail(registry: ActionRegistry, context: ActionContext) -> None:
         name="gmail.download_attachment",
         description=(
             "دانلود یک پیوست ایمیل (با نام فایل) به پوشهٔ data_dir/gmail و برگرداندن مسیر "
-            "واقعی. اگر filename خالی باشد اولین پیوست دانلود می‌شود. SAFE."
+            "واقعی. id باید شناسهٔ عددی خودِ ایمیل باشد (از gmail.list_unread / gmail.search "
+            "بگیر)، نه نام فایل. اگر filename خالی باشد اولین پیوست دانلود می‌شود. برای ارسال "
+            "فایل‌های ضمیمه‌شدهٔ چت از gmail.send با attachments استفاده کن، نه این ابزار. SAFE."
         ),
         parameters={
-            "id": {"type": "string", "description": "شناسهٔ ایمیل"},
+            "id": {"type": "string", "description": "شناسهٔ عددی ایمیل"},
             "filename": {"type": "string", "description": "نام پیوست (اختیاری)"},
         },
         required=("id",),

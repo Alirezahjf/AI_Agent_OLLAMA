@@ -206,3 +206,106 @@ def test_gmail_send_uses_cleaned_markdown_recipient(tmp_path: Path) -> None:
             handlers.context,
         )
     assert "نامعتبر" in str(exc.value)
+
+
+# ===========================================================================
+# گ ۴) شناسهٔ غیرعددی ایمیل → خطای فارسی، نه «FETCH command error»
+# ===========================================================================
+
+
+class _FakeImap:
+    """حداقل جایگزین imaplib: شناسه‌های fetch را ضبط می‌کند و می‌تواند خطا بدهد."""
+
+    def __init__(self, fetch_result=None, raise_on_fetch: Exception | None = None) -> None:
+        self.fetch_result = fetch_result or ("OK", [(b"1", b"Subject: s\r\n\r\nbody")])
+        self.raise_on_fetch = raise_on_fetch
+        self.fetch_calls: list[str] = []
+
+    def select(self, mailbox: str) -> None:
+        return None
+
+    def search(self, *args):
+        return "OK", [b"1 2"]
+
+    def fetch(self, msg_id, spec):
+        self.fetch_calls.append(str(msg_id))
+        if self.raise_on_fetch is not None:
+            raise self.raise_on_fetch
+        return self.fetch_result
+
+    def logout(self) -> None:
+        return None
+
+
+def test_imap_require_numeric_id_rejects_filenames(tmp_path: Path) -> None:
+    """read/reply/download با id غیرعددی → GmailError فارسی و بدون fetch."""
+    from local_agent.gmail import client as gm
+
+    imap = _FakeImap()
+    backend = gm._ImapGmailBackend(username="u@gmail.com", app_password="p" * 16)
+    backend._imap = imap
+
+    for method, args in (
+        ("read", ("content-bottom_1.png",)),
+        ("download_attachment", ("content-bottom_1.png", "x.png", Path("/tmp"))),
+        ("reply", ("content-bottom_1.png", "body")),
+    ):
+        with pytest.raises(gm.GmailError) as exc:
+            getattr(backend, method)(*args)
+        assert "عددی" in str(exc.value)
+    assert imap.fetch_calls == []
+
+
+def test_imap_numeric_id_fetch_ok() -> None:
+    from local_agent.gmail import client as gm
+
+    raw = b"Subject: test\r\nFrom: x@example.com\r\n\r\nbody\r\n"
+    imap = _FakeImap(fetch_result=("OK", [(b"1", raw)]))
+    backend = gm._ImapGmailBackend(username="u@gmail.com", app_password="p" * 16)
+    backend._imap = imap
+    message = backend.read("42")
+    assert message.id == "42"
+    assert imap.fetch_calls == ["42"]
+
+
+def test_imap_fetch_error_is_friendly_persian() -> None:
+    from local_agent.gmail import client as gm
+
+    imap = _FakeImap(raise_on_fetch=__import__("imaplib").IMAP4.error("boom"))
+    backend = gm._ImapGmailBackend(username="u@gmail.com", app_password="p" * 16)
+    backend._imap = imap
+    with pytest.raises(gm.GmailError):
+        backend.read("1")
+
+
+def test_download_attachment_action_non_numeric_id_is_clean_error(
+    tmp_path: Path, caplog
+) -> None:
+    """اکشن download با id غیرعددی → خطای فارسی و بدون لاگ ERROR (کرش)."""
+    import logging
+
+    from local_agent.actions import run_action
+    from local_agent.bridge.api.handlers import BridgeHandlers
+    from local_agent.core.config import AssistantSettings
+    from local_agent.gmail.client import GmailClient, GmailError
+
+    class _Backend:
+        is_connected = True
+
+        def download_attachment(self, msg_id, filename, save_dir):
+            # رفتار واقعی بکند IMAP: اعتبارسنجی قبل از fetch
+            raise GmailError("شناسهٔ ایمیل باید عددی باشد (مثلاً ۱۲۳). «id» شناسهٔ خود ایمیل است، نه نام فایل پیوست.")
+
+    handlers = BridgeHandlers.build(AssistantSettings(data_dir=tmp_path, work_dir=tmp_path))
+    handlers.context.extra["gmail"] = GmailClient(backend=_Backend())
+
+    with caplog.at_level(logging.ERROR, logger="actions"):
+        with pytest.raises(AssistantError) as exc:
+            run_action(
+                handlers.registry,
+                "gmail.download_attachment",
+                {"id": "content-bottom_1.png", "filename": "content-bottom_1.png"},
+                handlers.context,
+            )
+    assert "عددی" in str(exc.value)
+    assert "crashed" not in caplog.text

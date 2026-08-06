@@ -26,6 +26,7 @@ import re
 import smtplib
 import ssl
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -170,26 +171,38 @@ class _OAuthGmailBackend(GmailBackend):
             raise GmailError("جیمیل وصل نیست؛ ابتدا اتصال را برقرار کنید")
         return self._service.users()
 
+    def _gmail_call(self, fn: Callable[[], Any], what: str = "عملیات") -> Any:
+        """Run one Gmail API call, converting network/HTTP failures to GmailError."""
+        try:
+            return fn()
+        except GmailError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - googleapiclient errors are not AssistantErrors
+            raise GmailError(f"{what} جیمیل ناموفق بود: {exc}") from exc
+
     def list_unread(self, limit: int) -> list[GmailMessage]:
-        results = (
-            self._users()
-            .messages()
-            .list(userId="me", q="is:unread", maxResults=max(1, limit))
-            .execute()
+        results = self._gmail_call(
+            lambda: self._users().messages().list(
+                userId="me", q="is:unread", maxResults=max(1, limit)
+            ).execute(),
+            what="خواندن ایمیل‌های خوانده‌نشده",
         )
         return [self._summary(msg) for msg in results.get("messages", [])]
 
     def search(self, query: str, limit: int) -> list[GmailMessage]:
-        results = (
-            self._users()
-            .messages()
-            .list(userId="me", q=query, maxResults=max(1, limit))
-            .execute()
+        results = self._gmail_call(
+            lambda: self._users().messages().list(
+                userId="me", q=query, maxResults=max(1, limit)
+            ).execute(),
+            what="جست‌وجوی ایمیل",
         )
         return [self._summary(msg) for msg in results.get("messages", [])]
 
     def read(self, msg_id: str) -> GmailMessage:
-        payload = self._users().messages().get(userId="me", id=msg_id, format="full").execute()
+        payload = self._gmail_call(
+            lambda: self._users().messages().get(userId="me", id=msg_id, format="full").execute(),
+            what="خواندن ایمیل",
+        )
         headers = {h["name"].lower(): h["value"] for h in payload.get("payload", {}).get("headers", [])}
         body = _extract_body(payload.get("payload", {}))
         attachments = _extract_attachments(payload.get("payload", {}))
@@ -207,12 +220,20 @@ class _OAuthGmailBackend(GmailBackend):
     def send(self, to: str, subject: str, body: str, attachments: list[str] | None = None) -> str:
         message = _build_mime(to, subject, body, attachments)
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
-        sent = self._users().messages().send(userId="me", body={"raw": raw}).execute()
+        sent = self._gmail_call(
+            lambda: self._users().messages().send(userId="me", body={"raw": raw}).execute(),
+            what="ارسال ایمیل",
+        )
         return str(sent.get("id", "?"))
 
     def reply(self, msg_id: str, body: str, attachments: list[str] | None = None) -> str:
-        original = self._users().messages().get(userId="me", id=msg_id, format="metadata",
-                                                metadataHeaders=["Subject", "References", "Message-ID"]).execute()
+        original = self._gmail_call(
+            lambda: self._users().messages().get(
+                userId="me", id=msg_id, format="metadata",
+                metadataHeaders=["Subject", "References", "Message-ID"],
+            ).execute(),
+            what="خواندن ایمیل مبدأ",
+        )
         headers = {h["name"].lower(): h["value"] for h in original.get("payload", {}).get("headers", [])}
         subject = _decode_header_value(headers.get("subject", ""))
         if not subject.lower().startswith("re:"):
@@ -223,18 +244,27 @@ class _OAuthGmailBackend(GmailBackend):
         thread_id = original.get("threadId")
         if thread_id:
             body_req["threadId"] = thread_id
-        sent = self._users().messages().send(userId="me", body=body_req).execute()
+        sent = self._gmail_call(
+            lambda: self._users().messages().send(userId="me", body=body_req).execute(),
+            what="ارسال پاسخ",
+        )
         return str(sent.get("id", "?"))
 
     def download_attachment(self, msg_id: str, filename: str, save_dir: Path) -> Path:
-        payload = self._users().messages().get(userId="me", id=msg_id, format="full").execute()
+        payload = self._gmail_call(
+            lambda: self._users().messages().get(userId="me", id=msg_id, format="full").execute(),
+            what="خواندن ایمیل",
+        )
         path = _download_attachment_from_payload(payload.get("payload", {}), filename, save_dir)
         if path is None:
             raise GmailError(f"پیوستی با نام «{filename}» در ایمیل {msg_id} پیدا نشد")
         return path
 
     def _summary(self, msg: dict[str, Any]) -> GmailMessage:
-        payload = self._users().messages().get(userId="me", id=msg["id"]).execute()
+        payload = self._gmail_call(
+            lambda: self._users().messages().get(userId="me", id=msg["id"]).execute(),
+            what="خلاصهٔ ایمیل",
+        )
         headers = {h["name"].lower(): h["value"] for h in payload.get("payload", {}).get("headers", [])}
         return GmailMessage(
             id=msg["id"],
@@ -290,19 +320,46 @@ class _ImapGmailBackend(GmailBackend):
     def _select(self) -> Any:
         if self._imap is None:
             raise GmailError("جیمیل وصل نیست؛ ابتدا اتصال را برقرار کنید")
-        self._imap.select("INBOX")
+        try:
+            self._imap.select("INBOX")
+        except (imaplib.IMAP4.error, OSError) as exc:
+            raise GmailError(f"اتصال به صندوق ورودی جیمیل ممکن نشد: {exc}") from exc
         return self._imap
+
+    @staticmethod
+    def _require_numeric_id(msg_id: Any) -> str:
+        """IMAP message ids are plain integers; anything else is a caller bug.
+
+        The model sometimes passes a *filename* (``content-bottom_1.png``)
+        as the message id, which made the raw IMAP server reply
+        ``FETCH command error``.  Convert non-numeric ids to a clear Persian
+        error instead of leaking the raw server message.
+        """
+        raw = str(msg_id).strip()
+        try:
+            return str(int(raw))
+        except ValueError:
+            raise GmailError(
+                "شناسهٔ ایمیل باید عددی باشد (مثلاً ۱۲۳). "
+                "«id» شناسهٔ خود ایمیل است، نه نام فایل پیوست."
+            ) from None
 
     def _fetch_messages(self, criteria: str, limit: int) -> list[GmailMessage]:
         with self._lock:
             imap = self._select()
-            status, data = imap.search(None, criteria)
+            try:
+                status, data = imap.search(None, criteria)
+            except (imaplib.IMAP4.error, OSError) as exc:
+                raise GmailError(f"جست‌وجوی ایمیل ممکن نشد: {exc}") from exc
             if status != "OK":
                 return []
             ids = data[0].split()
             out: list[GmailMessage] = []
             for msg_id in ids[-max(1, limit):]:
-                status, msg_data = imap.fetch(msg_id, "(RFC822)")
+                try:
+                    status, msg_data = imap.fetch(msg_id, "(RFC822)")
+                except (imaplib.IMAP4.error, OSError) as exc:
+                    raise GmailError(f"خواندن ایمیل ممکن نشد: {exc}") from exc
                 if status != "OK" or not msg_data or msg_data[0] is None:
                     continue
                 parsed = email.message_from_bytes(msg_data[0][1])
@@ -318,16 +375,20 @@ class _ImapGmailBackend(GmailBackend):
         return self._fetch_messages(criteria, limit)
 
     def read(self, msg_id: str) -> GmailMessage:
+        numeric = self._require_numeric_id(msg_id)
         with self._lock:
             imap = self._select()
-            status, msg_data = imap.fetch(str(msg_id), "(RFC822)")
+            try:
+                status, msg_data = imap.fetch(numeric, "(RFC822)")
+            except (imaplib.IMAP4.error, OSError) as exc:
+                raise GmailError(f"خواندن ایمیل ممکن نشد: {exc}") from exc
             if status != "OK" or not msg_data or msg_data[0] is None:
-                raise GmailError(f"ایمیلی با شناسهٔ {msg_id} پیدا نشد")
+                raise GmailError(f"ایمیلی با شناسهٔ {numeric} پیدا نشد")
             parsed = email.message_from_bytes(msg_data[0][1])
             body = _rfc822_body(parsed)
             attachments = _rfc822_attachments(parsed)
             return GmailMessage(
-                id=str(msg_id),
+                id=numeric,
                 subject=_decode_header_value(parsed.get("Subject", "")),
                 sender=_decode_header_value(parsed.get("From", "?")),
                 snippet=body[:300],
@@ -348,13 +409,17 @@ class _ImapGmailBackend(GmailBackend):
         return "sent"
 
     def reply(self, msg_id: str, body: str, attachments: list[str] | None = None) -> str:
+        numeric = self._require_numeric_id(msg_id)
         with self._lock:
             imap = self._select()
-            status, msg_data = imap.fetch(str(msg_id), "(RFC822)")
+            try:
+                status, msg_data = imap.fetch(numeric, "(RFC822)")
+            except (imaplib.IMAP4.error, OSError) as exc:
+                raise GmailError(f"خواندن ایمیل مبدأ ممکن نشد: {exc}") from exc
             if status != "OK" or not msg_data or msg_data[0] is None:
-                raise GmailError(f"ایمیلی با شناسهٔ {msg_id} پیدا نشد")
+                raise GmailError(f"ایمیلی با شناسهٔ {numeric} پیدا نشد")
             parsed = email.message_from_bytes(msg_data[0][1])
-        subject = str(parsed.get("Subject", ""))
+        subject = _decode_header_value(parsed.get("Subject", ""))
         if not subject.lower().startswith("re:"):
             subject = "Re: " + subject
         message = _build_mime_reply(subject, body, attachments)
@@ -367,15 +432,19 @@ class _ImapGmailBackend(GmailBackend):
         return "sent"
 
     def download_attachment(self, msg_id: str, filename: str, save_dir: Path) -> Path:
+        numeric = self._require_numeric_id(msg_id)
         with self._lock:
             imap = self._select()
-            status, msg_data = imap.fetch(str(msg_id), "(RFC822)")
+            try:
+                status, msg_data = imap.fetch(numeric, "(RFC822)")
+            except (imaplib.IMAP4.error, OSError) as exc:
+                raise GmailError(f"خواندن ایمیل ممکن نشد: {exc}") from exc
             if status != "OK" or not msg_data or msg_data[0] is None:
-                raise GmailError(f"ایمیلی با شناسهٔ {msg_id} پیدا نشد")
+                raise GmailError(f"ایمیلی با شناسهٔ {numeric} پیدا نشد")
             parsed = email.message_from_bytes(msg_data[0][1])
         path = _download_attachment_from_rfc822(parsed, filename, save_dir)
         if path is None:
-            raise GmailError(f"پیوستی با نام «{filename}» در ایمیل {msg_id} پیدا نشد")
+            raise GmailError(f"پیوستی با نام «{filename}» در ایمیل {numeric} پیدا نشد")
         return path
 
 
