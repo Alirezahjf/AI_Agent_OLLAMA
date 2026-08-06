@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from local_agent.core.errors import AssistantError
 from local_agent.gmail.client import (
     _build_mime,
     _build_mime_reply,
@@ -138,3 +139,70 @@ def test_imap_message_from_bytes_decoded() -> None:
     )
     parsed = email.message_from_bytes(raw)
     assert _decode_header_value(parsed.get("Subject")) == "هشدار امنیتی"
+
+
+# ===========================================================================
+# گ ۳) گیرندهٔ markdown باید تمیز و اعتبارسنجی شود
+# ===========================================================================
+
+
+def test_extract_email_cleans_markdown_link() -> None:
+    from local_agent.actions.gmail_actions import _extract_email
+
+    assert _extract_email("[sajjadbul313@gmail.com](mailto:sajjadbul313@gmail.com)") == (
+        "sajjadbul313@gmail.com"
+    )
+
+
+def test_extract_email_plain_address() -> None:
+    from local_agent.actions.gmail_actions import _extract_email
+
+    assert _extract_email("a@b.com") == "a@b.com"
+    assert _extract_email("  Name <x@y.com> ") == "x@y.com"
+
+
+@pytest.mark.parametrize("bad", ["not-an-email", "", "a@", "@b.com", "a b c"])
+def test_extract_email_rejects_invalid(bad: str) -> None:
+    from local_agent.actions.gmail_actions import _extract_email
+
+    with pytest.raises(AssistantError):
+        _extract_email(bad)
+
+
+def test_gmail_send_uses_cleaned_markdown_recipient(tmp_path: Path) -> None:
+    from local_agent.actions import run_action
+    from local_agent.bridge.api.handlers import BridgeHandlers
+    from local_agent.core.config import AssistantSettings
+    from local_agent.core.errors import AssistantError
+    from local_agent.gmail.client import GmailClient
+
+    seen: dict[str, object] = {}
+
+    class _Backend:
+        is_connected = True
+
+        def send(self, to, subject, body, attachments=None):
+            seen["to"] = to
+            return "sent"
+
+    handlers = BridgeHandlers.build(AssistantSettings(data_dir=tmp_path, work_dir=tmp_path))
+    handlers.context.extra["gmail"] = GmailClient(backend=_Backend())
+    handlers.gate.auto_approve()
+
+    run_action(
+        handlers.registry,
+        "gmail.send",
+        {"to": "[sajjadbul313@gmail.com](mailto:sajjadbul313@gmail.com)",
+         "subject": "s", "body": "b"},
+        handlers.context,
+    )
+    assert seen["to"] == "sajjadbul313@gmail.com"
+
+    with pytest.raises(AssistantError) as exc:
+        run_action(
+            handlers.registry,
+            "gmail.send",
+            {"to": "not-an-email", "subject": "s", "body": "b"},
+            handlers.context,
+        )
+    assert "نامعتبر" in str(exc.value)

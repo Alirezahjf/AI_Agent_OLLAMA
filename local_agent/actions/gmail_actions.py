@@ -7,6 +7,7 @@ The client lives in ``context.extra["gmail"]`` and is owned by
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -136,6 +137,33 @@ def _format_messages(messages: list[Any]) -> str:
     return f"تعداد {len(messages)} ایمیل:\n" + "\n".join(lines)
 
 
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_MAILTO_LINK_RE = re.compile(r"\[[^\]]*\]\(mailto:([^)]+)\)")
+
+
+def _extract_email(raw: Any) -> str:
+    """Extract a clean ``name@domain`` address from a model-supplied value.
+
+    The model sometimes wraps the address in Markdown
+    (``[a@b.com](mailto:a@b.com)``) or free text; the plain ``\"@\" in to``
+    check used to accept those and a broken address went out.  A valid
+    email must match the regex, otherwise a Persian error is raised.
+    """
+    if not isinstance(raw, str):
+        raise AssistantError("آدرس گیرندهٔ ایمیل نامعتبر است")
+    value = raw.strip()
+    link = _MAILTO_LINK_RE.search(value)
+    if link:
+        value = link.group(1).strip()
+    match = _EMAIL_RE.search(value)
+    if not match:
+        raise AssistantError(
+            "آدرس گیرندهٔ ایمیل نامعتبر است. آدرس را فقط به‌صورت خام "
+            "name@domain بدهید (بدون Markdown و بدون متن اضافه)."
+        )
+    return match.group(0)
+
+
 # ---------------------------------------------------------------------------
 # Implementations
 # ---------------------------------------------------------------------------
@@ -177,12 +205,11 @@ def read(*, id: str, context: ActionContext) -> str:
 @risk(Risk.DESTRUCTIVE)
 def send(*, to: str, subject: str, body: str, attachments: list[str] | None = None,
          context: ActionContext) -> str:
-    if not isinstance(to, str) or "@" not in to:
-        raise AssistantError("آدرس گیرندهٔ ایمیل نامعتبر است")
+    clean_to = _extract_email(to)
     if not isinstance(subject, str) or not subject.strip():
         raise AssistantError("subject must be a non-empty string")
-    result = _client(context).send(to.strip(), subject, body, attachments=list(attachments or []))
-    return f"✅ ایمیل به «{to}» ارسال شد ({result})"
+    result = _client(context).send(clean_to, subject, body, attachments=list(attachments or []))
+    return f"✅ ایمیل به «{clean_to}» ارسال شد ({result})"
 
 
 @risk(Risk.SAFE)
