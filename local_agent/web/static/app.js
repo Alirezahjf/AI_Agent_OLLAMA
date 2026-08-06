@@ -367,6 +367,16 @@
           case "telegram_state":
             this.applyTelegramState(p.telegram || {});
             break;
+          case "scheduled_fired": {
+            const job = p.job || {};
+            const kind = job.type === "task" ? "کار زمان‌بندی‌شده" : "یادآوری";
+            const text = job.message || (job.action_name ? "اجرای " + job.action_name : "");
+            this.notifyDesktop("⏰ " + kind, text || p.result || "");
+            this.pushNote("system", "⏰ " + kind + (text ? ": " + text : "") +
+              (p.success === false ? " — خطا: " + (p.result || "") : ""));
+            this.beep("done");
+            break;
+          }
           case "chat_started":
             this.runId = msg.run_id;
             this.busy = true;

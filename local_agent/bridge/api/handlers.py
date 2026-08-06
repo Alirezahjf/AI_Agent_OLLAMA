@@ -25,6 +25,7 @@ from ...actions import build_default_registry, describe_action, run_action
 from ...actions.config_actions import register_config
 from ...actions.gmail_actions import register_gmail
 from ...actions.registry import ActionContext, ConfirmationGate
+from ...actions.scheduler_actions import register_scheduler
 from ...actions.telegram_actions import register_telegram
 from ...automation import is_gui_available, register_gui
 from ...core.config import (
@@ -36,6 +37,8 @@ from ...core.config import (
 from ...core.context import ConversationMessage, RuntimeContext
 from ...core.errors import ActionRefused, AssistantError, DependencyMissing
 from ...core.logging_setup import get_logger
+from ...core.notify import notify_desktop
+from ...core.scheduler import ScheduledJob, Scheduler
 from ...gmail import GmailClient
 from ...gmail.client import GmailError
 from ...llm import create_client
@@ -175,7 +178,9 @@ class BridgeHandlers:
         register_telegram(registry, context)
         register_config(registry, context)
         register_gmail(registry, context)
+        register_scheduler(registry, context)
         context.extra["telegram"] = None
+        context.extra["registry"] = registry
         gmail = _build_gmail_client(settings)
         context.extra["gmail"] = gmail
         handlers = cls(
@@ -190,6 +195,12 @@ class BridgeHandlers:
         # a way to persist + apply settings from inside the action layer.
         context.extra["settings_owner"] = handlers
         handlers._sync_telegram_accounts()
+        # Scheduled reminders/tasks: persisted in data_dir/scheduled.json,
+        # fired by a daemon thread, streamed to every frontend.
+        scheduler = Scheduler(settings.data_dir)
+        context.extra["scheduler"] = scheduler
+        scheduler.set_fire_callback(handlers._on_scheduled_fired)
+        scheduler.start()
         runtime.set_system_prompt(_build_system_prompt(
             registry, settings, is_gui_available(), telegram_has_clients(handlers),
         ))
@@ -797,6 +808,38 @@ class BridgeHandlers:
         self.event_bus.publish(Event(
             type=EventType.TELEGRAM_STATE.value,
             payload={"telegram": self.telegram_status(), "accounts": self.telegram_accounts_status()},
+            run_id="",
+        ))
+
+    # ---------------------------------------------------------- scheduler
+
+    def _on_scheduled_fired(self, job: ScheduledJob) -> None:
+        """Callback از ریسمان زمان‌بند: اعلان/اجرای کار و انتشار رویداد.
+
+        ``reminder`` → اعلان دسکتاپ + رویداد ``scheduled_fired``.
+        ``task`` → اجرای اکشن (با auto_confirm، چون تأیید هنگام ثبت گرفته
+        شده) و نتیجهٔ موفق/ناموفق همان رویداد می‌شود.
+        """
+        if job.type == "task":
+            try:
+                result = self._invoke_action_sync(ActionInvocation(
+                    name=job.action_name, arguments=job.arguments or {}, auto_confirm=True,
+                ))
+                payload = {
+                    "job": job.to_dict(),
+                    "success": result.success,
+                    "result": result.text,
+                }
+            except Exception as exc:
+                logger.exception("scheduled task %s crashed", job.id)
+                payload = {"job": job.to_dict(), "success": False, "result": f"خطا: {exc}"}
+        else:
+            payload = {"job": job.to_dict(), "success": True, "result": ""}
+        notify_desktop("⏰ یادآوری" if job.type == "reminder" else f"⏰ کار زمان‌بندی‌شده: {job.action_name}",
+                       job.message or payload.get("result") or "")
+        self.event_bus.publish(Event(
+            type=EventType.SCHEDULED_FIRED.value,
+            payload=payload,
             run_id="",
         ))
 

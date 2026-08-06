@@ -19,7 +19,6 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
 
-
 PROTOCOL_VERSION = 1
 
 
@@ -70,6 +69,7 @@ class EventType(str, Enum):
     CHAT_FAILED = "chat_failed"
     LOG = "log"
     TELEGRAM_STATE = "telegram_state"
+    SCHEDULED_FIRED = "scheduled_fired"
 
 
 @dataclass
@@ -122,7 +122,7 @@ class ActionInvocation:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ActionInvocation":
+    def from_dict(cls, payload: dict[str, Any]) -> ActionInvocation:
         return cls(
             name=str(payload.get("name", "")),
             arguments=dict(payload.get("arguments") or {}),
@@ -143,7 +143,7 @@ class ActionResult:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ActionResult":
+    def from_dict(cls, payload: dict[str, Any]) -> ActionResult:
         return cls(
             name=str(payload.get("name", "")),
             text=str(payload.get("text", "")),
@@ -208,7 +208,7 @@ class Response:
         return out
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "Response":
+    def from_dict(cls, payload: dict[str, Any]) -> Response:
         error_payload = payload.get("error")
         return cls(
             id=str(payload.get("id", "")),

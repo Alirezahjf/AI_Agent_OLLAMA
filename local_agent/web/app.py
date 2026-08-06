@@ -40,7 +40,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from queue import Empty
+from queue import Empty, Queue
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
@@ -819,6 +819,33 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         # run_id -> threading.Queue (the bridge event-bus queue)
         run_queues: dict[str, Any] = {}
         forwarders: dict[str, asyncio.Task] = {}
+        # Global (run_id="") events — telegram_state, scheduled_fired — are
+        # broadcast to every connected frontend.  The event-bus listener runs
+        # on a bridge thread, so a threading.Queue + to_thread is used (the
+        # same pattern as the per-run queues).
+        global_queue: Any = Queue()
+
+        def _push_global(event: Any) -> None:
+            # Only truly global events (run_id="") belong to every frontend;
+            # run-scoped events flow through their own per-run forwarder.
+            if event.run_id:
+                return
+            try:
+                global_queue.put_nowait(event)
+            except Exception:  # noqa: BLE001 - socket half-dead: drop the event
+                logger.debug("global event dropped for a closed websocket")
+
+        async def global_forwarder() -> None:
+            while not stop.is_set():
+                try:
+                    event = await asyncio.to_thread(global_queue.get, timeout=0.5)
+                except Empty:
+                    continue
+                await incoming.put({"__global": True, "event": event})
+
+        if server is not None:
+            server.handlers.event_bus.subscribe(_push_global)
+        global_task = asyncio.create_task(global_forwarder())
 
         async def _send(payload: dict[str, Any]) -> bool:
             """Send one frame; return False when the socket is gone.
@@ -864,6 +891,18 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                 item = await incoming.get()
                 if item is None:
                     break  # client disconnected / socket died
+                if "__global" in item:
+                    event = item["event"]
+                    ok = await _send({
+                        "type": "event",
+                        "event_type": event.type,
+                        "payload": event.payload,
+                        "run_id": event.run_id,
+                        "seq": event.seq,
+                    })
+                    if not ok:
+                        break
+                    continue
                 if "__run" in item:
                     run_id, event = item["__run"], item["event"]
                     if event is None:
@@ -923,11 +962,14 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         finally:
             stop.set()
             reader_task.cancel()
+            global_task.cancel()
             for task in forwarders.values():
                 task.cancel()
             for run_id in list(run_queues):
                 if server is not None:
                     server.handlers.event_bus.destroy_run_queue(run_id)
+            if server is not None:
+                server.handlers.event_bus.unsubscribe(_push_global)
             logger.debug("websocket handler exited cleanly")
 
     # Static assets
