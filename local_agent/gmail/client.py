@@ -177,7 +177,7 @@ class _OAuthGmailBackend(GmailBackend):
             return fn()
         except GmailError:
             raise
-        except Exception as exc:  # noqa: BLE001 - googleapiclient errors are not AssistantErrors
+        except Exception as exc:
             raise GmailError(f"{what} جیمیل ناموفق بود: {exc}") from exc
 
     def list_unread(self, limit: int) -> list[GmailMessage]:

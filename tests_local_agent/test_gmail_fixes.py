@@ -299,14 +299,13 @@ def test_download_attachment_action_non_numeric_id_is_clean_error(
     handlers = BridgeHandlers.build(AssistantSettings(data_dir=tmp_path, work_dir=tmp_path))
     handlers.context.extra["gmail"] = GmailClient(backend=_Backend())
 
-    with caplog.at_level(logging.ERROR, logger="actions"):
-        with pytest.raises(AssistantError) as exc:
-            run_action(
-                handlers.registry,
-                "gmail.download_attachment",
-                {"id": "content-bottom_1.png", "filename": "content-bottom_1.png"},
-                handlers.context,
-            )
+    with caplog.at_level(logging.ERROR, logger="actions"), pytest.raises(AssistantError) as exc:
+        run_action(
+            handlers.registry,
+            "gmail.download_attachment",
+            {"id": "content-bottom_1.png", "filename": "content-bottom_1.png"},
+            handlers.context,
+        )
     assert "عددی" in str(exc.value)
     assert "crashed" not in caplog.text
 
