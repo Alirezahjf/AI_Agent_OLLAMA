@@ -324,3 +324,59 @@ def test_check_encoding_cp720_warns(monkeypatch):
     result = dx.check_encoding()
     assert result.status == dx.WARN
     assert "OutputEncoding" in result.hint or "PowerShell" in result.hint
+
+
+# ---------------------------------------------------------------------------
+# B2: config consistency (single source of truth + legacy migration check)
+# ---------------------------------------------------------------------------
+
+
+def test_config_consistency_ok_when_config_path_writable(tmp_path: Path) -> None:
+    import json
+
+    from local_agent.core.config import load_settings
+    from local_agent.diagnostics import check_config_consistency
+
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"data_dir": str(tmp_path)}), encoding="utf-8")
+    settings = load_settings(config)
+    result = check_config_consistency(settings)
+    assert result.status == "ok"
+    assert result.data["writable"] is True
+
+
+def test_config_consistency_warns_on_stray_legacy_config(tmp_path: Path) -> None:
+    import json
+
+    from local_agent.core.config import load_settings
+    from local_agent.diagnostics import check_config_consistency
+
+    data_dir = tmp_path / "olddata"
+    data_dir.mkdir(parents=True)
+    (data_dir / "config.json").write_text(json.dumps({"llm": {"provider": "ollama"}}), encoding="utf-8")
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"data_dir": str(data_dir)}), encoding="utf-8")
+
+    settings = load_settings(config)
+    result = check_config_consistency(settings)
+    assert result.status == "warn"
+    assert "سرگردان" in result.detail
+
+
+def test_config_consistency_fails_on_unwritable_config_path(tmp_path: Path, monkeypatch) -> None:
+    import json
+
+    from local_agent.core.config import load_settings
+    from local_agent.diagnostics import check_config_consistency
+
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"data_dir": str(tmp_path)}), encoding="utf-8")
+    settings = load_settings(config)
+    # Make the write probe fail.
+    def _boom(*args, **kwargs):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "write_text", _boom)
+    result = check_config_consistency(settings)
+    assert result.status == "fail"
+    assert result.data["writable"] is False

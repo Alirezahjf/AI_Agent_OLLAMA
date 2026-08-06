@@ -12,9 +12,10 @@ import platform
 import re
 import socket
 import threading
+import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from queue import Queue
 from typing import Any
@@ -26,7 +27,12 @@ from ...actions.gmail_actions import register_gmail
 from ...actions.registry import ActionContext, ConfirmationGate
 from ...actions.telegram_actions import register_telegram
 from ...automation import is_gui_available, register_gui
-from ...core.config import AssistantSettings, ConfigError
+from ...core.config import (
+    AssistantSettings,
+    ConfigError,
+    TelegramAccount,
+    TelegramSettings,
+)
 from ...core.context import ConversationMessage, RuntimeContext
 from ...core.errors import ActionRefused, AssistantError, DependencyMissing
 from ...core.logging_setup import get_logger
@@ -49,6 +55,10 @@ from ..protocol import (
 )
 
 logger = get_logger("bridge.handlers")
+
+# Multi-session limits (F4): cap live sessions and drop idle ones.
+MAX_SESSIONS = 20
+SESSION_TIMEOUT_SECONDS = 24 * 3600
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +143,14 @@ class BridgeHandlers:
     context: ActionContext
     gate: ConfirmationGate
     event_bus: EventBus = field(default_factory=EventBus)
+    # The *active* account's client (backward-compatible accessor).
     telegram: PersonalTelegram | None = None
+    # Every enabled account's client, keyed by account name (F2).
+    _telegram_accounts: dict[str, PersonalTelegram] = field(default_factory=dict)
+    # Per-session runtimes keyed by session_id (F4); the default runtime is
+    # ``self.runtime`` under the key "default".
+    _sessions: dict[str, RuntimeContext] = field(default_factory=dict)
+    _sessions_lock: threading.RLock = field(default_factory=threading.RLock)
     _lock: threading.RLock = field(default_factory=threading.RLock)
     _active_runs: dict[str, threading.Event] = field(default_factory=dict)
     _run_threads: dict[str, threading.Thread] = field(default_factory=dict)
@@ -158,29 +175,24 @@ class BridgeHandlers:
         register_telegram(registry, context)
         register_config(registry, context)
         register_gmail(registry, context)
-        telegram = None
-        if settings.telegram.enabled:
-            telegram = PersonalTelegram(
-                api_id=settings.telegram.api_id,
-                api_hash=settings.telegram.api_hash,
-                phone=settings.telegram.phone,
-                session_path=settings.telegram_session_path,
-            )
-        context.extra["telegram"] = telegram
+        context.extra["telegram"] = None
         gmail = _build_gmail_client(settings)
         context.extra["gmail"] = gmail
-        runtime.set_system_prompt(_build_system_prompt(registry, settings, is_gui_available(), telegram is not None))
         handlers = cls(
             settings=settings,
             runtime=runtime,
             registry=registry,
             context=context,
             gate=gate,
-            telegram=telegram,
+            telegram=None,
         )
         # ``config_set`` (used when the user says «به تلگرامم وصل شو») needs
         # a way to persist + apply settings from inside the action layer.
         context.extra["settings_owner"] = handlers
+        handlers._sync_telegram_accounts()
+        runtime.set_system_prompt(_build_system_prompt(
+            registry, settings, is_gui_available(), telegram_has_clients(handlers),
+        ))
         return handlers
 
     # -----------------------------------------------------------------
@@ -219,18 +231,22 @@ class BridgeHandlers:
             if type_ == MessageType.GET_STATUS.value:
                 return Response(id=request_id, ok=True, result=self._status()).to_dict()
             if type_ == MessageType.GET_HISTORY.value:
+                runtime = self._runtime_for(payload.get("session_id"))
                 return Response(
                     id=request_id, ok=True,
-                    result=[m.to_openai() for m in self.runtime.snapshot()],
+                    result=[m.to_openai() for m in runtime.snapshot()],
                 ).to_dict()
             if type_ == MessageType.CLEAR_HISTORY.value:
-                self.runtime.clear()
+                runtime = self._runtime_for(payload.get("session_id"))
+                runtime.clear()
                 return Response(id=request_id, ok=True, result={"cleared": True}).to_dict()
             if type_ == MessageType.SET_MODEL.value:
                 return Response(id=request_id, ok=True, result=self._set_model(payload)).to_dict()
             if type_ == MessageType.CHAT.value:
                 # Returns a run_id immediately; events flow over the bus.
-                run_id = self._start_chat_run(payload.get("message", ""))
+                run_id = self._start_chat_run(
+                    payload.get("message", ""), session_id=payload.get("session_id")
+                )
                 return Response(id=request_id, ok=True, result={"run_id": run_id}).to_dict()
             if type_ == MessageType.INTERRUPT.value:
                 self._interrupt_run(payload.get("run_id", ""))
@@ -279,10 +295,17 @@ class BridgeHandlers:
                 "full_system_access": bool(self.settings.safety.full_system_access),
                 "elevation": elevation_level(),
                 "confirm_mode": self.settings.safety.confirm_mode,
+                "telegram_active_account": self.settings.telegram.active_account,
+                "telegram_accounts": self.telegram_accounts_status(),
+                "telegram_confirm_send": bool(
+                    self.settings.telegram.account(None).confirm_send
+                ),
+                "gmail_confirm_send": bool(self.settings.gmail.confirm_send),
             },
             "warnings": self._warnings(),
             "actions": [a.name for a in self.registry.all()],
             "history": self.runtime.stats(),
+            "sessions": len(self._sessions),
         }
 
     def gmail_connected(self) -> bool:
@@ -335,7 +358,7 @@ class BridgeHandlers:
         The write is atomic (tmp + ``os.replace``) so a crash mid-write
         can never corrupt the file the next start reads.
         """
-        path = self.settings.config_path
+        path = self.settings.effective_config_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(path.suffix + ".tmp")
@@ -360,6 +383,8 @@ class BridgeHandlers:
         payload is re-validated through :class:`AssistantSettings` so a
         bad value can never leave a half-written config behind.
         """
+        if path.startswith("telegram."):
+            return self._apply_telegram_config_set(path, value)
         payload = self.settings.to_dict()
         parts = path.split(".")
         cursor = payload
@@ -377,6 +402,41 @@ class BridgeHandlers:
             raise AssistantError(f"مقدار تنظیم نامعتبر است: {exc}") from exc
         return self._apply_settings(new_settings)
 
+    def _apply_telegram_config_set(self, path: str, value: Any) -> AssistantSettings:
+        """Apply a ``telegram.<field>`` config_set to the active account.
+
+        The modern config stores accounts in a list, so legacy dotted paths
+        (``telegram.api_id``, ``telegram.confirm_send``, ...) are mapped onto
+        the active account to keep the «به تلگرامم وصل شو» flow working.
+        """
+        leaf = path[len("telegram."):]
+        tg = self.settings.telegram
+        if leaf == "enabled":
+            # Enabling the feature also enables the active account, so a
+            # client actually gets created for it.
+            val = bool(value)
+            accounts = list(tg.accounts)
+            if not accounts:
+                accounts = [TelegramAccount(name=tg.active_account, enabled=val)]
+            accounts = [
+                replace(a, enabled=val) if a.name == tg.active_account else a
+                for a in accounts
+            ]
+            new_tg = TelegramSettings(
+                enabled=val, active_account=tg.active_account, accounts=tuple(accounts)
+            )
+        elif leaf == "active_account":
+            new_tg = tg.updated({"active_account": str(value)})
+        elif leaf == "api_id":
+            new_tg = tg.updated({"api_id": int(str(value).strip() or 0)})
+        elif leaf == "confirm_send":
+            new_tg = tg.updated({"confirm_send": bool(value)})
+        elif leaf in ("api_hash", "phone", "session_name"):
+            new_tg = tg.updated({leaf: str(value)})
+        else:
+            raise AssistantError(f"تنظیم ناشناخته: {path}")
+        return self._apply_settings(self.settings.with_overrides(telegram=new_tg))
+
     def _apply_settings(self, new_settings: AssistantSettings) -> AssistantSettings:
         """Swap in new settings and keep every dependent object in sync."""
         old = self.settings
@@ -386,33 +446,52 @@ class BridgeHandlers:
         self.context.confirmation_gate = self.gate
         self.context.work_dir = new_settings.work_dir
         self._persist_settings()
-        self._sync_telegram_client(old)
+        self._sync_telegram_accounts()
         self._sync_gmail_client(old)
         return new_settings
 
-    def _sync_telegram_client(self, old: AssistantSettings) -> None:
-        """Create/drop the PersonalTelegram instance as ``telegram.enabled`` changes."""
+    def _sync_telegram_accounts(self) -> None:
+        """Create/drop one PersonalTelegram per enabled account (F2).
+
+        The active account's client is also mirrored onto ``self.telegram``
+        and ``context.extra["telegram"]`` so the existing single-account
+        action code keeps working unchanged.
+        """
         tg = self.settings.telegram
-        if tg.enabled and self.telegram is None:
-            if tg.api_id and tg.api_hash and tg.phone:
-                self.telegram = PersonalTelegram(
-                    api_id=tg.api_id,
-                    api_hash=tg.api_hash,
-                    phone=tg.phone,
-                    session_path=self.settings.telegram_session_path,
+        desired: dict[str, TelegramAccount] = {}
+        if tg.enabled:
+            desired = {acc.name: acc for acc in tg.accounts if acc.enabled}
+
+        # Drop accounts that were disabled / removed.
+        for name in list(self._telegram_accounts):
+            if name not in desired:
+                client = self._telegram_accounts.pop(name)
+                if client.is_connected:
+                    try:
+                        client.disconnect()
+                    except Exception as exc:  # noqa: BLE001 - best-effort teardown
+                        logger.debug("telegram disconnect failed: %s", exc)
+
+        # Create missing enabled accounts.
+        for name, acc in desired.items():
+            if name in self._telegram_accounts:
+                continue
+            if acc.api_id and acc.api_hash and acc.phone:
+                self._telegram_accounts[name] = PersonalTelegram(
+                    api_id=acc.api_id,
+                    api_hash=acc.api_hash,
+                    phone=acc.phone,
+                    session_path=self.settings.telegram_session_path_for(name),
+                    account_name=name,
                 )
-                self.context.extra["telegram"] = self.telegram
-                self.runtime.set_system_prompt(_build_system_prompt(
-                    self.registry, self.settings, is_gui_available(), True
-                ))
-        elif not tg.enabled and self.telegram is not None:
-            if self.telegram.is_connected:
-                try:
-                    self.telegram.disconnect()
-                except Exception as exc:  # noqa: BLE001 - best-effort teardown
-                    logger.debug("telegram disconnect failed: %s", exc)
-            self.telegram = None
-            self.context.extra["telegram"] = None
+
+        # Mirror the active account onto the single-client accessor.
+        active = self._telegram_accounts.get(tg.active_account)
+        self.telegram = active
+        self.context.extra["telegram"] = active
+        self.runtime.set_system_prompt(_build_system_prompt(
+            self.registry, self.settings, is_gui_available(), telegram_has_clients(self),
+        ))
 
     def _sync_gmail_client(self, old: AssistantSettings) -> None:
         """Create/drop the Gmail client as ``gmail.enabled`` changes."""
@@ -471,46 +550,85 @@ class BridgeHandlers:
 
     # ------------------------------------------------------- telegram flow
 
-    def telegram_status(self) -> dict[str, Any]:
-        """Connection state for the personal Telegram client (no secrets)."""
+    def _account_names(self) -> list[str]:
+        return [acc.name for acc in self.settings.telegram.accounts]
+
+    def _account_client(self, account: str | None = None) -> tuple[str, PersonalTelegram]:
+        """Resolve ``account`` (default: active) to its client.
+
+        Raises a Persian error for an unknown account name (F2).
+        """
         tg = self.settings.telegram
-        client = self.telegram
+        name = (account or tg.active_account) or "اصلی"
+        acc = tg.account(name)
+        if name not in self._telegram_accounts:
+            client = None
+            if acc.api_id and acc.api_hash and acc.phone:
+                client = PersonalTelegram(
+                    api_id=acc.api_id,
+                    api_hash=acc.api_hash,
+                    phone=acc.phone,
+                    session_path=self.settings.telegram_session_path_for(name),
+                    account_name=name,
+                )
+                self._telegram_accounts[name] = client
+            if client is None:
+                raise AssistantError(
+                    f"اکانت تلگرام «{name}» پیدا نشد. "
+                    "از https://my.telegram.org یک app بسازید و api_id / api_hash / phone "
+                    "را در تنظیمات وب یا config.json ثبت کنید."
+                )
+        return name, self._telegram_accounts[name]
+
+    def telegram_status(self, account: str | None = None) -> dict[str, Any]:
+        """Connection state for one account (default: active) — no secrets."""
+        tg = self.settings.telegram
+        name = (account or tg.active_account) or "اصلی"
+        acc = tg.account(name)
+        client = self._telegram_accounts.get(name)
         if client is not None:
             state = client.login_state
-        elif tg.enabled:
+        elif acc.enabled and acc.api_id:
             state = "disconnected"
         else:
             state = "disabled"
         return {
+            "account": name,
             "enabled": bool(tg.enabled),
             "connected": bool(client and client.is_connected),
             "state": state,
-            "phone": tg.phone,
-            "session_path": str(self.settings.telegram_session_path),
-            "has_credentials": bool(tg.api_id and tg.api_hash and tg.phone),
+            "phone": acc.phone,
+            "session_path": str(self.settings.telegram_session_path_for(name)),
+            "has_credentials": bool(acc.api_id and acc.api_hash and acc.phone),
+            "confirm_send": bool(acc.confirm_send),
         }
 
-    def _ensure_telegram_client(self) -> PersonalTelegram:
+    def telegram_accounts_status(self) -> dict[str, Any]:
+        """Status of every account (no secrets) plus the active one."""
         tg = self.settings.telegram
-        if not (tg.api_id and tg.api_hash and tg.phone):
-            raise AssistantError(
-                "اطلاعات تلگرام (api_id / api_hash / phone) تنظیم نشده است. "
-                "از https://my.telegram.org یک app بسازید و مقادیر را در config.json "
-                "یا با ابزار config_set ثبت کنید."
-            )
-        if self.telegram is None:
-            self.telegram = PersonalTelegram(
-                api_id=tg.api_id,
-                api_hash=tg.api_hash,
-                phone=tg.phone,
-                session_path=self.settings.telegram_session_path,
-            )
-            self.context.extra["telegram"] = self.telegram
-        return self.telegram
+        accounts = [self.telegram_status(a.name) for a in tg.accounts]
+        return {
+            "enabled": bool(tg.enabled),
+            "active_account": tg.active_account,
+            "accounts": accounts,
+        }
 
-    def start_telegram_login(self) -> dict[str, Any]:
+    def switch_telegram_account(self, name: str) -> dict[str, Any]:
+        """Make ``name`` the active account (persisted)."""
+        tg = self.settings.telegram
+        if not any(a.name == name for a in tg.accounts):
+            raise AssistantError(f"اکانت تلگرام «{name}» وجود ندارد")
+        if name == tg.active_account:
+            return self.telegram_accounts_status()
+        new_tg = TelegramSettings(
+            enabled=tg.enabled, active_account=name, accounts=tg.accounts,
+        )
+        self._apply_settings(self.settings.with_overrides(telegram=new_tg))
+        return self.telegram_accounts_status()
+
+    def start_telegram_login(self, account: str | None = None) -> dict[str, Any]:
         """Begin the SMS-code login flow (web UI state machine)."""
-        client = self._ensure_telegram_client()
+        name, client = self._account_client(account)
         try:
             result = client.start_login()
         except TelegramError as exc:
@@ -522,13 +640,14 @@ class BridgeHandlers:
                 "(در صورت نیاز فیلترشکن) و دوباره تلاش کنید."
             ) from exc
         self._publish_telegram_state()
-        return {**result, **self.telegram_status()}
+        return {**result, **self.telegram_status(name)}
 
-    def submit_telegram_code(self, code: str) -> dict[str, Any]:
-        if self.telegram is None:
+    def submit_telegram_code(self, code: str, account: str | None = None) -> dict[str, Any]:
+        name, client = self._account_client(account)
+        if client is None:
             raise AssistantError("اتصال تلگرام شروع نشده است؛ دوباره دکمهٔ اتصال را بزنید")
         try:
-            result = self.telegram.submit_code(code)
+            result = client.submit_code(code)
         except TelegramError as exc:
             raise AssistantError(str(exc)) from exc
         except Exception as exc:
@@ -537,13 +656,14 @@ class BridgeHandlers:
                 "ارسال کد به سرور تلگرام ناموفق بود؛ اتصال اینترنت را بررسی کنید."
             ) from exc
         self._publish_telegram_state()
-        return {**result, **self.telegram_status()}
+        return {**result, **self.telegram_status(name)}
 
-    def submit_telegram_password(self, password: str) -> dict[str, Any]:
-        if self.telegram is None:
+    def submit_telegram_password(self, password: str, account: str | None = None) -> dict[str, Any]:
+        name, client = self._account_client(account)
+        if client is None:
             raise AssistantError("اتصال تلگرام شروع نشده است؛ دوباره دکمهٔ اتصال را بزنید")
         try:
-            result = self.telegram.submit_password(password)
+            result = client.submit_password(password)
         except TelegramError as exc:
             raise AssistantError(str(exc)) from exc
         except Exception as exc:
@@ -552,13 +672,13 @@ class BridgeHandlers:
                 "ارسال رمز 2FA به سرور تلگرام ناموفق بود؛ اتصال اینترنت را بررسی کنید."
             ) from exc
         self._publish_telegram_state()
-        return {**result, **self.telegram_status()}
+        return {**result, **self.telegram_status(name)}
 
     def connect_telegram(
-        self, *, code_callback=None, password_callback=None
+        self, *, code_callback=None, password_callback=None, account: str | None = None
     ) -> dict[str, Any]:
         """Blocking connect with callbacks — used by the CLI."""
-        client = self._ensure_telegram_client()
+        name, client = self._account_client(account)
         try:
             message = client.connect(code_callback=code_callback, password_callback=password_callback)
         except TelegramError as exc:
@@ -570,21 +690,23 @@ class BridgeHandlers:
                 "(در صورت نیاز فیلترشکن) و دوباره تلاش کنید."
             ) from exc
         self._publish_telegram_state()
-        return {"state": "connected", "message": message, **self.telegram_status()}
+        return {"state": "connected", "message": message, **self.telegram_status(name)}
 
-    def disconnect_telegram(self) -> dict[str, Any]:
-        if self.telegram is not None:
+    def disconnect_telegram(self, account: str | None = None) -> dict[str, Any]:
+        name = (account or self.settings.telegram.active_account) or "اصلی"
+        client = self._telegram_accounts.get(name)
+        if client is not None:
             try:
-                self.telegram.disconnect()
+                client.disconnect()
             except Exception as exc:  # noqa: BLE001 - best-effort teardown
                 logger.debug("telegram disconnect failed: %s", exc)
         self._publish_telegram_state()
-        return self.telegram_status()
+        return self.telegram_status(name)
 
     def _publish_telegram_state(self) -> None:
         self.event_bus.publish(Event(
             type=EventType.TELEGRAM_STATE.value,
-            payload={"telegram": self.telegram_status()},
+            payload={"telegram": self.telegram_status(), "accounts": self.telegram_accounts_status()},
             run_id="",
         ))
 
@@ -627,15 +749,55 @@ class BridgeHandlers:
 
     # ---------------------------------------------------------------- chat
 
-    def _start_chat_run(self, user_message: str) -> str:
+    def _runtime_for(self, session_id: str | None = None) -> RuntimeContext:
+        """Get (or create) the runtime for a chat session (F4).
+
+        ``None``/``"default"`` maps to the shared ``self.runtime``.  Any other
+        session id gets its own runtime whose history lives at
+        ``data_dir/history/<session_id>.jsonl``, so tabs never share history.
+        Live sessions are capped (oldest unused are dropped) and unused
+        sessions are closed after a quiet period.
+        """
+        sid = (session_id or "default") or "default"
+        if sid == "default":
+            return self.runtime
+        with self._sessions_lock:
+            runtime = self._sessions.get(sid)
+            if runtime is None:
+                self._close_stale_sessions()
+                history = self.settings.data_dir / "history" / f"{sid}.jsonl"
+                runtime = RuntimeContext(self.settings, history_path=history)
+                self._sessions[sid] = runtime
+                if len(self._sessions) > MAX_SESSIONS:
+                    self._close_stale_sessions()
+            runtime._last_used = time.monotonic()  # type: ignore[attr-defined]
+            return runtime
+
+    def _close_stale_sessions(self) -> None:
+        """Drop the oldest sessions once we exceed the cap, and any that have
+        been idle longer than the session timeout."""
+        now = time.monotonic()
+        with self._sessions_lock:
+            stale = [
+                sid for sid, rt in self._sessions.items()
+                if now - getattr(rt, "_last_used", now) > SESSION_TIMEOUT_SECONDS
+            ]
+            for sid in stale:
+                self._sessions.pop(sid, None)
+            while len(self._sessions) > MAX_SESSIONS:
+                oldest = min(self._sessions, key=lambda s: getattr(self._sessions[s], "_last_used", 0))
+                self._sessions.pop(oldest, None)
+
+    def _start_chat_run(self, user_message: str, session_id: str | None = None) -> str:
         if not user_message:
             raise AssistantError("empty chat message")
         run_id = uuid.uuid4().hex[:12]
         stop_event = threading.Event()
+        runtime = self._runtime_for(session_id)
         self.event_bus.create_run_queue(run_id)
         thread = threading.Thread(
             target=self._chat_worker,
-            args=(run_id, user_message, stop_event),
+            args=(run_id, user_message, stop_event, runtime),
             name=f"bridge-chat-{run_id}",
             daemon=True,
         )
@@ -651,9 +813,10 @@ class BridgeHandlers:
         if ev is not None:
             ev.set()
 
-    def _chat_worker(self, run_id: str, user_message: str, stop_event: threading.Event) -> None:
+    def _chat_worker(self, run_id: str, user_message: str, stop_event: threading.Event,
+                     runtime: RuntimeContext) -> None:
         try:
-            self._chat_loop(run_id, user_message, stop_event)
+            self._chat_loop(run_id, user_message, stop_event, runtime)
         except Exception as exc:
             logger.exception("chat run %s crashed", run_id)
             self.event_bus.publish(Event(
@@ -667,14 +830,15 @@ class BridgeHandlers:
                 self._active_runs.pop(run_id, None)
                 self._run_threads.pop(run_id, None)
 
-    def _chat_loop(self, run_id: str, user_message: str, stop_event: threading.Event) -> None:
+    def _chat_loop(self, run_id: str, user_message: str, stop_event: threading.Event,
+                   runtime: RuntimeContext) -> None:
         self.event_bus.publish(Event(
             type=EventType.CHAT_STARTED.value,
             payload={"user_message": user_message},
             run_id=run_id,
         ))
 
-        self.runtime.append(ConversationMessage(role="user", content=user_message))
+        runtime.append(ConversationMessage(role="user", content=user_message))
 
         max_turns = max(1, self.settings.safety.max_agent_turns)
         tools = [a.to_tool_definition() for a in self.registry.all()]
@@ -713,13 +877,15 @@ class BridgeHandlers:
             stream = getattr(client, "complete_streaming", None)
             try:
                 if callable(stream):
-                    reply = stream(self._build_messages(), tools, emit_delta)
+                    reply = stream(self._build_messages(runtime), tools, emit_delta)
                 else:
-                    reply = client.complete(self._build_messages(), tools)
+                    reply = client.complete(self._build_messages(runtime), tools)
             except Exception as exc:  # noqa: BLE001
+                # B5: surface a readable Persian message (network/4xx/5xx),
+                # never a raw English traceback as an "internal error".
                 self.event_bus.publish(Event(
                     type=EventType.CHAT_FAILED.value,
-                    payload={"error": f"LLM error: {exc}"},
+                    payload={"error": _friendly_llm_error(exc)},
                     run_id=run_id,
                 ))
                 return
@@ -741,7 +907,7 @@ class BridgeHandlers:
 
             if not reply.has_tool_calls:
                 if reply.content:
-                    self.runtime.append(ConversationMessage(role="assistant", content=reply.content))
+                    runtime.append(ConversationMessage(role="assistant", content=reply.content))
                 self.event_bus.publish(Event(type=EventType.CHAT_DONE.value, payload={}, run_id=run_id))
                 return
 
@@ -763,7 +929,7 @@ class BridgeHandlers:
                         "arguments": json.dumps(call.arguments, ensure_ascii=False),
                     },
                 })
-            self.runtime.append(ConversationMessage(
+            runtime.append(ConversationMessage(
                 role="assistant",
                 content=reply.content or "",
                 tool_calls=openai_tool_calls,
@@ -771,6 +937,14 @@ class BridgeHandlers:
 
             for call, call_id in zip(reply.tool_calls, call_ids):
                 if stop_event.is_set():
+                    # An interrupt that lands mid-turn must still surface as a
+                    # clean ``chat_failed`` (reason=interrupted), never as a
+                    # silent exit that leaves the UI hanging.
+                    self.event_bus.publish(Event(
+                        type=EventType.CHAT_FAILED.value,
+                        payload={"reason": "interrupted"},
+                        run_id=run_id,
+                    ))
                     return
                 self.event_bus.publish(Event(
                     type=EventType.TOOL_PROPOSED.value,
@@ -789,7 +963,7 @@ class BridgeHandlers:
                 else:
                     text = result.text
                 artifacts = _collect_artifacts(text, self.settings) or list(result.artifacts)
-                self.runtime.append(ConversationMessage(
+                runtime.append(ConversationMessage(
                     role="tool",
                     name=call.name,
                     tool_call_id=call_id,
@@ -823,14 +997,16 @@ class BridgeHandlers:
         short timeout.  In auto-confirm mode, we skip the wait.
         """
         action = self.registry.get(name)
-        if not action.needs_confirmation(self.settings.safety):
+        if not action.needs_confirmation(self.settings.safety, arguments):
             return self._invoke_action_sync(ActionInvocation(name=name, arguments=arguments))
 
         if self.gate._auto_approve_all:  # type: ignore[attr-defined]
             return self._invoke_action_sync(ActionInvocation(name=name, arguments=arguments))
 
         request_id = uuid.uuid4().hex[:12]
-        pending = PendingConfirmation(request_id=request_id, name=name, arguments=arguments)
+        pending = PendingConfirmation(
+            request_id=request_id, name=name, arguments=arguments, run_id=run_id
+        )
         with self._confirmation_lock:
             self._pending_confirms[request_id] = pending
 
@@ -873,13 +1049,20 @@ class BridgeHandlers:
             return False
         pending.approved = approved
         pending.event.set()
+        # Let every frontend close the approval card once a decision is in.
+        self.event_bus.publish(Event(
+            type=EventType.TOOL_CONFIRM_RESOLVED.value,
+            payload={"request_id": request_id, "approved": approved, "name": pending.name},
+            run_id=pending.run_id,
+        ))
         return True
 
-    def _build_messages(self) -> list[dict[str, Any]]:
+    def _build_messages(self, runtime: RuntimeContext | None = None) -> list[dict[str, Any]]:
+        runtime = runtime or self.runtime
         out: list[dict[str, Any]] = []
-        if self.runtime.system_prompt:
-            out.append({"role": "system", "content": self.runtime.system_prompt})
-        for msg in self.runtime.snapshot():
+        if runtime.system_prompt:
+            out.append({"role": "system", "content": runtime.system_prompt})
+        for msg in runtime.snapshot():
             out.append(msg.to_openai())
         if len(out) > self.settings.llm.max_context_messages:
             out = [out[0]] + out[-self.settings.llm.max_context_messages + 1:]
@@ -897,6 +1080,7 @@ class PendingConfirmation:
     name: str
     arguments: dict[str, Any]
     approved: bool = False
+    run_id: str = ""
     event: threading.Event = field(default_factory=threading.Event)
 
 
@@ -995,12 +1179,48 @@ def _collect_artifacts(text: str, settings: AssistantSettings) -> list[dict[str,
     return artifacts
 
 
+def _friendly_llm_error(exc: Exception) -> str:
+    """Translate provider/network failures into a readable Persian message.
+
+    B5: a NameResolutionError / DNS failure or a down gateway must surface as
+    «ارائه‌دهنده در دسترس نیست...» instead of a raw English traceback in the
+    UI, and a transient 4xx/5xx must be retried (done upstream) rather than
+    reported as an internal error.
+    """
+    name = type(exc).__name__
+    text = str(exc) or ""
+    lowered = text.lower()
+    if (
+        "NameResolutionError" in name
+        or "CannotConnectError" in name
+        or "ConnectionError" in name
+        or "resolve" in lowered
+        or "dns" in lowered
+        or "connection" in lowered
+    ):
+        return "ارائه‌دهنده در دسترس نیست؛ اتصال اینترنت را بررسی کنید و دوباره تلاش کنید."
+    if name == "LLMTimeout" or "timed out" in text.lower():
+        return "دریافت پاسخ از مدل ناموفق بود (مهلت زمانی). دوباره تلاش کنید."
+    if name == "LLMRateLimit":
+        return "محدودیت نرخ ارائه‌دهنده فعال شد؛ چند لحظه صبر کنید و دوباره تلاش کنید."
+    if "HTTP 400" in text or "400" in text and "stream" in text.lower():
+        return "پاسخ مدل ناموفق بود (درخواست ناقص). دوباره تلاش کنید."
+    if "401" in text or "403" in text:
+        return "کلید API یا دسترسی نامعتبر است؛ اعتبار سنجی را بررسی کنید."
+    return "پاسخ مدل ناموفق بود؛ دوباره تلاش کنید. (" + text[:120] + ")"
+
+
 def _short(value: Any, limit: int = 120) -> str:
     try:
         rendered = json.dumps(value, ensure_ascii=False)
     except (TypeError, ValueError):
         rendered = str(value)
     return rendered[: limit - 3] + "..." if len(rendered) > limit else rendered
+
+
+def telegram_has_clients(handlers: BridgeHandlers) -> bool:
+    """Whether any account client exists (for the system-prompt banner)."""
+    return bool(handlers._telegram_accounts)
 
 
 def _capabilities(handlers: BridgeHandlers) -> list[str]:

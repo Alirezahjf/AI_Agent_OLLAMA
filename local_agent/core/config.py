@@ -17,6 +17,7 @@ import json
 import os
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -32,10 +33,20 @@ def _default_data_dir() -> Path:
 
 
 def _default_config_path() -> Path:
+    """Resolve the single source of truth for the settings file.
+
+    This is **fixed** and deliberately independent of the ``data_dir``
+    field read from the file: either ``LOCAL_AGENT_CONFIG`` when set, or
+    ``~/.local_assistant/config.json``.  A user whose config contains a
+    ``data_dir`` pointing at an old project folder must still have their
+    settings read *and* written here — ``data_dir`` only says where logs,
+    history, sessions and screenshots live.  (Setting ``LOCAL_AGENT_DATA_DIR``
+    moves the *data* directory, never this settings file.)
+    """
     explicit = os.environ.get("LOCAL_AGENT_CONFIG", "").strip()
     if explicit:
         return Path(explicit).expanduser()
-    return _default_data_dir() / "config.json"
+    return _DEFAULT_DATA_DIR / "config.json"
 
 
 @dataclass(frozen=True)
@@ -56,19 +67,109 @@ class LLMSettings:
 
 
 @dataclass(frozen=True)
-class TelegramSettings:
-    """Personal-account Telegram via Telethon.
+class TelegramAccount:
+    """One personal Telegram account (user credentials, NOT a bot token).
 
-    These are the *user* credentials, NOT a bot token. The session is
-    persisted in ``<DATA_DIR>/telegram.session`` so the user logs in once.
+    Each account owns a separate Telethon session persisted at
+    ``<data_dir>/sessions/<session_name>.session`` so every account logs in
+    independently.  The same ``api_id``/``api_hash`` (from my.telegram.org)
+    can be shared across accounts; only ``phone`` and the session differ.
     """
 
+    name: str = "اصلی"
     enabled: bool = False
     api_id: int = 0
     api_hash: str = ""
     phone: str = ""  # E.164, e.g. +98912...
     session_name: str = "assistant"  # file is <session_name>.session
     confirm_send: bool = True  # ask before every outgoing message
+
+
+@dataclass(frozen=True)
+class TelegramSettings:
+    """Personal-account Telegram via Telethon (multi-account).
+
+    The global ``enabled`` toggles the feature; ``accounts`` holds every
+    account and ``active_account`` names the one the agent acts as by
+    default.  ``confirm_send`` is honoured per account, so an account can
+    skip the outgoing-message confirmation even when ``confirm_mode`` is
+    ``destructive``.
+    """
+
+    enabled: bool = False
+    active_account: str = "اصلی"
+    accounts: tuple[TelegramAccount, ...] = field(default_factory=tuple)
+
+    # ---- account lookup ---------------------------------------------
+
+    def account(self, name: str | None = None) -> TelegramAccount:
+        """Return the named account (default: the active one).
+
+        Unknown names yield a disabled placeholder (never raise) so callers
+        can show a Persian "unknown account" message.
+        """
+        name = (name or self.active_account) or "اصلی"
+        for acc in self.accounts:
+            if acc.name == name:
+                return acc
+        return TelegramAccount(name=name, enabled=False)
+
+    def active(self) -> TelegramAccount:
+        return self.account(self.active_account)
+
+    def updated(self, changes: dict[str, Any]) -> TelegramSettings:
+        """Return a new settings object after a partial update.
+
+        Accepts the structural keys (``enabled``, ``active_account``,
+        ``accounts``) or the legacy per-field keys (``api_id``, ``api_hash``,
+        ``phone``, ``session_name``, ``confirm_send``) which are applied to
+        the *active* account only.
+        """
+        enabled = changes.get("enabled", self.enabled)
+        active = changes.get("active_account", self.active_account)
+        if "accounts" in changes:
+            accounts = tuple(
+                _telegram_account_from_dict(a) for a in (changes["accounts"] or [])
+            )
+        else:
+            fields = {
+                k: v for k, v in changes.items()
+                if k in ("api_id", "api_hash", "phone", "session_name", "confirm_send")
+            }
+            current = list(self.accounts)
+            if not current:
+                # No accounts materialised yet (direct construction) — create
+                # the active one so legacy fields have somewhere to land.
+                current = [TelegramAccount(name=active, enabled=enabled)]
+            accounts = tuple(
+                replace(acc, **fields) if acc.name == active else acc
+                for acc in current
+            )
+        return TelegramSettings(enabled=enabled, active_account=active, accounts=accounts)
+
+    # ---- backward-compatible accessors (delegate to the active account)
+    # These keep ``settings.telegram.api_id`` & co working for the existing
+    # handlers/actions until they are migrated to ``.accounts``.
+
+    @property
+    def api_id(self) -> int:
+        return self.active().api_id
+
+    @property
+    def api_hash(self) -> str:
+        return self.active().api_hash
+
+    @property
+    def phone(self) -> str:
+        return self.active().phone
+
+    @property
+    def session_name(self) -> str:
+        return self.active().session_name
+
+    @property
+    def confirm_send(self) -> bool:
+        return self.active().confirm_send
 
 
 @dataclass(frozen=True)
@@ -122,6 +223,12 @@ class AssistantSettings:
     telegram: TelegramSettings = field(default_factory=TelegramSettings)
     gmail: GmailSettings = field(default_factory=GmailSettings)
     safety: SafetySettings = field(default_factory=SafetySettings)
+    # The exact file :func:`load_settings` read from.  This is the *single
+    # source of truth* for persistence: every write must target the same
+    # path so settings survive a restart even when ``data_dir`` points
+    # elsewhere.  ``None`` (direct construction) falls back to
+    # ``data_dir/config.json``.
+    config_path: Path | None = None
     # Bot tokens (used by the Telegram/Bale bot)
     telegram_token: str = ""
     bale_token: str = ""
@@ -131,9 +238,14 @@ class AssistantSettings:
 
     # ---- Convenience accessors -------------------------------------------
 
-    @property
-    def config_path(self) -> Path:
-        return self.data_dir / "config.json"
+    def effective_config_path(self) -> Path:
+        """The settings file that should be read/written.
+
+        Prefers the path :func:`load_settings` set (the real file that was
+        read); falls back to ``data_dir/config.json`` only when the object
+        was constructed directly (tests, transient configs).
+        """
+        return self.config_path or (self.data_dir / "config.json")
 
     @property
     def history_path(self) -> Path:
@@ -145,7 +257,16 @@ class AssistantSettings:
 
     @property
     def telegram_session_path(self) -> Path:
-        return self.data_dir / f"{self.telegram.session_name}.session"
+        return self.telegram_session_path_for()
+
+    def telegram_session_path_for(self, account: str | None = None) -> Path:
+        """Session file for a given account (default: active).
+
+        Multi-account sessions live under ``data_dir/sessions/``; pre-existing
+        single-account session files are left in place untouched.
+        """
+        acc = self.telegram.account(account)
+        return self.data_dir / "sessions" / f"{acc.session_name}.session"
 
     @property
     def gmail_credentials_path(self) -> Path:
@@ -167,6 +288,10 @@ class AssistantSettings:
         payload = asdict(self)
         payload["data_dir"] = str(self.data_dir)
         payload["work_dir"] = str(self.work_dir)
+        # ``config_path`` is a runtime pointer to the file we read/write; it
+        # must never be persisted (it would leak an absolute path and freeze
+        # the location across restarts).
+        payload.pop("config_path", None)
         # Convert frozenset to list for JSON serialization
         if "allowed_user_ids" in payload and isinstance(payload["allowed_user_ids"], frozenset):
             payload["allowed_user_ids"] = list(payload["allowed_user_ids"])
@@ -190,7 +315,7 @@ class AssistantSettings:
                     f"invalid confirm_mode {confirm_mode!r}; expected destructive | always | never"
                 )
             safety = SafetySettings(**(payload.get("safety") or {}))
-            tg = TelegramSettings(**tg_payload)
+            tg = _telegram_from_payload(tg_payload)
             gmail = GmailSettings(**(payload.get("gmail") or {}))
             data_dir = Path(payload.get("data_dir", _default_data_dir())).expanduser()
             work_dir = Path(payload.get("work_dir", str(Path.cwd()))).expanduser()
@@ -225,6 +350,59 @@ class AssistantSettings:
 # ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
+
+
+def _telegram_from_payload(tg_payload: dict) -> TelegramSettings:
+    """Build TelegramSettings, migrating the old single-account fields.
+
+    If ``accounts`` is empty, one account named «اصلی» is reconstructed from
+    the legacy ``enabled/api_id/api_hash/phone/session_name/confirm_send``
+    fields so existing configs keep working unchanged.
+    """
+    enabled = bool(tg_payload.get("enabled", False))
+    active = str(tg_payload.get("active_account", "اصلی") or "اصلی")
+    raw_accounts = tg_payload.get("accounts") or []
+    if not raw_accounts:
+        raw_accounts = [{
+            "name": "اصلی",
+            "enabled": enabled,
+            "api_id": tg_payload.get("api_id", 0),
+            "api_hash": tg_payload.get("api_hash", ""),
+            "phone": tg_payload.get("phone", ""),
+            "session_name": tg_payload.get("session_name", "assistant"),
+            "confirm_send": tg_payload.get("confirm_send", True),
+        }]
+    accounts: list[TelegramAccount] = []
+    for raw in raw_accounts:
+        if not isinstance(raw, dict):
+            continue
+        accounts.append(TelegramAccount(
+            name=str(raw.get("name", "اصلی") or "اصلی"),
+            enabled=bool(raw.get("enabled", True)),
+            api_id=int(raw.get("api_id", 0) or 0),
+            api_hash=str(raw.get("api_hash", "")),
+            phone=str(raw.get("phone", "")),
+            session_name=str(raw.get("session_name", "assistant") or "assistant"),
+            confirm_send=bool(raw.get("confirm_send", True)),
+        ))
+    if not accounts:
+        accounts = [TelegramAccount(name="اصلی", enabled=enabled)]
+    names = {a.name for a in accounts}
+    if active not in names:
+        active = accounts[0].name
+    return TelegramSettings(enabled=enabled, active_account=active, accounts=tuple(accounts))
+
+
+def _telegram_account_from_dict(raw: dict) -> TelegramAccount:
+    return TelegramAccount(
+        name=str(raw.get("name", "اصلی") or "اصلی"),
+        enabled=bool(raw.get("enabled", True)),
+        api_id=int(raw.get("api_id", 0) or 0),
+        api_hash=str(raw.get("api_hash", "")),
+        phone=str(raw.get("phone", "")),
+        session_name=str(raw.get("session_name", "assistant") or "assistant"),
+        confirm_send=bool(raw.get("confirm_send", True)),
+    )
 
 
 def _read_json(path: Path) -> dict:
@@ -319,14 +497,87 @@ def load_settings(
         target_path.write_text(template, encoding="utf-8")
         payload = json.loads(_strip_template_comments(template))
 
+    # Migrate settings that a previous version wrote into
+    # ``<data_dir>/config.json`` (the old write target) so existing users
+    # whose ``data_dir`` points at an old project folder don't lose data.
+    _migrate_old_config(target_path, _legacy_config_path(target_path))
+
     payload = _apply_env_overrides(payload)
     payload.setdefault("data_dir", str(target_dir))
     settings = AssistantSettings.from_dict(payload)
+    # Remember exactly which file we read so every later write goes to the
+    # same place (the B2 bug: reads came from one path, writes from another).
+    settings = replace(settings, config_path=target_path)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.log_dir.mkdir(parents=True, exist_ok=True)
     if not settings.work_dir.exists():
         settings.work_dir.mkdir(parents=True, exist_ok=True)
     return settings
+
+
+def _legacy_config_path(target_path: Path) -> Path:
+    """The old (buggy) write location: ``<data_dir>/config.json``.
+
+    When ``target_path`` is the fixed settings file and ``data_dir`` in the
+    file differs from its parent, previous versions wrote settings to
+    ``data_dir/config.json`` — a file ``load_settings`` never read.  This is
+    the file we look for when migrating.
+    """
+    # A previous version wrote settings to ``<data_dir>/config.json`` (the
+    # ``config_path`` property), so compute that legacy location from the
+    # ``data_dir`` recorded in the file we actually read.
+    payload = _read_json(target_path)
+    data_dir = payload.get("data_dir")
+    if data_dir:
+        legacy = Path(str(data_dir)).expanduser() / "config.json"
+        if legacy != target_path:
+            return legacy
+    # No data_dir override → the legacy path equals the fixed one; nothing to
+    # migrate.
+    return target_path
+
+
+def _migrate_old_config(target_path: Path, legacy_path: Path) -> None:
+    """Fold non-default settings from the old ``<data_dir>/config.json`` into
+    the fixed settings file (once, idempotently, with a clear Persian log)."""
+    if legacy_path == target_path or not legacy_path.is_file():
+        return
+    try:
+        legacy = _read_json(legacy_path)
+        current = _read_json(target_path)
+    except ConfigError:
+        return
+    if not legacy:
+        return
+    from ..core.logging_setup import get_logger
+
+    logger = get_logger("config")
+    defaults = AssistantSettings().to_dict()
+    changed = False
+    for key, value in legacy.items():
+        if key == "data_dir":
+            # The old file's own data_dir pointer must never redirect the
+            # fixed settings file.
+            continue
+        default_value = defaults.get(key)
+        present = current.get(key) is not None
+        is_default = value == default_value or value in (None, "", False, 0, {})
+        if not present and not is_default:
+            current[key] = value
+            changed = True
+    if changed:
+        try:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target_path.with_suffix(target_path.suffix + ".tmp")
+            tmp.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, target_path)
+        except OSError as exc:
+            logger.warning("migrating settings failed: %s", exc)
+            return
+        logger.info(
+            "تنظیمات قدیمی از %s به %s منتقل شد تا پس از ری‌استارت از بین نروند.",
+            legacy_path, target_path,
+        )
 
 
 def _build_template(data_dir: Path) -> str:

@@ -43,7 +43,7 @@ from pathlib import Path
 from queue import Empty
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.exceptions import RequestValidationError, StarletteHTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -72,6 +72,7 @@ MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 class ChatRequest(BaseModel):
     message: str
     auto_confirm: bool = False
+    session_id: str | None = None
 
 
 class InvokeRequest(BaseModel):
@@ -115,6 +116,20 @@ class PurgeRequest(BaseModel):
 class TelegramVerifyRequest(BaseModel):
     code: str | None = None
     password: str | None = None
+    account: str | None = None
+
+
+class TelegramConnectRequest(BaseModel):
+    account: str | None = None
+
+
+class TelegramSwitchRequest(BaseModel):
+    name: str
+
+
+class ConfirmRequest(BaseModel):
+    request_id: str
+    approved: bool = False
 
 
 def _schedule_process_exit(delay: float = 0.8) -> None:
@@ -444,12 +459,12 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         return result
 
     @app.get("/api/history")
-    async def history(limit: int = 50) -> list[dict[str, Any]]:
-        return client.get_history(limit=limit)
+    async def history(limit: int = 50, session_id: str | None = None) -> list[dict[str, Any]]:
+        return client.get_history(limit=limit, session_id=session_id)
 
     @app.post("/api/clear")
-    async def clear() -> dict[str, bool]:
-        client.clear_history()
+    async def clear(session_id: str | None = None) -> dict[str, bool]:
+        client.clear_history(session_id=session_id)
         return {"cleared": True}
 
     @app.post("/api/settings")
@@ -523,20 +538,25 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
 
         # ---- telegram --------------------------------------------------
         if req.telegram:
-            tg_dict = dict(new_settings.telegram.__dict__)
-            tg_changed = False
-            for key in ("enabled", "api_id", "api_hash", "phone", "session_name", "confirm_send"):
+            tg_changes: dict[str, Any] = {}
+            if "accounts" in req.telegram:
+                tg_changes["accounts"] = req.telegram["accounts"]
+            for key in ("enabled", "active_account"):
                 if key in req.telegram:
-                    raw = req.telegram[key]
-                    # Blank scalar = keep the stored value (the UI never
-                    # echoes secrets back, so an empty hash is not a change).
-                    if key != "enabled" and key != "confirm_send" and (not raw or not str(raw).strip()):
-                        continue
-                    tg_dict[key] = _coerce_telegram_field(key, raw)
-                    tg_changed = True
-            if tg_changed:
+                    tg_changes[key] = _coerce_telegram_field(key, req.telegram[key])
+            # Legacy single-account fields apply to the active account.
+            for key in ("api_id", "api_hash", "phone", "session_name", "confirm_send"):
+                if key not in req.telegram:
+                    continue
+                raw = req.telegram[key]
+                # Blank scalar = keep the stored value (the UI never echoes
+                # secrets back, so an empty hash is not a change).
+                if key != "confirm_send" and (not raw or not str(raw).strip()):
+                    continue
+                tg_changes[key] = _coerce_telegram_field(key, raw)
+            if tg_changes:
                 new_settings = new_settings.with_overrides(
-                    telegram=type(new_settings.telegram)(**tg_dict)
+                    telegram=new_settings.telegram.updated(tg_changes)
                 )
 
         # ---- gmail -----------------------------------------------------
@@ -573,13 +593,17 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         }
 
     @app.post("/api/telegram/connect")
-    async def telegram_connect() -> dict[str, Any]:
-        """Start the personal-Telegram login flow (state: await_code → await_2fa → connected)."""
+    async def telegram_connect(req: TelegramConnectRequest | None = None) -> dict[str, Any]:
+        """Start the personal-Telegram login flow (state: await_code → await_2fa → connected).
+
+        ``account`` selects which account to connect (default: the active one).
+        """
         server = _server_of(client)
         if server is None:
             raise HTTPException(503, "telegram needs an in-process bridge")
+        account = req.account if req is not None else None
         try:
-            return server.handlers.start_telegram_login()
+            return server.handlers.start_telegram_login(account)
         except AssistantError as exc:
             raise HTTPException(400, str(exc))
 
@@ -588,26 +612,46 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         server = _server_of(client)
         if server is None:
             raise HTTPException(503, "telegram needs an in-process bridge")
-        state = server.handlers.telegram_status()["state"]
+        state = server.handlers.telegram_status(req.account)["state"]
         try:
             if state == "await_code":
                 if not req.code:
                     raise HTTPException(400, "کد تأیید را وارد کنید")
-                return server.handlers.submit_telegram_code(req.code)
+                return server.handlers.submit_telegram_code(req.code, req.account)
             if state == "await_2fa":
                 if not req.password:
                     raise HTTPException(400, "رمز دوم‌مرحله‌ای (2FA) را وارد کنید")
-                return server.handlers.submit_telegram_password(req.password)
+                return server.handlers.submit_telegram_password(req.password, req.account)
             raise HTTPException(400, "هیچ فرایند ورودی در جریان نیست؛ دکمهٔ اتصال تلگرام را بزنید")
         except AssistantError as exc:
             raise HTTPException(400, str(exc))
 
     @app.post("/api/telegram/disconnect")
-    async def telegram_disconnect() -> dict[str, Any]:
+    async def telegram_disconnect(req: TelegramConnectRequest | None = None) -> dict[str, Any]:
         server = _server_of(client)
         if server is None:
             raise HTTPException(503, "telegram needs an in-process bridge")
-        return server.handlers.disconnect_telegram()
+        account = req.account if req is not None else None
+        return server.handlers.disconnect_telegram(account)
+
+    @app.post("/api/telegram/switch")
+    async def telegram_switch(req: TelegramSwitchRequest) -> dict[str, Any]:
+        """Set the active Telegram account."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "telegram needs an in-process bridge")
+        try:
+            return server.handlers.switch_telegram_account(str(req.name))
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.get("/api/telegram/accounts")
+    async def telegram_accounts() -> dict[str, Any]:
+        """Status of every Telegram account (no secrets)."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "telegram needs an in-process bridge")
+        return server.handlers.telegram_accounts_status()
 
     @app.post("/api/gmail/connect")
     async def gmail_connect() -> dict[str, Any]:
@@ -671,7 +715,7 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         server = _server_of(client)
         if server is None:
             raise HTTPException(503, "chat is only available with an in-process bridge")
-        run_id = server.handlers._start_chat_run(req.message)
+        run_id = server.handlers._start_chat_run(req.message, session_id=req.session_id)
         return {"run_id": run_id}
 
     @app.post("/api/invoke")
@@ -716,89 +760,157 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         media_type, _ = mimetypes.guess_type(target.name)
         return FileResponse(str(target), media_type=media_type or "application/octet-stream")
 
+    @app.post("/api/confirm")
+    async def confirm(req: ConfirmRequest) -> dict[str, Any]:
+        """Resolve a pending tool-confirmation over plain HTTP.
+
+        This is the fallback path used by the UI when the WebSocket is
+        closed or half-alive mid-run (e.g. right after a reconnect): it
+        routes to the very same ``resolve_confirmation`` as the ``confirm``
+        WebSocket message, so an approval typed in the browser is never
+        lost to a socket that stopped draining.
+        """
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "confirmation needs an in-process bridge")
+        ok = server.handlers.resolve_confirmation(str(req.request_id), bool(req.approved))
+        return {"ok": ok}
+
     @app.websocket("/ws")
     async def ws(websocket: WebSocket) -> None:
+        """WebSocket chat + confirmation stream.
+
+        The old implementation consumed the chat event queue in a blocking
+        inner loop and never called ``receive_text()`` while a run was in
+        flight, so ``confirm``/``interrupt``/``ping`` messages from the UI
+        piled up in the socket buffer until the run finished — an approval
+        clicked mid-run was silently ignored and the action eventually
+        timed out as "refused".
+
+        The rewrite runs a dedicated **reader task** that drains
+        ``receive_text()`` constantly, plus one per-run **forwarder** task
+        that copies bridge events into the same ``asyncio.Queue``, so the
+        main loop genuinely multiplexes incoming control messages with
+        streamed run events.  Client disconnects exit cleanly (debug-level
+        log only) instead of crashing the handler.
+        """
         await websocket.accept()
-        try:
-            while True:
-                data = await websocket.receive_text()
+        server = _server_of(client)
+        stop = asyncio.Event()
+        incoming: asyncio.Queue = asyncio.Queue()
+        # run_id -> threading.Queue (the bridge event-bus queue)
+        run_queues: dict[str, Any] = {}
+        forwarders: dict[str, asyncio.Task] = {}
+
+        async def _send(payload: dict[str, Any]) -> bool:
+            """Send one frame; return False when the socket is gone.
+
+            A closed socket surfaces either as a ``WebSocketDisconnect`` or
+            as a ``RuntimeError`` ("Unexpected ASGI message ... after sending
+            'websocket.close'") depending on timing — both must be treated as
+            a clean teardown, never a crash.
+            """
+            try:
+                await websocket.send_text(json.dumps(payload, ensure_ascii=False))
+                return True
+            except Exception:  # noqa: BLE001 - socket gone: clean teardown
+                return False
+
+        async def reader() -> None:
+            """Continuously drain the socket into the shared asyncio queue."""
+            while not stop.is_set():
+                try:
+                    data = await websocket.receive_text()
+                except Exception:  # noqa: BLE001 - disconnect or half-alive socket
+                    await incoming.put(None)  # sentinel: this connection is done
+                    return
                 try:
                     msg = json.loads(data)
                 except ValueError:
-                    await websocket.send_text(
-                        json.dumps({"type": "error", "message": "invalid json"})
-                    )
+                    await incoming.put({"type": "__invalid"})
                     continue
-                type_ = msg.get("type")
+                await incoming.put(msg)
+
+        async def forwarder(run_id: str, tq: Any) -> None:
+            """Copy bridge events for one run into the shared asyncio queue."""
+            while not stop.is_set():
+                try:
+                    event = await asyncio.to_thread(tq.get, timeout=0.5)
+                except Empty:
+                    continue
+                await incoming.put({"__run": run_id, "event": event})
+
+        reader_task = asyncio.create_task(reader())
+        try:
+            while True:
+                item = await incoming.get()
+                if item is None:
+                    break  # client disconnected / socket died
+                if "__run" in item:
+                    run_id, event = item["__run"], item["event"]
+                    if event is None:
+                        if run_id in forwarders:
+                            forwarders.pop(run_id).cancel()
+                        if server is not None:
+                            server.handlers.event_bus.destroy_run_queue(run_id)
+                        continue
+                    ok = await _send({
+                        "type": "event",
+                        "event_type": event.type,
+                        "payload": event.payload,
+                        "run_id": event.run_id,
+                        "seq": event.seq,
+                    })
+                    if not ok:
+                        break
+                    if event.type in {"chat_done", "chat_failed"}:
+                        if run_id in forwarders:
+                            forwarders.pop(run_id).cancel()
+                        if server is not None:
+                            server.handlers.event_bus.destroy_run_queue(run_id)
+                    continue
+
+                type_ = item.get("type")
+                if type_ == "__invalid":
+                    await _send({"type": "error", "message": "invalid json"})
+                    continue
                 if type_ == "chat":
-                    message = str(msg.get("message", ""))
-                    server = _server_of(client)
+                    message = str(item.get("message", ""))
                     if server is None:
-                        await websocket.send_text(
-                            json.dumps({"type": "error", "message": "no in-process bridge"})
-                        )
+                        await _send({"type": "error", "message": "no in-process bridge"})
                         continue
-                    run_id = server.handlers._start_chat_run(message)
-                    queue = server.handlers.event_bus.create_run_queue(run_id)
-                    try:
-                        idle_ticks = 0
-                        while True:
-                            try:
-                                event = await asyncio.to_thread(queue.get, timeout=20)
-                            except Empty:
-                                # The run is alive but idle right now (e.g. a
-                                # long-running tool). Keep the socket warm and
-                                # keep polling instead of treating a quiet gap
-                                # as the end of the stream.
-                                idle_ticks += 1
-                                if idle_ticks > 500:  # safety net (~2.5h idle)
-                                    break
-                                await websocket.send_text(json.dumps(
-                                    {"type": "pong", "ts": time.time()}
-                                ))
-                                continue
-                            idle_ticks = 0
-                            if event is None:
-                                break
-                            await websocket.send_text(json.dumps({
-                                "type": "event",
-                                "event_type": event.type,
-                                "payload": event.payload,
-                                "run_id": event.run_id,
-                                "seq": event.seq,
-                            }, ensure_ascii=False))
-                            if event.type in {"chat_done", "chat_failed"}:
-                                break
-                    finally:
-                        server.handlers.event_bus.destroy_run_queue(run_id)
-                elif type_ == "confirm":
-                    request_id = str(msg.get("request_id", ""))
-                    approved = bool(msg.get("approved", False))
-                    server = _server_of(client)
-                    if server is None:
-                        await websocket.send_text(
-                            json.dumps({"type": "error", "message": "no bridge"})
-                        )
-                        continue
-                    ok = server.handlers.resolve_confirmation(request_id, approved)
-                    await websocket.send_text(json.dumps({"type": "confirm_result", "ok": ok}))
-                elif type_ == "interrupt":
-                    server = _server_of(client)
+                    run_id = server.handlers._start_chat_run(
+                        message, session_id=item.get("session_id")
+                    )
+                    tq = server.handlers.event_bus.create_run_queue(run_id)
+                    run_queues[run_id] = tq
+                    forwarders[run_id] = asyncio.create_task(forwarder(run_id, tq))
+                    continue
+                if type_ == "confirm":
+                    request_id = str(item.get("request_id", ""))
+                    approved = bool(item.get("approved", False))
+                    ok = False
                     if server is not None:
-                        server.handlers._interrupt_run(str(msg.get("run_id", "")))
-                    await websocket.send_text(json.dumps({"type": "interrupted", "ok": True}))
-                elif type_ == "ping":
-                    await websocket.send_text(json.dumps({"type": "pong", "ts": time.time()}))
-        except WebSocketDisconnect:
-            return
-        except Exception:
-            logger.exception("websocket handler crashed")
-            try:
-                await websocket.send_text(
-                    json.dumps({"type": "error", "message": "خطای داخلی سرور رخ داد؛ اتصال دوباره برقرار می‌شود"})
-                )
-            except Exception:  # noqa: BLE001, S110 - socket already gone
-                pass
+                        ok = server.handlers.resolve_confirmation(request_id, approved)
+                    await _send({"type": "confirm_result", "ok": ok})
+                    continue
+                if type_ == "interrupt":
+                    if server is not None:
+                        server.handlers._interrupt_run(str(item.get("run_id", "")))
+                    await _send({"type": "interrupted", "ok": True})
+                    continue
+                if type_ == "ping":
+                    await _send({"type": "pong", "ts": time.time()})
+                    continue
+        finally:
+            stop.set()
+            reader_task.cancel()
+            for task in forwarders.values():
+                task.cancel()
+            for run_id in list(run_queues):
+                if server is not None:
+                    server.handlers.event_bus.destroy_run_queue(run_id)
+            logger.debug("websocket handler exited cleanly")
 
     # Static assets
     if STATIC.is_dir():

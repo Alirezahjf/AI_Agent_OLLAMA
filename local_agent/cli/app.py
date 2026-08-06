@@ -44,6 +44,7 @@ Available commands (type /<command> or just chat normally):
   /provider NAME      switch provider (ollama | openai_compatible | auto)
   /approve            toggle auto-approve for destructive actions
   /confirm MODE       set confirm mode: destructive | always | never
+  /confirm-send on|off  toggle confirmation before sending Telegram/Gmail messages
   /reset              clear conversation history (shared across frontends)
   /undo               pop the last user message and resend
   /screenshot         capture the primary screen now
@@ -204,6 +205,8 @@ class _REPL:
             self._cmd_approve()
         elif cmd == "/confirm":
             self._cmd_confirm(rest)
+        elif cmd == "/confirm-send":
+            self._cmd_confirm_send(rest)
         elif cmd == "/reset":
             self.client.clear_history()
             self.renderer.info("conversation cleared.")
@@ -302,6 +305,28 @@ class _REPL:
             f"Set safety.confirm_mode = {args[0]!r} in config.json and restart."
         )
 
+    def _cmd_confirm_send(self, args: list[str]) -> None:
+        """``/confirm-send on|off`` — disable/enable send-confirmation (F1).
+
+        When off, outgoing Telegram/Gmail messages never ask for
+        confirmation (even in confirm_mode=destructive).
+        """
+        if not args or args[0].strip().lower() not in {"on", "off", "1", "0", "true", "false"}:
+            self.renderer.warn("usage: /confirm-send on | off")
+            return
+        enabled = args[0].strip().lower() in {"on", "1", "true"}
+        for path in ("telegram.confirm_send", "gmail.confirm_send"):
+            try:
+                self.client.invoke_action(
+                    "config_set", {"path": path, "value": enabled}, auto_confirm=True
+                )
+            except AssistantError as exc:
+                self.renderer.warn(f"تنظیم {path} ناموفق بود: {exc}")
+                return
+        self.renderer.info(
+            "تأیید قبل از ارسال " + ("فعال شد ✅" if enabled else "غیرفعال شد")
+        )
+
     def _cmd_undo(self) -> None:
         history = self.client.get_history(limit=200)
         for index in range(len(history) - 1, -1, -1):
@@ -322,24 +347,35 @@ class _REPL:
         self.renderer.info(f"screenshot saved: {target}  ({image.width}x{image.height})")
 
     def _cmd_telegram(self, args: list[str]) -> None:
-        """/telegram connect | status | disconnect | chats"""
+        """/telegram list | use <name> | connect [name] | status [name] | disconnect [name] | chats"""
         sub = args[0] if args else "status"
         handlers = self._bridge_handlers()
         if handlers is None:
             self.renderer.warn("bridge in-process در دسترس نیست")
             return
+        name = args[1] if len(args) > 1 else None
         try:
             if sub == "status":
-                self._telegram_status(handlers)
+                self._telegram_status(handlers, name)
             elif sub == "connect":
-                self._telegram_connect(handlers)
+                self._telegram_connect(handlers, name)
             elif sub == "disconnect":
-                result = handlers.disconnect_telegram()
-                self.renderer.info(f"تلگرام قطع شد (state={result.get('state')})")
+                result = handlers.disconnect_telegram(name)
+                self.renderer.info(f"تلگرام قطع شد (account={result.get('account')})")
             elif sub == "chats":
-                self._telegram_chats(handlers)
+                self._telegram_chats(handlers, name)
+            elif sub == "list":
+                self._telegram_list(handlers)
+            elif sub == "use":
+                if not name:
+                    self.renderer.warn("usage: /telegram use <name>")
+                    return
+                result = handlers.switch_telegram_account(name)
+                self.renderer.info(f"اکانت فعال: {result.get('active_account')}")
             else:
-                self.renderer.warn("usage: /telegram connect | status | disconnect | chats")
+                self.renderer.warn(
+                    "usage: /telegram list | use <name> | connect [name] | status [name] | disconnect [name] | chats"
+                )
         except AssistantError as exc:
             self.renderer.warn(str(exc))
 
@@ -349,9 +385,19 @@ class _REPL:
         server = getattr(backend, "_server", None)
         return getattr(server, "handlers", None) if server is not None else None
 
-    def _telegram_status(self, handlers: Any) -> None:
-        state = handlers.telegram_status()
+    def _telegram_list(self, handlers: Any) -> None:
+        data = handlers.telegram_accounts_status()
+        self.renderer.section("اکانت‌های تلگرام")
+        self.renderer.info(f"  فعال: {data.get('active_account')}")
+        for acc in data.get("accounts", []):
+            self.renderer.info(
+                f"  • {acc['account']} — {acc['phone'] or 'شماره ندارد'} — {acc['state']}"
+            )
+
+    def _telegram_status(self, handlers: Any, name: str | None = None) -> None:
+        state = handlers.telegram_status(name)
         self.renderer.section("تلگرام شخصی")
+        self.renderer.info(f"  account: {state['account']}")
         self.renderer.info(f"  enabled: {state['enabled']}")
         self.renderer.info(f"  state: {state['state']}")
         self.renderer.info(f"  connected: {state['connected']}")
@@ -363,20 +409,24 @@ class _REPL:
                 "api_id / api_hash / phone را در config.json (یا از چت با «به تلگرامم وصل شو») ثبت کنید."
             )
 
-    def _telegram_connect(self, handlers: Any) -> None:
+    def _telegram_connect(self, handlers: Any, name: str | None = None) -> None:
         self.renderer.info("در حال اتصال به تلگرام شخصی…")
         try:
             result = handlers.connect_telegram(
                 code_callback=lambda: self.renderer.prompt("کد تأیید تلگرام (SMS)"),
                 password_callback=lambda: self.renderer.prompt("رمز دوم‌مرحله‌ای (2FA)"),
+                account=name,
             )
         except AssistantError as exc:
             self.renderer.warn(f"اتصال ناموفق بود: {exc}")
             return
         self.renderer.info(f"✅ {result.get('message', 'connected')}")
 
-    def _telegram_chats(self, handlers: Any) -> None:
-        client = handlers.telegram
+    def _telegram_chats(self, handlers: Any, name: str | None = None) -> None:
+        if name:
+            client = handlers._telegram_accounts.get(name)
+        else:
+            client = handlers.telegram
         if client is None or not client.is_connected:
             self.renderer.warn("تلگرام وصل نیست؛ اول /telegram connect")
             return

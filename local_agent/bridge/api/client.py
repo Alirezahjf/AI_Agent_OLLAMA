@@ -270,15 +270,24 @@ class BridgeClient:
     def get_status(self) -> dict[str, Any]:
         return dict(self.request("get_status") or {})
 
-    def get_history(self, limit: int = 200) -> list[dict[str, Any]]:
-        return list(self.request("get_history", {"limit": limit}) or [])
+    def get_history(self, limit: int = 200, session_id: str | None = None) -> list[dict[str, Any]]:
+        payload: dict[str, Any] = {"limit": limit}
+        if session_id:
+            payload["session_id"] = session_id
+        return list(self.request("get_history", payload) or [])
 
-    def clear_history(self) -> None:
-        self.request("clear_history")
+    def clear_history(self, session_id: str | None = None) -> None:
+        payload: dict[str, Any] = {}
+        if session_id:
+            payload["session_id"] = session_id
+        self.request("clear_history", payload)
 
-    def chat(self, message: str) -> Iterable[Event]:
+    def chat(self, message: str, session_id: str | None = None) -> Iterable[Event]:
         """Send a free-form user message and stream events back."""
-        return self.stream("chat", {"message": message})
+        payload: dict[str, Any] = {"message": message}
+        if session_id:
+            payload["session_id"] = session_id
+        return self.stream("chat", payload)
 
     # ------------------------------------------------------------ Factory
 

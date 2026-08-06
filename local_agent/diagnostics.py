@@ -300,7 +300,7 @@ def check_paths(settings: AssistantSettings) -> CheckResult:
 
 
 def check_config(settings: AssistantSettings) -> CheckResult:
-    path = settings.config_path
+    path = settings.effective_config_path()
     data = {"config_path": str(path), "exists": path.is_file()}
     if not path.is_file():
         return CheckResult(
@@ -320,6 +320,61 @@ def check_config(settings: AssistantSettings) -> CheckResult:
         )
     data["keys"] = sorted(payload)
     return CheckResult("config", "فایل تنظیمات", OK, str(path), "", data)
+
+
+def check_config_consistency(settings: AssistantSettings) -> CheckResult:
+    """Stray legacy ``<data_dir>/config.json`` + writable settings file.
+
+    Before the B2 fix, settings were written to ``<data_dir>/config.json``
+    (from the ``config_path`` property) while reads came from the fixed
+    settings file — so saved settings appeared to "reset" on restart.  This
+    check warns if that orphan file still exists and confirms the real
+    settings file is writable.
+    """
+    path = settings.effective_config_path()
+    data = {"config_path": str(path)}
+    # 1) writable?
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        probe = path.parent / ".doctor_config_write"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        data["writable"] = False
+        return CheckResult(
+            "config.path", "فایل تنظیمات", FAIL,
+            f"نوشتن در {path} ممکن نشد: {exc}",
+            "دسترسی نوشتن به این مسیر را بررسی کنید، وگرنه تنظیمات ذخیره نمی‌شوند.",
+            data,
+        )
+    data["writable"] = True
+    # 2) stray legacy config left over from the old write target?
+    from .core.config import _read_json
+
+    legacy_data_dir = None
+    try:
+        payload = _read_json(path)
+        legacy_data_dir = payload.get("data_dir")
+    except Exception:  # noqa: BLE001 - best-effort
+        legacy_data_dir = None
+    stray: Path | None = None
+    if legacy_data_dir:
+        candidate = Path(str(legacy_data_dir)).expanduser() / "config.json"
+        if candidate.is_file() and candidate.resolve() != path.resolve():
+            stray = candidate
+    data["legacy_config"] = str(stray) if stray else None
+    if stray is not None:
+        return CheckResult(
+            "config.path", "فایل تنظیمات", WARN,
+            f"فایل تنظیمات قدیمی در {stray} سرگردان است",
+            "این همان باگ «تنظیمات بعد از ری‌استارت پریده» است. تنظیمات آن به فایل "
+            "اصلی منتقل شده؛ در صورت اطمینان می‌توانید این فایل را حذف کنید.",
+            data,
+        )
+    return CheckResult(
+        "config.path", "فایل تنظیمات", OK,
+        f"قابل نوشتن است ({path})", "", data,
+    )
 
 
 def check_llm_config(settings: AssistantSettings) -> CheckResult:
@@ -635,6 +690,7 @@ def run_checks(
         check_packaging,
         lambda: check_paths(settings),
         lambda: check_config(settings),
+        lambda: check_config_consistency(settings),
         lambda: check_llm_config(settings),
         lambda: check_llm_reachable(settings, network=network),
         lambda: check_actions(settings),

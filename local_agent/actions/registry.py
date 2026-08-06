@@ -74,8 +74,13 @@ class Action:
     unavailable_reason: str = ""
     # Optional runtime override: when set and returns True, the action
     # always asks for confirmation regardless of confirm_mode/risk
-    # (used e.g. by ``telegram.confirm_send``).  Signature: (safety) -> bool.
-    confirm_override: Callable[[Any], bool] | None = None
+    # (used e.g. by ``telegram.confirm_send``).  Signature:
+    # (safety, arguments) -> bool.
+    confirm_override: Callable[[Any, Any], bool] | None = None
+    # Optional runtime skip: when set and returns True, the action NEVER asks
+    # for confirmation, even for a destructive/always policy (used to honour
+    # ``confirm_send=False`` per account).  Signature: (safety, arguments).
+    confirm_skip: Callable[[Any, Any], bool] | None = None
 
     def to_tool_definition(self):
         from ..llm.client import ToolDefinition
@@ -87,8 +92,10 @@ class Action:
             required=self.required,
         )
 
-    def needs_confirmation(self, safety) -> bool:
-        if self.confirm_override is not None and self.confirm_override(safety):
+    def needs_confirmation(self, safety, arguments: dict[str, Any] | None = None) -> bool:
+        if self.confirm_skip is not None and self.confirm_skip(safety, arguments):
+            return False
+        if self.confirm_override is not None and self.confirm_override(safety, arguments):
             return True
         if self.risk_level == Risk.SAFE:
             return False
@@ -123,7 +130,8 @@ class ActionRegistry:
         parameters: dict[str, Any],
         required: tuple[str, ...] = (),
         risk_level: Risk = Risk.SAFE,
-        confirm_override: Callable[[Any], bool] | None = None,
+        confirm_override: Callable[[Any, Any], bool] | None = None,
+        confirm_skip: Callable[[Any, Any], bool] | None = None,
     ) -> Callable[[Callable], Callable]:
         def wrap(func: Callable) -> Callable:
             actual_risk = getattr(func, "__action_risk__", risk_level)
@@ -136,6 +144,7 @@ class ActionRegistry:
                     required=required,
                     risk_level=actual_risk,
                     confirm_override=confirm_override,
+                    confirm_skip=confirm_skip,
                 )
             )
             return func
@@ -229,7 +238,7 @@ def run_action(
     arguments = _coerce_arguments(action, arguments)
     _validate_arguments(action, arguments)
 
-    if action.needs_confirmation(context.runtime.settings.safety):
+    if action.needs_confirmation(context.runtime.settings.safety, arguments):
         approved, reason = context.confirmation_gate.ask(action, arguments)
         if not approved:
             raise ActionRefused(f"action {name!r} was not approved: {reason}")

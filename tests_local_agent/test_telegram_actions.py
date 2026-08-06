@@ -178,12 +178,14 @@ def test_config_set_persists_telegram_credentials(handlers: BridgeHandlers, tmp_
     assert handlers.settings.telegram.api_hash == "deadbeef"
     assert handlers.settings.telegram.phone == "+989120000000"
     assert handlers.settings.telegram.enabled is True
-    # The value must be on disk for the next restart.
+    # The value must be on disk for the next restart (multi-account format:
+    # the active «اصلی» account carries the credentials).
     import json
 
     payload = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
-    assert payload["telegram"]["api_id"] == 123456
-    assert payload["telegram"]["api_hash"] == "deadbeef"
+    active = next(a for a in payload["telegram"]["accounts"] if a["name"] == "اصلی")
+    assert active["api_id"] == 123456
+    assert active["api_hash"] == "deadbeef"
 
 
 def test_config_set_never_echoes_secrets(handlers: BridgeHandlers) -> None:

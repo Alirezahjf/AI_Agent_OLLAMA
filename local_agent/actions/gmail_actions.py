@@ -7,6 +7,7 @@ The client lives in ``context.extra["gmail"]`` and is owned by
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from ..core.errors import AssistantError, DependencyMissing
@@ -19,7 +20,10 @@ _NOT_CONNECTED_HINT = (
 
 
 def register_gmail(registry: ActionRegistry, context: ActionContext) -> None:
-    confirm_send = lambda _safety: bool(
+    confirm_send = lambda _safety, _args: bool(
+        context.runtime.settings.gmail.confirm_send
+    )
+    confirm_skip = lambda _safety, _args: not bool(
         context.runtime.settings.gmail.confirm_send
     )
 
@@ -47,7 +51,8 @@ def register_gmail(registry: ActionRegistry, context: ActionContext) -> None:
     registry.decorator(
         name="gmail.read",
         description=(
-            "خواندن کامل یک ایمیل با شناسه (id) — موضوع، فرستنده و متن. SAFE."
+            "خواندن کامل یک ایمیل با شناسه (id) — موضوع، فرستنده، متن کامل و فهرست پیوست‌ها "
+            "(با id و نام). SAFE."
         ),
         parameters={"id": {"type": "string", "description": "شناسهٔ ایمیل"}},
         required=("id",),
@@ -56,17 +61,52 @@ def register_gmail(registry: ActionRegistry, context: ActionContext) -> None:
     registry.decorator(
         name="gmail.send",
         description=(
-            "ارسال ایمیل از حساب جیمیل کاربر. DESTRUCTIVE — همیشه تأیید می‌خواهد."
+            "ارسال ایمیل از حساب جیمیل کاربر. attachments اختیاری است (فهرست مسیر فایل‌ها، "
+            "حداکثر ۲۵ مگابایت هرکدام). DESTRUCTIVE — همیشه تأیید می‌خواهد."
         ),
         parameters={
             "to": {"type": "string", "description": "آدرس گیرنده"},
             "subject": {"type": "string", "description": "موضوع"},
             "body": {"type": "string", "description": "متن ایمیل"},
+            "attachments": {"type": "array", "items": {"type": "string"},
+                            "description": "فهرست مسیر فایل‌های پیوست (اختیاری)"},
         },
         required=("to", "subject", "body"),
         risk_level=Risk.DESTRUCTIVE,
         confirm_override=confirm_send,
+        confirm_skip=confirm_skip,
     )(send)
+
+    registry.decorator(
+        name="gmail.download_attachment",
+        description=(
+            "دانلود یک پیوست ایمیل (با نام فایل) به پوشهٔ data_dir/gmail و برگرداندن مسیر "
+            "واقعی. اگر filename خالی باشد اولین پیوست دانلود می‌شود. SAFE."
+        ),
+        parameters={
+            "id": {"type": "string", "description": "شناسهٔ ایمیل"},
+            "filename": {"type": "string", "description": "نام پیوست (اختیاری)"},
+        },
+        required=("id",),
+    )(download_attachment)
+
+    registry.decorator(
+        name="gmail.reply",
+        description=(
+            "پاسخ به یک ایمیل مشخص (با شناسه). attachments اختیاری است. "
+            "DESTRUCTIVE — همیشه تأیید می‌خواهد."
+        ),
+        parameters={
+            "id": {"type": "string", "description": "شناسهٔ ایمیلِ مبدأ"},
+            "body": {"type": "string", "description": "متن پاسخ"},
+            "attachments": {"type": "array", "items": {"type": "string"},
+                            "description": "فهرست مسیر فایل‌های پیوست (اختیاری)"},
+        },
+        required=("id", "body"),
+        risk_level=Risk.DESTRUCTIVE,
+        confirm_override=confirm_send,
+        confirm_skip=confirm_skip,
+    )(reply)
 
 
 # ---------------------------------------------------------------------------
@@ -120,20 +160,42 @@ def read(*, id: str, context: ActionContext) -> str:
     if not isinstance(id, str) or not id.strip():
         raise AssistantError("id must be a non-empty string")
     message = _client(context).read(id.strip())
-    return (
-        f"📧 ایمیل [{message.id}]\n"
-        f"  موضوع: {message.subject}\n"
-        f"  از: {message.sender}\n"
-        f"  تاریخ: {message.date}\n\n"
-        f"{message.snippet}"
-    )
+    lines = [
+        f"📧 ایمیل [{message.id}]",
+        f"  موضوع: {message.subject}",
+        f"  از: {message.sender}",
+        f"  تاریخ: {message.date}",
+    ]
+    if message.attachments:
+        atts = "، ".join(f"{a['name']}" for a in message.attachments)
+        lines.append(f"  پیوست‌ها: {atts}")
+    lines.append("")
+    lines.append(message.body or message.snippet)
+    return "\n".join(lines)
 
 
 @risk(Risk.DESTRUCTIVE)
-def send(*, to: str, subject: str, body: str, context: ActionContext) -> str:
+def send(*, to: str, subject: str, body: str, attachments: list[str] | None = None,
+         context: ActionContext) -> str:
     if not isinstance(to, str) or "@" not in to:
         raise AssistantError("آدرس گیرندهٔ ایمیل نامعتبر است")
     if not isinstance(subject, str) or not subject.strip():
         raise AssistantError("subject must be a non-empty string")
-    result = _client(context).send(to.strip(), subject, body)
+    result = _client(context).send(to.strip(), subject, body, attachments=list(attachments or []))
     return f"✅ ایمیل به «{to}» ارسال شد ({result})"
+
+
+@risk(Risk.SAFE)
+def download_attachment(*, id: str, filename: str = "", context: ActionContext) -> str:
+    save_dir: Path = context.runtime.settings.data_dir / "gmail"
+    path = _client(context).download_attachment(id.strip(), filename.strip(), save_dir)
+    return f"✅ پیوست دانلود شد: {path}"
+
+
+@risk(Risk.DESTRUCTIVE)
+def reply(*, id: str, body: str, attachments: list[str] | None = None,
+          context: ActionContext) -> str:
+    if not isinstance(id, str) or not id.strip():
+        raise AssistantError("id must be a non-empty string")
+    result = _client(context).reply(id.strip(), body, attachments=list(attachments or []))
+    return f"✅ پاسخ به ایمیل {id} ارسال شد ({result})"

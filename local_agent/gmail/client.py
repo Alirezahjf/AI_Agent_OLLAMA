@@ -23,7 +23,7 @@ import imaplib
 import smtplib
 import ssl
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +56,8 @@ class GmailMessage:
     snippet: str
     date: str
     is_unread: bool = False
+    body: str = ""
+    attachments: list[dict[str, str]] = field(default_factory=list)
 
     def to_text(self) -> str:
         flags = "📩" if not self.is_unread else "📬"
@@ -84,7 +86,13 @@ class GmailBackend:
     def read(self, msg_id: str) -> GmailMessage:
         raise NotImplementedError
 
-    def send(self, to: str, subject: str, body: str) -> str:
+    def send(self, to: str, subject: str, body: str, attachments: list[str] | None = None) -> str:
+        raise NotImplementedError
+
+    def reply(self, msg_id: str, body: str, attachments: list[str] | None = None) -> str:
+        raise NotImplementedError
+
+    def download_attachment(self, msg_id: str, filename: str, save_dir: Path) -> Path:
         raise NotImplementedError
 
 
@@ -178,9 +186,10 @@ class _OAuthGmailBackend(GmailBackend):
         return [self._summary(msg) for msg in results.get("messages", [])]
 
     def read(self, msg_id: str) -> GmailMessage:
-        payload = self._users().messages().get(userId="me", id=msg_id).execute()
+        payload = self._users().messages().get(userId="me", id=msg_id, format="full").execute()
         headers = {h["name"].lower(): h["value"] for h in payload.get("payload", {}).get("headers", [])}
         body = _extract_body(payload.get("payload", {}))
+        attachments = _extract_attachments(payload.get("payload", {}))
         return GmailMessage(
             id=msg_id,
             subject=headers.get("subject", ""),
@@ -188,13 +197,38 @@ class _OAuthGmailBackend(GmailBackend):
             snippet=f"{body[:300]}" if body else payload.get("snippet", ""),
             date=headers.get("date", ""),
             is_unread=False,
+            body=body,
+            attachments=attachments,
         )
 
-    def send(self, to: str, subject: str, body: str) -> str:
-        message = _build_mime(to, subject, body)
+    def send(self, to: str, subject: str, body: str, attachments: list[str] | None = None) -> str:
+        message = _build_mime(to, subject, body, attachments)
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
         sent = self._users().messages().send(userId="me", body={"raw": raw}).execute()
         return str(sent.get("id", "?"))
+
+    def reply(self, msg_id: str, body: str, attachments: list[str] | None = None) -> str:
+        original = self._users().messages().get(userId="me", id=msg_id, format="metadata",
+                                                metadataHeaders=["Subject", "References", "Message-ID"]).execute()
+        headers = {h["name"].lower(): h["value"] for h in original.get("payload", {}).get("headers", [])}
+        subject = headers.get("subject", "")
+        if not subject.lower().startswith("re:"):
+            subject = "Re: " + subject
+        message = _build_mime_reply(subject, body, attachments)
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
+        body_req: dict[str, Any] = {"raw": raw}
+        thread_id = original.get("threadId")
+        if thread_id:
+            body_req["threadId"] = thread_id
+        sent = self._users().messages().send(userId="me", body=body_req).execute()
+        return str(sent.get("id", "?"))
+
+    def download_attachment(self, msg_id: str, filename: str, save_dir: Path) -> Path:
+        payload = self._users().messages().get(userId="me", id=msg_id, format="full").execute()
+        path = _download_attachment_from_payload(payload.get("payload", {}), filename, save_dir)
+        if path is None:
+            raise GmailError(f"پیوستی با نام «{filename}» در ایمیل {msg_id} پیدا نشد")
+        return path
 
     def _summary(self, msg: dict[str, Any]) -> GmailMessage:
         payload = self._users().messages().get(userId="me", id=msg["id"]).execute()
@@ -288,6 +322,7 @@ class _ImapGmailBackend(GmailBackend):
                 raise GmailError(f"ایمیلی با شناسهٔ {msg_id} پیدا نشد")
             parsed = email.message_from_bytes(msg_data[0][1])
             body = _rfc822_body(parsed)
+            attachments = _rfc822_attachments(parsed)
             return GmailMessage(
                 id=str(msg_id),
                 subject=str(parsed.get("Subject", "")),
@@ -295,10 +330,12 @@ class _ImapGmailBackend(GmailBackend):
                 snippet=body[:300],
                 date=str(parsed.get("Date", "")),
                 is_unread=False,
+                body=body,
+                attachments=attachments,
             )
 
-    def send(self, to: str, subject: str, body: str) -> str:
-        message = _build_mime(to, subject, body)
+    def send(self, to: str, subject: str, body: str, attachments: list[str] | None = None) -> str:
+        message = _build_mime(to, subject, body, attachments)
         try:
             with smtplib.SMTP_SSL(SMTP_HOST, 465, context=ssl.create_default_context()) as smtp:
                 smtp.login(self._username, self._app_password)
@@ -306,6 +343,37 @@ class _ImapGmailBackend(GmailBackend):
         except (OSError, smtplib.SMTPException) as exc:
             raise GmailError(f"ارسال ایمیل ناموفق بود: {exc}") from exc
         return "sent"
+
+    def reply(self, msg_id: str, body: str, attachments: list[str] | None = None) -> str:
+        with self._lock:
+            imap = self._select()
+            status, msg_data = imap.fetch(str(msg_id), "(RFC822)")
+            if status != "OK" or not msg_data or msg_data[0] is None:
+                raise GmailError(f"ایمیلی با شناسهٔ {msg_id} پیدا نشد")
+            parsed = email.message_from_bytes(msg_data[0][1])
+        subject = str(parsed.get("Subject", ""))
+        if not subject.lower().startswith("re:"):
+            subject = "Re: " + subject
+        message = _build_mime_reply(subject, body, attachments)
+        try:
+            with smtplib.SMTP_SSL(SMTP_HOST, 465, context=ssl.create_default_context()) as smtp:
+                smtp.login(self._username, self._app_password)
+                smtp.send_message(message)
+        except (OSError, smtplib.SMTPException) as exc:
+            raise GmailError(f"ارسال پاسخ ناموفق بود: {exc}") from exc
+        return "sent"
+
+    def download_attachment(self, msg_id: str, filename: str, save_dir: Path) -> Path:
+        with self._lock:
+            imap = self._select()
+            status, msg_data = imap.fetch(str(msg_id), "(RFC822)")
+            if status != "OK" or not msg_data or msg_data[0] is None:
+                raise GmailError(f"ایمیلی با شناسهٔ {msg_id} پیدا نشد")
+            parsed = email.message_from_bytes(msg_data[0][1])
+        path = _download_attachment_from_rfc822(parsed, filename, save_dir)
+        if path is None:
+            raise GmailError(f"پیوستی با نام «{filename}» در ایمیل {msg_id} پیدا نشد")
+        return path
 
 
 # ---------------------------------------------------------------------------
@@ -361,8 +429,14 @@ class GmailClient:
     def read(self, msg_id: str) -> GmailMessage:
         return self._backend.read(msg_id)
 
-    def send(self, to: str, subject: str, body: str) -> str:
-        return self._backend.send(to, subject, body)
+    def send(self, to: str, subject: str, body: str, attachments: list[str] | None = None) -> str:
+        return self._backend.send(to, subject, body, attachments)
+
+    def reply(self, msg_id: str, body: str, attachments: list[str] | None = None) -> str:
+        return self._backend.reply(msg_id, body, attachments)
+
+    def download_attachment(self, msg_id: str, filename: str, save_dir: Path) -> Path:
+        return self._backend.download_attachment(msg_id, filename, Path(save_dir))
 
 
 def _build_backend(
@@ -393,13 +467,41 @@ def _build_backend(
 # ---------------------------------------------------------------------------
 
 
-def _build_mime(to: str, subject: str, body: str) -> email.message.EmailMessage:
+MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024  # 25 MB per attachment
+
+
+def _build_mime(to: str, subject: str, body: str,
+                attachments: list[str] | None = None) -> email.message.EmailMessage:
     message = email.message.EmailMessage()
     message["To"] = to
     message["Subject"] = subject
     message["From"] = "me"
     message.set_content(body)
+    _attach_files(message, attachments or [])
     return message
+
+
+def _build_mime_reply(subject: str, body: str,
+                      attachments: list[str] | None = None) -> email.message.EmailMessage:
+    message = email.message.EmailMessage()
+    message["Subject"] = subject
+    message["From"] = "me"
+    message.set_content(body)
+    _attach_files(message, attachments or [])
+    return message
+
+
+def _attach_files(message: email.message.EmailMessage, attachments: list[str]) -> None:
+    for raw in attachments:
+        path = Path(str(raw)).expanduser()
+        if not path.is_file():
+            raise GmailError(f"فایل پیوست پیدا نشد: {path}")
+        if path.stat().st_size > MAX_ATTACHMENT_BYTES:
+            raise GmailError(f"پیوست بزرگ‌تر از ۲۵ مگابایت است: {path.name}")
+        with path.open("rb") as handle:
+            data = handle.read()
+        message.add_attachment(data, maintype="application", subtype="octet-stream",
+                               filename=path.name)
 
 
 def _extract_body(payload: dict[str, Any]) -> str:
@@ -440,4 +542,78 @@ def _message_from_rfc822(msg_id: str, parsed: email.message.Message) -> GmailMes
         snippet=body[:200],
         date=str(parsed.get("Date", "")),
         is_unread=True,
+        body=body,
+        attachments=_rfc822_attachments(parsed),
     )
+
+
+# ---------------------------------------------------------------------------
+# Attachment helpers (OAuth + IMAP)
+# ---------------------------------------------------------------------------
+
+
+def _extract_attachments(payload: dict[str, Any]) -> list[dict[str, str]]:
+    """Walk a Gmail API message payload and list attachments."""
+    out: list[dict[str, str]] = []
+    for part in _walk_payload_parts(payload):
+        if part.get("filename") and part.get("body", {}).get("attachmentId"):
+            out.append({"id": part["body"]["attachmentId"], "name": part["filename"]})
+    return out
+
+
+def _walk_payload_parts(payload: dict[str, Any]):
+    if payload.get("parts"):
+        for part in payload["parts"]:
+            yield from _walk_payload_parts(part)
+    else:
+        yield payload
+
+
+def _download_attachment_from_payload(payload: dict[str, Any], filename: str,
+                                      save_dir: Path) -> Path | None:
+    for part in _walk_payload_parts(payload):
+        name = part.get("filename")
+        if not name:
+            continue
+        if filename and name != filename:
+            continue
+        data = part.get("body", {}).get("data")
+        if not data:
+            continue
+        blob = base64.urlsafe_b64decode(data)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        target = save_dir / name
+        target.write_bytes(blob)
+        return target
+    return None
+
+
+def _rfc822_attachments(parsed: email.message.Message) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for part in parsed.walk():
+        if part.get_content_maintype() == "multipart":
+            continue
+        filename = part.get_filename()
+        if filename:
+            out.append({"id": filename, "name": filename})
+    return out
+
+
+def _download_attachment_from_rfc822(parsed: email.message.Message, filename: str,
+                                     save_dir: Path) -> Path | None:
+    for part in parsed.walk():
+        if part.get_content_maintype() == "multipart":
+            continue
+        name = part.get_filename()
+        if not name:
+            continue
+        if filename and name != filename:
+            continue
+        data = part.get_payload(decode=True)
+        if data is None:
+            continue
+        save_dir.mkdir(parents=True, exist_ok=True)
+        target = save_dir / name
+        target.write_bytes(data)
+        return target
+    return None

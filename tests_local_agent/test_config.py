@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
 
 from local_agent.core.config import (
     AssistantSettings,
-    LLMSettings,
-    SafetySettings,
-    TelegramSettings,
     _apply_env_overrides,
     _coerce_env_value,
     load_settings,
@@ -22,7 +19,7 @@ from local_agent.core.errors import ConfigError
 
 def test_settings_is_frozen() -> None:
     settings = AssistantSettings()
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         settings.data_dir = Path("/tmp")  # type: ignore[misc]
 
 
@@ -58,11 +55,17 @@ def test_apply_env_overrides_uses_double_underscore_separator(
 
 
 def test_load_settings_creates_template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LOCAL_AGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("LOCAL_AGENT_DATA_DIR", str(tmp_path / "data"))
+    config = tmp_path / "config.json"
+    monkeypatch.setenv("LOCAL_AGENT_CONFIG", str(config))
     settings = load_settings()
-    assert (tmp_path / "config.json").is_file()
-    assert settings.data_dir == tmp_path
+    assert config.is_file()
+    assert settings.data_dir == tmp_path / "data"
+    assert settings.log_dir == tmp_path / "data" / "logs"
     assert settings.log_dir.is_dir()
+    # The settings file is the single source of truth: it follows
+    # LOCAL_AGENT_CONFIG, independent of where data_dir points.
+    assert settings.effective_config_path() == config
 
 
 def test_load_settings_uses_env_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

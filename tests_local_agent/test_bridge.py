@@ -389,3 +389,61 @@ def test_assistant_delta_event_is_emitted(tmp_path: Path) -> None:
 
     assert EventType.ASSISTANT_DELTA.value in events_seen
     assert EventType.ASSISTANT_FINAL.value in events_seen
+
+
+# ---------------------------------------------------------------------------
+# B5 — provider errors are soft and readable (Persian), not internal
+# ---------------------------------------------------------------------------
+
+
+def test_friendly_llm_error_translates_network_failures() -> None:
+    from local_agent.bridge.api.handlers import _friendly_llm_error
+
+    class _DNS(Exception):
+        pass
+
+    dns = _DNS("Failed to resolve 'api.avalai.ir'")
+    assert "اینترنت" in _friendly_llm_error(dns)
+
+    conn = ConnectionError("connection reset by peer")
+    assert "در دسترس نیست" in _friendly_llm_error(conn)
+
+    from local_agent.llm.errors import LLMTimeout
+    assert "مهلت زمانی" in _friendly_llm_error(LLMTimeout("timed out"))
+    # A generic error still gives a Persian shell, never "LLM error:".
+    generic = _friendly_llm_error(RuntimeError("boom"))
+    assert "LLM error" not in generic
+    assert generic.strip()
+
+
+def test_chat_failed_uses_persian_message_for_provider_error(tmp_path: Path) -> None:
+    """When the LLM raises, chat_failed must carry a Persian message."""
+    settings = _make_settings(tmp_path)
+    handlers = BridgeHandlers.build(settings)
+    handlers.gate.auto_approve()
+
+    class _BoomLLM:
+        provider_name = "boom"
+        model_name = "x"
+
+        def complete(self, messages, tools):
+            raise ConnectionError("Failed to resolve 'api.avalai.ir'")
+
+        def list_models(self):
+            return ["x"]
+
+    _patch_llm(handlers, _BoomLLM())  # type: ignore[arg-type]
+    failed_payload: dict[str, Any] = {}
+    finished = threading.Event()
+
+    def listener(event) -> None:
+        nonlocal failed_payload
+        if event.type == EventType.CHAT_FAILED.value:
+            failed_payload = event.payload
+            finished.set()
+
+    handlers.event_bus.subscribe(listener)
+    handlers._start_chat_run("سلام")
+    finished.wait(timeout=5)
+    assert "اینترنت" in failed_payload.get("error", "")
+    assert "LLM error" not in failed_payload.get("error", "")

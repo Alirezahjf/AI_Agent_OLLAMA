@@ -42,6 +42,9 @@ class FakeGmailBackend(GmailBackend):
             ),
         ]
         self.sent: list[tuple[str, str, str]] = []
+        self.sent_attachments: list[list[str]] = []
+        self.replies: list[tuple[str, str, list[str]]] = []
+        self.downloads: list[tuple[str, str, str]] = []
 
     def connect(self) -> str:
         self._connected = True
@@ -66,9 +69,21 @@ class FakeGmailBackend(GmailBackend):
                 return m
         raise AssistantError(f"ایمیلی با شناسهٔ {msg_id} پیدا نشد")
 
-    def send(self, to: str, subject: str, body: str) -> str:
+    def send(self, to: str, subject: str, body: str, attachments: list[str] | None = None) -> str:
         self.sent.append((to, subject, body))
+        self.sent_attachments.append(list(attachments or []))
         return "sent-fake"
+
+    def reply(self, msg_id: str, body: str, attachments: list[str] | None = None) -> str:
+        self.replies.append((msg_id, body, list(attachments or [])))
+        return "reply-fake"
+
+    def download_attachment(self, msg_id: str, filename: str, save_dir: Path) -> Path:
+        save_dir.mkdir(parents=True, exist_ok=True)
+        target = save_dir / (filename or "att.bin")
+        target.write_bytes(b"attachment-bytes")
+        self.downloads.append((msg_id, filename, str(target)))
+        return target
 
 
 @pytest.fixture
@@ -228,3 +243,53 @@ def test_gmail_connect_uses_configured_client(web_server, monkeypatch) -> None:
     r2 = requests.post(base + "/api/gmail/disconnect", timeout=5)
     assert r2.status_code == 200
     assert r2.json()["connected"] is False
+
+
+# ---------------------------------------------------------------------------
+# F3 — professional Gmail (attachments, download, reply)
+# ---------------------------------------------------------------------------
+
+
+def test_gmail_f3_actions_registered(handlers: BridgeHandlers) -> None:
+    names = {a.name for a in handlers.registry.all()}
+    for expected in ("gmail.download_attachment", "gmail.reply", "gmail.send"):
+        assert expected in names, expected
+
+
+def test_gmail_send_with_attachments(connected_handlers, fake_backend, tmp_path) -> None:
+    att = tmp_path / "file.txt"
+    att.write_text("hello", encoding="utf-8")
+    connected_handlers.gate.auto_approve()
+    result = run_action(
+        connected_handlers.registry,
+        "gmail.send",
+        {"to": "x@y.com", "subject": "s", "body": "b", "attachments": [str(att)]},
+        connected_handlers.context,
+    )
+    assert "ارسال شد" in result
+    assert fake_backend.sent == [("x@y.com", "s", "b")]
+    assert fake_backend.sent_attachments == [[str(att)]]
+
+
+def test_gmail_reply_action(connected_handlers, fake_backend) -> None:
+    connected_handlers.gate.auto_approve()
+    result = run_action(
+        connected_handlers.registry,
+        "gmail.reply",
+        {"id": "1", "body": "پاسخ"},
+        connected_handlers.context,
+    )
+    assert "ارسال شد" in result
+    assert fake_backend.replies == [("1", "پاسخ", [])]
+
+
+def test_gmail_download_attachment_action(connected_handlers, fake_backend, tmp_path) -> None:
+    result = run_action(
+        connected_handlers.registry,
+        "gmail.download_attachment",
+        {"id": "1", "filename": "att.bin"},
+        connected_handlers.context,
+    )
+    assert "پیوست دانلود شد" in result
+    assert (tmp_path / "gmail" / "att.bin").is_file()
+    assert fake_backend.downloads[0][0] == "1"
