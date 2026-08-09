@@ -311,6 +311,51 @@ class PersonalTelegram:
     def resolve_username(self, username: str) -> dict[str, Any]:
         return self._run(self._resolve_username(username))
 
+    def delete_message(self, chat: str | int, msg_id: int) -> None:
+        self._run(self._delete_message(chat, int(msg_id)))
+
+    def edit_message(self, chat: str | int, msg_id: int, text: str) -> Message:
+        return self._run(self._edit_message(chat, int(msg_id), text))
+
+    def list_contacts(self, limit: int = 100) -> list[dict[str, Any]]:
+        return self._run(self._list_contacts(limit))
+
+    def get_contact_info(self, contact: str | int) -> dict[str, Any]:
+        return self._run(self._get_contact_info(contact))
+
+    def add_contact(self, phone: str, first_name: str, last_name: str = "") -> dict[str, Any]:
+        return self._run(self._add_contact(phone, first_name, last_name))
+
+    def delete_contact(self, contact: str | int) -> None:
+        self._run(self._delete_contact(contact))
+
+    def block_user(self, contact: str | int) -> None:
+        self._run(self._block_user(contact))
+
+    def unblock_user(self, contact: str | int) -> None:
+        self._run(self._unblock_user(contact))
+
+    def join_channel(self, channel: str | int) -> None:
+        self._run(self._join_channel(channel))
+
+    def leave_channel(self, channel: str | int) -> None:
+        self._run(self._leave_channel(channel))
+
+    def list_members(self, chat: str | int, limit: int = 100, admins: bool = False) -> list[dict[str, Any]]:
+        return self._run(self._list_members(chat, limit, admins))
+
+    def update_profile(self, first_name: str = "", last_name: str = "", about: str = "") -> None:
+        self._run(self._update_profile(first_name, last_name, about))
+
+    def update_username(self, username: str) -> None:
+        self._run(self._update_username(username))
+
+    def set_profile_photo(self, path: str | os.PathLike) -> None:
+        self._run(self._set_profile_photo(Path(path)))
+
+    def set_online_status(self, online: bool = True) -> None:
+        self._run(self._set_online_status(online))
+
     # -------------------------------------------------------- Internals
 
     def _start_loop(self) -> None:
@@ -441,6 +486,89 @@ class PersonalTelegram:
                 self._client = None
                 self._connected = False
                 self._connected_at = None
+
+    async def _delete_message(self, chat, msg_id: int) -> None:
+        entity = await self._resolve_entity(chat)
+        await self._client.delete_messages(entity, msg_id, revoke=True)
+
+    async def _edit_message(self, chat, msg_id: int, text: str) -> Message:
+        entity = await self._resolve_entity(chat)
+        result = await self._client.edit_message(entity, msg_id, text)
+        return _message_from_telethon(result, chat_id=getattr(entity, "id", 0))
+
+    async def _list_contacts(self, limit: int) -> list[dict[str, Any]]:
+        out = []
+        async for user in self._client.iter_contacts(limit=max(1, limit)):
+            out.append({"id": int(user.id), "first_name": getattr(user, "first_name", "") or "",
+                        "last_name": getattr(user, "last_name", "") or "",
+                        "username": getattr(user, "username", "") or "",
+                        "phone": getattr(user, "phone", "") or "",
+                        "is_bot": bool(getattr(user, "bot", False))})
+        return out
+
+    async def _get_contact_info(self, contact) -> dict[str, Any]:
+        entity = await self._resolve_entity(contact)
+        return {"id": int(entity.id), "first_name": getattr(entity, "first_name", "") or "",
+                "last_name": getattr(entity, "last_name", "") or "",
+                "username": getattr(entity, "username", "") or "",
+                "phone": getattr(entity, "phone", "") or "",
+                "is_bot": bool(getattr(entity, "bot", False)),
+                "bio": getattr(entity, "about", "") or ""}
+
+    async def _add_contact(self, phone: str, first_name: str, last_name: str) -> dict[str, Any]:
+        from telethon.tl.functions.contacts import ImportContactsRequest
+        from telethon.tl.types import InputPhoneContact
+        result = await self._client(ImportContactsRequest([InputPhoneContact(
+            client_id=0, phone=str(phone), first_name=str(first_name), last_name=str(last_name))]))
+        users = getattr(result, "users", [])
+        return {"id": int(users[0].id)} if users else {"added": False}
+
+    async def _delete_contact(self, contact) -> None:
+        from telethon.tl.functions.contacts import DeleteContactsRequest
+        entity = await self._resolve_entity(contact)
+        await self._client(DeleteContactsRequest(id=[entity]))
+
+    async def _block_user(self, contact) -> None:
+        from telethon.tl.functions.contacts import BlockRequest
+        await self._client(BlockRequest(id=await self._resolve_entity(contact)))
+
+    async def _unblock_user(self, contact) -> None:
+        from telethon.tl.functions.contacts import UnblockRequest
+        await self._client(UnblockRequest(id=await self._resolve_entity(contact)))
+
+    async def _join_channel(self, channel) -> None:
+        from telethon.tl.functions.channels import JoinChannelRequest
+        await self._client(JoinChannelRequest(await self._resolve_entity(channel)))
+
+    async def _leave_channel(self, channel) -> None:
+        from telethon.tl.functions.channels import LeaveChannelRequest
+        await self._client(LeaveChannelRequest(await self._resolve_entity(channel)))
+
+    async def _list_members(self, chat, limit: int, admins: bool) -> list[dict[str, Any]]:
+        entity = await self._resolve_entity(chat)
+        kwargs: dict[str, Any] = {"limit": max(1, limit)}
+        if admins:
+            from telethon.tl.types import ChannelParticipantsAdmins
+            kwargs["filter"] = ChannelParticipantsAdmins()
+        users = await self._client.get_participants(entity, **kwargs)
+        return [{"id": int(u.id), "name": " ".join(p for p in (getattr(u, "first_name", "") or "", getattr(u, "last_name", "") or "") if p),
+                 "username": getattr(u, "username", "") or ""} for u in users]
+
+    async def _update_profile(self, first_name: str, last_name: str, about: str) -> None:
+        from telethon.tl.functions.account import UpdateProfileRequest
+        await self._client(UpdateProfileRequest(first_name=first_name, last_name=last_name, about=about))
+
+    async def _update_username(self, username: str) -> None:
+        from telethon.tl.functions.account import UpdateUsernameRequest
+        await self._client(UpdateUsernameRequest(username=str(username).lstrip("@")))
+
+    async def _set_profile_photo(self, path: Path) -> None:
+        from telethon.tl.functions.photos import UploadProfilePhotoRequest
+        await self._client(UploadProfilePhotoRequest(file=await self._client.upload_file(str(path))))
+
+    async def _set_online_status(self, online: bool) -> None:
+        from telethon.tl.functions.account import UpdateStatusRequest
+        await self._client(UpdateStatusRequest(offline=not online))
 
     async def _resolve_entity(self, target):
         """Resolve a chat target; special-cases the user's own «Saved Messages»."""

@@ -22,6 +22,7 @@ when True (the default) every outgoing message still asks first.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from ..core.errors import AssistantError, DependencyMissing
@@ -285,6 +286,29 @@ def register_telegram(registry: ActionRegistry, context: ActionContext) -> None:
         context=context,
     )(forward_message)
 
+    # قابلیت‌های مدیریتی فراتر از ربات مرجع
+    for action_name, function, params, required, risk_level in (
+        ("telegram.delete_message", delete_message, {"chat": {"type": "string"}, "msg_id": {"type": "integer"}}, ("chat", "msg_id"), Risk.DESTRUCTIVE),
+        ("telegram.edit_message", edit_message, {"chat": {"type": "string"}, "msg_id": {"type": "integer"}, "text": {"type": "string"}}, ("chat", "msg_id", "text"), Risk.DESTRUCTIVE),
+        ("telegram.list_contacts", list_contacts, {"limit": {"type": "integer"}}, (), Risk.SAFE),
+        ("telegram.get_contact_info", get_contact_info, {"contact": {"type": "string"}}, ("contact",), Risk.SAFE),
+        ("telegram.add_contact", add_contact, {"phone": {"type": "string"}, "first_name": {"type": "string"}, "last_name": {"type": "string"}}, ("phone", "first_name"), Risk.DESTRUCTIVE),
+        ("telegram.delete_contact", delete_contact, {"contact": {"type": "string"}}, ("contact",), Risk.DESTRUCTIVE),
+        ("telegram.block_user", block_user, {"contact": {"type": "string"}}, ("contact",), Risk.DESTRUCTIVE),
+        ("telegram.unblock_user", unblock_user, {"contact": {"type": "string"}}, ("contact",), Risk.DESTRUCTIVE),
+        ("telegram.join_channel", join_channel, {"channel": {"type": "string"}}, ("channel",), Risk.DESTRUCTIVE),
+        ("telegram.leave_channel", leave_channel, {"channel": {"type": "string"}}, ("channel",), Risk.DESTRUCTIVE),
+        ("telegram.list_members", list_members, {"chat": {"type": "string"}, "limit": {"type": "integer"}}, ("chat",), Risk.SAFE),
+        ("telegram.list_admins", list_admins, {"chat": {"type": "string"}, "limit": {"type": "integer"}}, ("chat",), Risk.SAFE),
+        ("telegram.update_profile", update_profile, {"first_name": {"type": "string"}, "last_name": {"type": "string"}, "about": {"type": "string"}}, (), Risk.DESTRUCTIVE),
+        ("telegram.update_username", update_username, {"username": {"type": "string"}}, ("username",), Risk.DESTRUCTIVE),
+        ("telegram.set_profile_photo", set_profile_photo, {"path": {"type": "string"}}, ("path",), Risk.DESTRUCTIVE),
+        ("telegram.set_online_status", set_online_status, {"online": {"type": "boolean"}}, (), Risk.DESTRUCTIVE),
+    ):
+        registry.decorator(name=action_name, description="ابزار مدیریت حساب تلگرام شخصی؛ بدون اتصال به ربات.",
+                           parameters={**params, "account": {"type": "string"}}, required=required,
+                           risk_level=risk_level)(function)
+
 
 def _register_send(registry, name, confirm_send, description, parameters, *, required, context):
     """Register a destructive send action with an optional ``account`` arg."""
@@ -357,6 +381,13 @@ def _media_dir(context: ActionContext):
     media = context.runtime.settings.data_dir / "media"
     media.mkdir(parents=True, exist_ok=True)
     return media
+
+
+def _work_path(context: ActionContext, value: str) -> str:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = context.work_dir / path
+    return str(path.resolve())
 
 
 def _format_chats(chats: list[Any]) -> str:
@@ -539,20 +570,20 @@ def send_message(*, chat: str, text: str, account: str | None = None, context: A
 @risk(Risk.DESTRUCTIVE)
 def send_photo(*, chat: str, path: str, caption: str = "",
                account: str | None = None, context: ActionContext) -> str:
-    msg = _client(context, account).send_media(chat, path, caption=caption or "", kind="photo")
+    msg = _client(context, account).send_media(chat, _work_path(context, path), caption=caption or "", kind="photo")
     return f"✅ تصویر به «{chat}» ارسال شد (id={msg.id})"
 
 
 @risk(Risk.DESTRUCTIVE)
 def send_file(*, chat: str, path: str, caption: str = "",
               account: str | None = None, context: ActionContext) -> str:
-    msg = _client(context, account).send_media(chat, path, caption=caption or "", kind="document")
+    msg = _client(context, account).send_media(chat, _work_path(context, path), caption=caption or "", kind="document")
     return f"✅ فایل به «{chat}» ارسال شد (id={msg.id})"
 
 
 def _send_media_kind(kind: str, *, chat: str, path: str, caption: str = "",
                      account: str | None = None, context: ActionContext) -> str:
-    msg = _client(context, account).send_media(chat, path, caption=caption or "", kind=kind)
+    msg = _client(context, account).send_media(chat, _work_path(context, path), caption=caption or "", kind=kind)
     return f"✅ {kind} به «{chat}» ارسال شد (id={msg.id})"
 
 
@@ -611,3 +642,86 @@ def forward_message(*, chat: str, from_chat: str, msg_id: int,
                     account: str | None = None, context: ActionContext) -> str:
     msg = _client(context, account).forward_message(chat, from_chat, int(msg_id))
     return f"✅ پیام {msg_id} از «{from_chat}» به «{chat}» انتقال یافت (id={msg.id})"
+
+@risk(Risk.DESTRUCTIVE)
+def delete_message(*, chat: str, msg_id: int, account: str | None = None, context: ActionContext) -> str:
+    _client(context, account).delete_message(chat, int(msg_id))
+    return f"✅ پیام {msg_id} از «{chat}» حذف شد."
+
+@risk(Risk.DESTRUCTIVE)
+def edit_message(*, chat: str, msg_id: int, text: str, account: str | None = None, context: ActionContext) -> str:
+    message = _client(context, account).edit_message(chat, int(msg_id), text)
+    return f"✅ پیام {message.id} ویرایش شد."
+
+@risk(Risk.SAFE)
+def list_contacts(*, limit: int = 100, account: str | None = None, context: ActionContext) -> str:
+    rows = _client(context, account).list_contacts(max(1, int(limit)))
+    if not rows:
+        return "مخاطبی یافت نشد."
+    return "مخاطبین ({}):\n{}".format(len(rows), "\n".join(
+        f"• {r['first_name']} {r['last_name']} (id={r['id']})" for r in rows))
+
+@risk(Risk.SAFE)
+def get_contact_info(*, contact: str, account: str | None = None, context: ActionContext) -> str:
+    row = _client(context, account).get_contact_info(contact)
+    return "اطلاعات مخاطب:\n" + "\n".join(f"  {k}: {v}" for k, v in row.items() if v not in ("", None))
+
+@risk(Risk.DESTRUCTIVE)
+def add_contact(*, phone: str, first_name: str, last_name: str = "", account: str | None = None, context: ActionContext) -> str:
+    row = _client(context, account).add_contact(phone, first_name, last_name)
+    return f"✅ مخاطب اضافه شد (id={row.get('id', '?')})."
+
+@risk(Risk.DESTRUCTIVE)
+def delete_contact(*, contact: str, account: str | None = None, context: ActionContext) -> str:
+    _client(context, account).delete_contact(contact)
+    return "✅ مخاطب حذف شد."
+
+@risk(Risk.DESTRUCTIVE)
+def block_user(*, contact: str, account: str | None = None, context: ActionContext) -> str:
+    _client(context, account).block_user(contact)
+    return "✅ کاربر مسدود شد."
+
+@risk(Risk.DESTRUCTIVE)
+def unblock_user(*, contact: str, account: str | None = None, context: ActionContext) -> str:
+    _client(context, account).unblock_user(contact)
+    return "✅ مسدودی کاربر برداشته شد."
+
+@risk(Risk.DESTRUCTIVE)
+def join_channel(*, channel: str, account: str | None = None, context: ActionContext) -> str:
+    _client(context, account).join_channel(channel)
+    return "✅ به کانال/گروه پیوستید."
+
+@risk(Risk.DESTRUCTIVE)
+def leave_channel(*, channel: str, account: str | None = None, context: ActionContext) -> str:
+    _client(context, account).leave_channel(channel)
+    return "✅ از کانال/گروه خارج شدید."
+
+@risk(Risk.SAFE)
+def list_members(*, chat: str, limit: int = 100, account: str | None = None, context: ActionContext) -> str:
+    rows = _client(context, account).list_members(chat, max(1, int(limit)), False)
+    return "اعضای چت ({}):\n{}".format(len(rows), "\n".join(f"• {r['name']} (id={r['id']})" for r in rows))
+
+@risk(Risk.SAFE)
+def list_admins(*, chat: str, limit: int = 100, account: str | None = None, context: ActionContext) -> str:
+    rows = _client(context, account).list_members(chat, max(1, int(limit)), True)
+    return "مدیران چت ({}):\n{}".format(len(rows), "\n".join(f"• {r['name']} (id={r['id']})" for r in rows))
+
+@risk(Risk.DESTRUCTIVE)
+def update_profile(*, first_name: str = "", last_name: str = "", about: str = "", account: str | None = None, context: ActionContext) -> str:
+    _client(context, account).update_profile(first_name, last_name, about)
+    return "✅ پروفایل به‌روزرسانی شد."
+
+@risk(Risk.DESTRUCTIVE)
+def update_username(*, username: str, account: str | None = None, context: ActionContext) -> str:
+    _client(context, account).update_username(username)
+    return "✅ نام کاربری به‌روزرسانی شد."
+
+@risk(Risk.DESTRUCTIVE)
+def set_profile_photo(*, path: str, account: str | None = None, context: ActionContext) -> str:
+    _client(context, account).set_profile_photo(path)
+    return "✅ عکس پروفایل تغییر کرد."
+
+@risk(Risk.DESTRUCTIVE)
+def set_online_status(*, online: bool = True, account: str | None = None, context: ActionContext) -> str:
+    _client(context, account).set_online_status(bool(online))
+    return "✅ وضعیت آنلاین به‌روزرسانی شد."
