@@ -33,6 +33,12 @@ class Chat:
     title: str
     username: str | None
     is_group: bool
+    is_channel: bool = False
+    is_bot: bool = False
+    is_private: bool = False
+    is_forum: bool = False
+    verified: bool = False
+    pinned: bool = False
     last_message: str | None = None
     unread_count: int = 0
 
@@ -42,6 +48,12 @@ class Chat:
             "title": self.title,
             "username": self.username,
             "is_group": self.is_group,
+            "is_channel": self.is_channel,
+            "is_bot": self.is_bot,
+            "is_private": self.is_private,
+            "is_forum": self.is_forum,
+            "verified": self.verified,
+            "pinned": self.pinned,
             "last_message": self.last_message,
             "unread_count": self.unread_count,
         }
@@ -102,6 +114,9 @@ class PersonalTelegram:
         self._ready = threading.Event()
         self._lock = threading.RLock()
         self._connected = False
+        self._manual_disconnect = False
+        self._connected_at: datetime | None = None
+        self._last_error = ""
         # Stepwise login state machine:
         #   disconnected -> await_code -> await_2fa -> connected
         self._login_state = "disconnected"
@@ -122,6 +137,18 @@ class PersonalTelegram:
         return self._connected
 
     @property
+    def connected_at(self) -> datetime | None:
+        return self._connected_at
+
+    @property
+    def last_error(self) -> str:
+        return self._last_error
+
+    @property
+    def manual_disconnect(self) -> bool:
+        return self._manual_disconnect
+
+    @property
     def login_state(self) -> str:
         """One of ``disconnected`` | ``await_code`` | ``await_2fa`` | ``connected``."""
         return "connected" if self._connected else self._login_state
@@ -129,13 +156,9 @@ class PersonalTelegram:
     # ------------------------------------------------------ stepwise login
 
     def start_login(self) -> dict[str, Any]:
-        """Begin the interactive login: connect the session and ask for an SMS code.
-
-        Returns ``{"state": "await_code", "message": ...}``.  The caller
-        then submits the code with :meth:`submit_code` and, if Telegram
-        asks for 2FA, :meth:`submit_password`.  A valid session file on
-        disk skips the code step entirely and returns ``connected``.
-        """
+        """Begin login; a valid session skips the code step."""
+        self._manual_disconnect = False
+        self._last_error = ""
         with self._lock:
             if self._connected:
                 return {"state": "connected", "message": "already connected"}
@@ -208,6 +231,7 @@ class PersonalTelegram:
             return str(result.get("message") or "connected")
 
     def disconnect(self) -> None:
+        self._manual_disconnect = True
         with self._lock:
             if not self._connected:
                 return
@@ -222,8 +246,11 @@ class PersonalTelegram:
 
     # ----------------------------------------------------------- Actions
 
-    def list_chats(self, limit: int = 30) -> list[Chat]:
-        return self._run(self._list_chats(limit))
+    def list_chats(self, limit: int = 30, kind: str = "all", query: str = "", sort: str = "") -> list[Chat]:
+        kind = str(kind or "all").lower()
+        if kind not in {"private", "group", "channel", "bot", "all"}:
+            raise TelegramError("نوع چت باید private، group، channel، bot یا all باشد")
+        return self._run(self._list_chats(limit, kind=kind, query=query, sort=sort))
 
     def send_message(self, chat: str | int, text: str) -> Message:
         if not isinstance(text, str) or not text:
@@ -336,6 +363,7 @@ class PersonalTelegram:
             # Session file is already valid — no re-login needed.
             self._login_state = "connected"
             self._connected = True
+            self._connected_at = datetime.now()
             me = await client.get_me()
             return {
                 "state": "connected",
@@ -388,6 +416,7 @@ class PersonalTelegram:
     async def _finish_login(self) -> dict[str, Any]:
         self._login_state = "connected"
         self._connected = True
+        self._connected_at = datetime.now()
         me = await self._get_me()
         return {
             "state": "connected",
@@ -411,6 +440,7 @@ class PersonalTelegram:
             finally:
                 self._client = None
                 self._connected = False
+                self._connected_at = None
 
     async def _resolve_entity(self, target):
         """Resolve a chat target; special-cases the user's own «Saved Messages»."""
@@ -427,27 +457,35 @@ class PersonalTelegram:
         except Exception as exc:
             raise TelegramError(f"چت {target!r} پیدا نشد: {exc}") from exc
 
-    async def _list_chats(self, limit: int) -> list[Chat]:
+    async def _list_chats(self, limit: int, *, kind: str = "all", query: str = "", sort: str = "") -> list[Chat]:
         chats: list[Chat] = []
         async for dialog in self._client.iter_dialogs(limit=max(1, limit)):
             entity = dialog.entity
-            title = getattr(entity, "title", None) or getattr(entity, "first_name", None) or "?"
+            title = getattr(entity, "title", None) or " ".join(
+                p for p in (getattr(entity, "first_name", "") or "", getattr(entity, "last_name", "") or "") if p
+            ) or "?"
             username = getattr(entity, "username", None)
-            is_group = bool(getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False) or getattr(entity, "is_group", False))
-            last_message = None
-            if dialog.message is not None:
-                last_message = (dialog.message.message or "")[:140]
-            chats.append(
-                Chat(
-                    id=dialog.id,
-                    title=str(title),
-                    username=username,
-                    is_group=is_group,
-                    last_message=last_message,
-                    unread_count=int(dialog.unread_count or 0),
-                )
-            )
-        return chats
+            type_name = type(entity).__name__.lower()
+            is_channel = type_name == "channel" and not bool(getattr(entity, "megagroup", False))
+            is_group = bool(getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False)
+                            or getattr(entity, "is_group", False) or type_name == "chat")
+            is_bot = bool(type_name == "user" and getattr(entity, "bot", False))
+            is_private = bool(type_name == "user" and not is_bot)
+            chat = Chat(id=int(dialog.id), title=str(title), username=username, is_group=is_group,
+                        is_channel=is_channel, is_bot=is_bot, is_private=is_private,
+                        is_forum=bool(getattr(entity, "forum", False)),
+                        verified=bool(getattr(entity, "verified", False)),
+                        pinned=bool(getattr(dialog, "pinned", False)),
+                        last_message=((dialog.message.message or "")[:140] if dialog.message is not None else None),
+                        unread_count=int(dialog.unread_count or 0))
+            if kind != "all" and not getattr(chat, f"is_{kind}"):
+                continue
+            if query and str(query).lower() not in f"{chat.title} {chat.username or ''}".lower():
+                continue
+            chats.append(chat)
+        if sort == "unread":
+            chats.sort(key=lambda item: item.unread_count, reverse=True)
+        return chats[:max(1, limit)]
 
     async def _send_message(self, chat, text: str) -> Message:
         entity = await self._resolve_entity(chat)
@@ -480,8 +518,8 @@ class PersonalTelegram:
         return {
             "id": me.id,
             "first_name": me.first_name,
-            "last_name": getattr(me, "last_name", ""),
-            "username": getattr(me, "username", ""),
+            "last_name": getattr(me, "last_name", "") or "",
+            "username": getattr(me, "username", "") or "",
             "phone": getattr(me, "phone", ""),
         }
 
@@ -622,7 +660,7 @@ class PersonalTelegram:
 
 
 def _message_from_telethon(msg, *, chat_id: int) -> Message:
-    sender = "?"
+    sender = "کانال" if getattr(msg, "sender", None) is None else "?"
     if getattr(msg, "sender", None) is not None:
         sender_obj = msg.sender
         sender = getattr(sender_obj, "username", None) or getattr(sender_obj, "first_name", None) or "?"

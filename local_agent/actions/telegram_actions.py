@@ -56,6 +56,12 @@ def register_telegram(registry: ActionRegistry, context: ActionContext) -> None:
         required=("name",),
     )(switch_account)
 
+    registry.decorator(name="telegram.add_account", description="ثبت اکانت تلگرام در تنظیمات؛ رازها را نمایش نمی‌دهد. SAFE.",
+                       parameters={"name": {"type": "string"}, "phone": {"type": "string"},
+                                   "session_name": {"type": "string"}}, required=("name", "phone"))(add_account)
+    registry.decorator(name="telegram.remove_account", description="حذف اکانت و فایل سشن با تأیید دومرحله‌ای. DESTRUCTIVE.",
+                       parameters={"name": {"type": "string"}, "confirmed": {"type": "boolean"}}, required=("name",))(remove_account)
+
     registry.decorator(
         name="telegram.list_chats",
         description=(
@@ -64,6 +70,9 @@ def register_telegram(registry: ActionRegistry, context: ActionContext) -> None:
         ),
         parameters={
             "limit": {"type": "integer", "description": "حداکثر تعداد گفتگو (پیش‌فرض 30)"},
+            "kind": {"type": "string", "enum": ["all", "private", "group", "channel", "bot"], "description": "نوع چت برای فیلتر سمت تلگرام"},
+            "query": {"type": "string", "description": "فیلتر نام یا نام کاربری"},
+            "sort": {"type": "string", "enum": ["", "unread"], "description": "مرتب‌سازی اختیاری"},
             "account": {"type": "string", "description": "نام اکانت (پیش‌فرض: اکانت فعال)"},
         },
     )(list_chats)
@@ -351,9 +360,17 @@ def _media_dir(context: ActionContext):
 
 
 def _format_chats(chats: list[Any]) -> str:
-    lines = [f"  • {c.title} (id={c.id}){' [گروه]' if c.is_group else ''}" for c in chats]
+    def label(chat: Any) -> str:
+        if getattr(chat, "is_bot", False):
+            return "ربات"
+        if getattr(chat, "is_channel", False):
+            return "کانال"
+        if getattr(chat, "is_group", False):
+            return "گروه"
+        return "شخصی"
+    lines = [f"  • {c.title} [نوع: {label(c)}] (id={c.id})" for c in chats]
     head = f"تعداد {len(chats)} گفتگو:\n"
-    return head + "\n".join(lines) if lines else "هیچ گفتگویی یافت نشد."
+    return head + "\n".join(lines) if lines else "هیچ گفتگویی یافت نشد؛ در این فهرست گفتگویی نیست."
 
 
 def _format_messages(messages: list[Any]) -> str:
@@ -367,6 +384,24 @@ def _format_messages(messages: list[Any]) -> str:
 # ---------------------------------------------------------------------------
 # Implementations
 # ---------------------------------------------------------------------------
+
+
+@risk(Risk.SAFE)
+def add_account(*, name: str, phone: str, session_name: str = "", context: ActionContext) -> str:
+    owner = context.extra.get("settings_owner")
+    if owner is None:
+        raise AssistantError("مدیریت اکانت در این حالت در دسترس نیست")
+    owner.add_telegram_account(name, phone, session_name or None)
+    return f"✅ اکانت «{name}» ثبت شد؛ برای ورود اتصال را شروع کنید."
+
+
+@risk(Risk.DESTRUCTIVE)
+def remove_account(*, name: str, confirmed: bool = False, context: ActionContext) -> str:
+    owner = context.extra.get("settings_owner")
+    if owner is None:
+        raise AssistantError("مدیریت اکانت در این حالت در دسترس نیست")
+    owner.remove_telegram_account(name, confirmed=bool(confirmed))
+    return f"✅ اکانت «{name}» و سشن آن حذف شد."
 
 
 @risk(Risk.SAFE)
@@ -398,8 +433,14 @@ def switch_account(*, name: str, context: ActionContext) -> str:
 
 
 @risk(Risk.SAFE)
-def list_chats(*, limit: int = 30, account: str | None = None, context: ActionContext) -> str:
-    chats = _client(context, account).list_chats(limit=max(1, int(limit or 30)))
+def list_chats(*, limit: int = 30, kind: str = "all", query: str = "",
+               sort: str = "", account: str | None = None, context: ActionContext) -> str:
+    client = _client(context, account)
+    if kind == "all" and not query and not sort:
+        chats = client.list_chats(limit=max(1, int(limit or 30)))
+    else:
+        chats = client.list_chats(limit=max(1, int(limit or 30)), kind=kind,
+                                  query=query, sort=sort)
     return _format_chats(chats)
 
 
@@ -420,8 +461,8 @@ def get_me(*, account: str | None = None, context: ActionContext) -> str:
     me = _client(context, account).get_me()
     parts = [
         f"  شناسه: {me.get('id')}",
-        f"  نام: {me.get('first_name', '')} {me.get('last_name', '')}".rstrip(),
-        f"  نام کاربری: @{me.get('username', '')}" if me.get("username") else "",
+        f"  نام: {' '.join(p for p in (me.get('first_name') or '', me.get('last_name') or '') if p).strip()}",
+        f"  نام کاربری: @{str(me.get('username') or '').lstrip('@')}" if me.get("username") else "",
         f"  شماره: {me.get('phone', '')}",
     ]
     return "حساب تلگرام متصل:\n" + "\n".join(p for p in parts if p)
@@ -443,7 +484,11 @@ def get_chat_history(*, chat: str, limit: int = 30, offset_id: int = 0,
     messages = _client(context, account).get_chat_history(
         chat, limit=max(1, int(limit or 30)), offset_id=int(offset_id or 0)
     )
-    return f"تاریخچهٔ «{chat}»:\n" + _format_messages(messages)
+    chat_id = messages[0].chat_id if messages else chat
+    kind = "کانال" if messages and any(m.sender == "کانال" for m in messages) else "گفتگو"
+    return f"تاریخچهٔ «{chat}» (id={chat_id}، نوع: {kind}):\n" + (
+        _format_messages(messages) if messages else "در این گفتگو پیامی نیست (نوع: " + kind + ")."
+    )
 
 
 @risk(Risk.SAFE)
