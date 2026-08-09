@@ -195,6 +195,7 @@ class BridgeHandlers:
         # a way to persist + apply settings from inside the action layer.
         context.extra["settings_owner"] = handlers
         handlers._sync_telegram_accounts()
+        handlers._start_telegram_auto_connect()
         # Scheduled reminders/tasks: persisted in data_dir/scheduled.json,
         # fired by a daemon thread, streamed to every frontend.
         scheduler = Scheduler(settings.data_dir)
@@ -467,6 +468,29 @@ class BridgeHandlers:
         self._sync_gmail_client(old)
         return new_settings
 
+    def _start_telegram_auto_connect(self) -> None:
+        """اتصال پس‌زمینه به سشن‌های موجود؛ راه‌اندازی وب را مسدود نمی‌کند."""
+        candidates = [
+            (name, client) for name, client in self._telegram_accounts.items()
+            if client.session_path.is_file() and client.session_path.stat().st_size > 0
+        ]
+        if not candidates:
+            return
+        semaphore = threading.BoundedSemaphore(2)
+        def worker(name: str, client: PersonalTelegram) -> None:
+            with semaphore:
+                try:
+                    result = client.start_login()
+                    if result.get("state") == "connected":
+                        self._mark_account_enabled(name)
+                    self._publish_telegram_state()
+                except Exception as exc:  # noqa: BLE001 - status is user-facing
+                    client._last_error = "اتصال خودکار تلگرام ناموفق بود؛ فیلترشکن/VPN و اینترنت را بررسی کنید"
+                    logger.debug("telegram auto-connect failed for %s: %s", name, type(exc).__name__)
+                    self._publish_telegram_state()
+        for name, client in candidates:
+            threading.Thread(target=worker, args=(name, client), name=f"telegram-auto-{name}", daemon=True).start()
+
     def _sync_telegram_accounts(self) -> None:
         """Create/drop one PersonalTelegram per enabled account (F2).
 
@@ -622,6 +646,11 @@ class BridgeHandlers:
             "state": state,
             "phone": acc.phone,
             "session_path": str(self.settings.telegram_session_path_for(name)),
+            "session_file_exists": self.settings.telegram_session_path_for(name).is_file(),
+            "auto_connect": bool(acc.enabled and self.settings.telegram_session_path_for(name).is_file()),
+            "connected_at": (getattr(client, "connected_at", None).isoformat()
+                             if getattr(client, "connected_at", None) else None),
+            "last_error": getattr(client, "last_error", "") if client else "",
             "has_credentials": bool(acc.api_id and acc.api_hash and acc.phone),
             "confirm_send": bool(acc.confirm_send),
         }
@@ -680,6 +709,35 @@ class BridgeHandlers:
             enabled=True, active_account=tg.active_account, accounts=tuple(accounts),
         )
         self._apply_settings(self.settings.with_overrides(telegram=new_tg))
+
+    def add_telegram_account(self, name: str, phone: str, session_name: str | None = None) -> dict[str, Any]:
+        """ثبت اکانت بدون تلاش برای چاپ یا بازگرداندن رازهای تلگرام."""
+        tg = self.settings.telegram
+        if any(a.name == name for a in tg.accounts):
+            raise AssistantError(f"اکانت تلگرام «{name}» از قبل وجود دارد")
+        base = tg.account(tg.active_account or "اصلی")
+        account = TelegramAccount(name=str(name), enabled=False, api_id=base.api_id,
+                                  api_hash=base.api_hash, phone=str(phone),
+                                  session_name=session_name or str(name))
+        new = replace(tg, accounts=tuple(tg.accounts) + (account,))
+        self._apply_settings(self.settings.with_overrides(telegram=new))
+        return self.telegram_accounts_status()
+
+    def remove_telegram_account(self, name: str, confirmed: bool = False) -> dict[str, Any]:
+        if not confirmed:
+            raise AssistantError("حذف اکانت خطرناک است؛ برای تأیید confirmed=true بفرستید")
+        tg = self.settings.telegram
+        account = tg.account(name)
+        session = self.settings.telegram_session_path_for(name)
+        client = self._telegram_accounts.pop(name, None)
+        if client is not None:
+            client.disconnect()
+        if session.is_file():
+            session.unlink()
+        accounts = tuple(a for a in tg.accounts if a.name != name)
+        active = tg.active_account if tg.active_account != name else (accounts[0].name if accounts else "اصلی")
+        self._apply_settings(self.settings.with_overrides(telegram=replace(tg, accounts=accounts, active_account=active)))
+        return self.telegram_accounts_status()
 
     def switch_telegram_account(self, name: str) -> dict[str, Any]:
         """Make ``name`` the active account and enable it (persisted).

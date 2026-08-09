@@ -675,7 +675,10 @@
             <template x-for="acc in telegramAccounts" :key="acc.account">
               <div class="field__row">
                 <span class="field__hint" :class="{ 'field__hint--strong': acc.account === activeTelegramAccount }">
-                  {{ acc.account }} — {{ acc.phone || 'شماره ندارد' }} — {{ accountStateLabel(acc.state) }}
+                  <strong x-text="acc.account"></strong> —
+                  <span x-text="acc.phone || 'شماره ندارد'"></span> —
+                  <span x-text="accountStateLabel(acc.state)"></span> — سشن:
+                  <span x-text="acc.session_file_exists ? 'موجود' : 'ندارد'"></span>
                 </span>
                 <label class="field__switch-inline" :title="acc.enabled ? 'فعال — خاموش کن' : 'غیرفعال — روشن کن'">
                   <input type="checkbox" class="switch switch--sm" :checked="Boolean(acc.enabled)"
@@ -684,7 +687,7 @@
                 </label>
                 <button class="btn btn--ghost btn--sm" type="button"
                         @click="connectTelegram(acc.account)" :disabled="telegramBusy">
-                  <span x-show="!telegramBusy">🔌 اتصال</span>
+                  <span x-show="!telegramBusy" x-text="acc.session_file_exists ? '🔄 اتصال مجدد' : '🔌 اتصال'"></span>
                   <span x-show="telegramBusy" x-cloak>…</span>
                 </button>
                 <button class="btn btn--ghost btn--sm" type="button"
