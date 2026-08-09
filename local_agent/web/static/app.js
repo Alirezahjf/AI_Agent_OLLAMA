@@ -366,6 +366,9 @@
         switch (msg.event_type) {
           case "telegram_state":
             this.applyTelegramState(p.telegram || {});
+            if (p.accounts) this.telegramAccounts = p.accounts;
+            if (p.telegram && p.telegram.account) this.activeTelegramAccount = p.telegram.account;
+            this.refreshStatus();
             break;
           case "scheduled_fired": {
             const job = p.job || {};

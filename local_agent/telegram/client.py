@@ -33,14 +33,14 @@ class Chat:
     title: str
     username: str | None
     is_group: bool
+    last_message: str | None = None
+    unread_count: int = 0
     is_channel: bool = False
     is_bot: bool = False
     is_private: bool = False
     is_forum: bool = False
     verified: bool = False
     pinned: bool = False
-    last_message: str | None = None
-    unread_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
