@@ -20,6 +20,7 @@ import base64
 import email
 import email.header
 import email.message
+import email.utils
 import html
 import imaplib
 import re
@@ -209,7 +210,7 @@ class _OAuthGmailBackend(GmailBackend):
         return GmailMessage(
             id=msg_id,
             subject=_decode_header_value(headers.get("subject", "")),
-            sender=_decode_header_value(headers.get("from", "")),
+            sender=_clean_sender(headers.get("from", "")),
             snippet=f"{body[:300]}" if body else payload.get("snippet", ""),
             date=headers.get("date", ""),
             is_unread=False,
@@ -269,7 +270,7 @@ class _OAuthGmailBackend(GmailBackend):
         return GmailMessage(
             id=msg["id"],
             subject=_decode_header_value(headers.get("subject", "(بدون موضوع)")),
-            sender=_decode_header_value(headers.get("from", "?")),
+            sender=_clean_sender(headers.get("from", "?")),
             snippet=payload.get("snippet", ""),
             date=headers.get("date", ""),
             is_unread=True,
@@ -289,6 +290,9 @@ class _ImapGmailBackend(GmailBackend):
         self._lock = threading.RLock()
 
     def connect(self) -> str:
+        # بستن اتصال قبلی از ایجاد چند سشن و خطاهای EOF جلوگیری می‌کند.
+        if self._imap is not None:
+            self._close_imap()
         try:
             imap = imaplib.IMAP4_SSL(IMAP_HOST, 993, ssl_context=ssl.create_default_context())
             imap.login(self._username, self._app_password)
@@ -302,14 +306,18 @@ class _ImapGmailBackend(GmailBackend):
         self._imap = imap
         return f"connected as {self._username} (IMAP)"
 
+    def _close_imap(self) -> None:
+        old = self._imap
+        self._imap = None
+        if old is not None:
+            try:
+                old.logout()
+            except Exception as exc:  # noqa: BLE001 - best-effort teardown
+                logger.debug("imap logout failed: %s", type(exc).__name__)
+
     def disconnect(self) -> None:
         with self._lock:
-            if self._imap is not None:
-                try:
-                    self._imap.logout()
-                except Exception as exc:  # noqa: BLE001 - best-effort teardown
-                    logger.debug("imap logout failed: %s", exc)
-                self._imap = None
+            self._close_imap()
 
     @property
     def is_connected(self) -> bool:
@@ -318,13 +326,25 @@ class _ImapGmailBackend(GmailBackend):
     # ------------------------------------------------------------- helpers
 
     def _select(self) -> Any:
-        if self._imap is None:
-            raise GmailError("جیمیل وصل نیست؛ ابتدا اتصال را برقرار کنید")
-        try:
-            self._imap.select("INBOX")
-        except (imaplib.IMAP4.error, OSError) as exc:
-            raise GmailError(f"اتصال به صندوق ورودی جیمیل ممکن نشد: {exc}") from exc
-        return self._imap
+        """Select INBOX and recover once from a dead IMAP socket."""
+        last: Exception | None = None
+        for attempt in range(2):
+            if self._imap is None:
+                try:
+                    self.connect()
+                except GmailError as exc:
+                    last = exc
+                    break
+            try:
+                assert self._imap is not None
+                self._imap.select("INBOX")
+                return self._imap
+            except (imaplib.IMAP4.error, OSError, EOFError) as exc:
+                last = exc
+                self._close_imap()
+                if attempt == 0:
+                    continue
+        raise GmailError("اتصال به صندوق ورودی جیمیل ممکن نشد؛ اتصال مجدد خودکار ناموفق بود") from last
 
     @staticmethod
     def _require_numeric_id(msg_id: Any) -> str:
@@ -390,7 +410,7 @@ class _ImapGmailBackend(GmailBackend):
             return GmailMessage(
                 id=numeric,
                 subject=_decode_header_value(parsed.get("Subject", "")),
-                sender=_decode_header_value(parsed.get("From", "?")),
+                sender=_clean_sender(parsed.get("From", "?")),
                 snippet=body[:300],
                 date=str(parsed.get("Date", "")),
                 is_unread=False,
@@ -682,12 +702,23 @@ def _rfc822_body(parsed: email.message.Message) -> str:
         return str(parsed.get_payload() or "")
 
 
+def _clean_sender(value: str) -> str:
+    """Return a plain ``name <address>`` value, never Markdown/HTML."""
+    decoded = _decode_header_value(value or "")
+    name, address = email.utils.parseaddr(decoded)
+    name = str(name or "").strip()
+    address = str(address or "").strip()
+    if name and address:
+        return f"{name} <{address}>"
+    return name or address or "?"
+
+
 def _message_from_rfc822(msg_id: str, parsed: email.message.Message) -> GmailMessage:
     body = _rfc822_body(parsed)
     return GmailMessage(
         id=msg_id,
         subject=_decode_header_value(parsed.get("Subject", "(بدون موضوع)")),
-        sender=_decode_header_value(parsed.get("From", "?")),
+        sender=_clean_sender(parsed.get("From", "?")),
         snippet=body[:200],
         date=str(parsed.get("Date", "")),
         is_unread=True,
