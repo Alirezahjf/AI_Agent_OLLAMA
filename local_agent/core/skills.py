@@ -235,24 +235,29 @@ DEFAULT_SKILLS: list[dict[str, Any]] = [
     {
         "id": "ai_content",
         "name": "هوش مصنوعی و محتوا",
-        "description": "ساخت تصویر، OCR، TTS، ترجمه، Code Sandbox.",
+        "description": "ساخت تصویر، OCR، TTS، STT، ترجمه، تحلیل تصویر — همه از AvalAI API.",
         "icon": "🤖",
         "category": "ai",
         "actions": [
-            "generate_image", "ocr", "text_to_speech", "translate",
+            "generate_image", "ocr", "text_to_speech", "speech_to_text",
+            "translate", "analyze_image", "list_ai_models",
             "run_code", "pdf_read", "generate_password",
+            "db_query", "db_tables",
         ],
         "system_prompt": (
-            "ابزارهای AI و محتوا:\n"
-            "- generate_image: ساخت تصویر (prompt انگلیسی بهتر است)\n"
-            "- ocr: خواندن متن از تصویر (language: fas برای فارسی)\n"
-            "- text_to_speech: تبدیل متن به صدا (language: fa)\n"
-            "- translate: ترجمه (target_language: fa/en/ar/...)\n"
-            "- run_code: اجرای کد Python/JavaScript\n"
-            "- pdf_read: خواندن PDF\n"
-            "- generate_password: ساخت رمز قوی"
+            "ابزارهای AI — همه از AvalAI API (همان کلید و endpoint پروژه):\n"
+            "- generate_image: ساخت تصویر (model: dall-e-3, gpt-image-1, flux-pro, qwen-image)\n"
+            "- ocr: تشخیص متن از تصویر/PDF (model: mistral-ocr-latest)\n"
+            "- text_to_speech: تبدیل متن به صدا (model: tts-1, voice: alloy/nova/...)\n"
+            "- speech_to_text: تبدیل صدا به متن (model: whisper-1)\n"
+            "- translate: ترجمه با LLM (model: gpt-4o-mini یا پیش‌فرض پروژه)\n"
+            "- analyze_image: تحلیل تصویر با Vision (model: gpt-4o, claude-sonnet-5)\n"
+            "- list_ai_models: لیست مدل‌های موجود در API\n"
+            "- run_code: اجرای Python/JavaScript\n"
+            "- pdf_read: خواندن PDF | generate_password: رمز قوی\n"
+            "- db_query / db_tables: SQLite read-only"
         ),
-        "trigger_keywords": ["تصویر", "image", "عکس", "ocr", "صدا", "speech", "ترجمه", "translate", "کد", "code", "pdf", "رمز"],
+        "trigger_keywords": ["تصویر", "image", "عکس", "ocr", "صدا", "speech", "ترجمه", "translate", "کد", "code", "pdf", "رمز", "vision", "تحلیل تصویر", "tts", "stt", "whisper"],
     },
     {
         "id": "database",
