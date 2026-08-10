@@ -184,7 +184,7 @@ DEFAULT_SKILLS: list[dict[str, Any]] = [
         "actions": [
             "calendar.status", "calendar.list_events", "calendar.get_event",
             "calendar.create_event", "calendar.delete_event",
-            "calendar.list_calendars",
+            "calendar.list_calendars", "calendar.connect", "calendar.verify",
         ],
         "system_prompt": (
             "تو به Google Calendar کاربر دسترسی داری.\n"
@@ -239,7 +239,8 @@ DEFAULT_SKILLS: list[dict[str, Any]] = [
         "icon": "🤖",
         "category": "ai",
         "actions": [
-            "generate_image", "ocr", "text_to_speech", "speech_to_text",
+            "generate_image", "edit_image", "generate_video",
+            "ocr", "text_to_speech", "speech_to_text",
             "translate", "analyze_image", "list_ai_models",
             "run_code", "pdf_read", "generate_password",
             "db_query", "db_tables",
@@ -283,6 +284,7 @@ DEFAULT_SKILLS: list[dict[str, Any]] = [
         "actions": [
             "discord.status", "discord.list_guilds", "discord.list_channels",
             "discord.get_messages", "discord.send_message", "discord.delete_message",
+            "discord.create_webhook", "discord.send_webhook",
         ],
         "system_prompt": (
             "دسترسی به Discord bot:\n"
@@ -337,6 +339,7 @@ DEFAULT_SKILLS: list[dict[str, Any]] = [
             "analytics.analyze_chat", "analytics.analyze_person",
             "analytics.analyze_group_members", "analytics.analyze_gmail",
             "analytics.compare_chats", "analytics.data_analyze",
+            "analytics.schedule_report", "analytics.detect_language",
         ],
         "system_prompt": (
             "ابزارهای تحلیل داده و ارتباطات:\n"
@@ -384,7 +387,24 @@ class SkillManager:
         self._skills_file = data_dir / "skills.json"
         self._skills: dict[str, Skill] = {}
         self._lock = threading.RLock()
+        self._change_callback: Any | None = None
         self._load()
+
+    def set_change_callback(self, callback: Any) -> None:
+        """Register a callback invoked whenever a skill changes.
+
+        The callback receives ``(event_type: str, skill_id: str)`` where
+        event_type is one of 'activate', 'deactivate', 'model', 'prompt'.
+        Used by the bridge to push SKILLS_CHANGED events to frontends.
+        """
+        self._change_callback = callback
+
+    def _notify(self, event_type: str, skill_id: str) -> None:
+        if self._change_callback:
+            try:
+                self._change_callback(event_type, skill_id)
+            except Exception:
+                pass
 
     def _load(self) -> None:
         """Load skills from disk or initialise defaults."""
@@ -459,6 +479,7 @@ class SkillManager:
             return False
         skill.is_active = True
         self._save()
+        self._notify("activate", skill_id)
         logger.info("skill activated: %s", skill_id)
         return True
 
@@ -469,6 +490,7 @@ class SkillManager:
             return False
         skill.is_active = False
         self._save()
+        self._notify("deactivate", skill_id)
         logger.info("skill deactivated: %s", skill_id)
         return True
 
@@ -479,6 +501,7 @@ class SkillManager:
             return False
         skill.model_override = str(model).strip()
         self._save()
+        self._notify("model", skill_id)
         return True
 
     def set_prompt(self, skill_id: str, prompt: str) -> bool:
@@ -488,6 +511,7 @@ class SkillManager:
             return False
         skill.system_prompt = str(prompt)
         self._save()
+        self._notify("prompt", skill_id)
         return True
 
     def active_skills(self) -> list[Skill]:

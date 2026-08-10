@@ -88,6 +88,33 @@ def register_google_calendar(registry: ActionRegistry, context: ActionContext) -
         parameters={},
     )(calendar_list_calendars)
 
+    registry.decorator(
+        name="calendar.connect",
+        description=(
+            "شروع اتصال OAuth به Google Calendar. یک URL و کد نمایش می‌دهد. "
+            "بعد از authorize در مرورگر، calendar.verify را صدا بزنید. DESTRUCTIVE."
+        ),
+        parameters={
+            "client_id": {"type": "string", "description": "OAuth Client ID"},
+            "client_secret": {"type": "string", "description": "OAuth Client Secret"},
+        },
+        required=("client_id", "client_secret"),
+        risk_level=Risk.DESTRUCTIVE,
+    )(calendar_connect)
+
+    registry.decorator(
+        name="calendar.verify",
+        description="تکمیل اتصال OAuth با authorization code. DESTRUCTIVE.",
+        parameters={
+            "code": {"type": "string", "description": "Authorization code از مرورگر"},
+            "client_id": {"type": "string"},
+            "client_secret": {"type": "string"},
+            "redirect_uri": {"type": "string", "description": "مثلاً urn:ietf:wg:oauth:2.0:oob"},
+        },
+        required=("code", "client_id", "client_secret"),
+        risk_level=Risk.DESTRUCTIVE,
+    )(calendar_verify)
+
 
 # ===========================================================================
 # Auth helpers
@@ -349,6 +376,118 @@ def calendar_list_calendars(*, context: ActionContext) -> str:
         access = cal.get("accessRole", "?")
         lines.append(f"  • {name}{primary} (id={cal_id}, {access})")
     return "\n".join(lines)
+
+
+@risk(Risk.DESTRUCTIVE)
+def calendar_connect(*, client_id: str, client_secret: str,
+                     context: ActionContext) -> str:
+    """Start OAuth2 flow for Google Calendar."""
+    import urllib.parse
+
+    cid = str(client_id).strip()
+    if not cid:
+        raise AssistantError("client_id خالی است")
+
+    redirect_uri = "urn:ietf:wg:oauth:2.0:oob"
+    scope = "https://www.googleapis.com/auth/calendar"
+
+    auth_url = (
+        "https://accounts.google.com/o/oauth2/v2/auth?"
+        + urllib.parse.urlencode({
+            "client_id": cid,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": scope,
+            "access_type": "offline",
+            "prompt": "consent",
+        })
+    )
+
+    # Store client_secret temporarily for the verify step
+    data_dir = context.runtime.settings.data_dir
+    secret_file = data_dir / "_cal_oauth_pending.json"
+    secret_file.write_text(json.dumps({
+        "client_id": cid,
+        "client_secret": str(client_secret).strip(),
+        "redirect_uri": redirect_uri,
+    }), encoding="utf-8")
+
+    return (
+        f"🔗 اتصال Google Calendar:\n"
+        f"  ۱. این URL را در مرورگر باز کنید:\n"
+        f"  {auth_url}\n\n"
+        f"  ۲. Authorize کنید و کد دریافتی را کپی کنید\n"
+        f"  ۳. calendar.verify(code='کد') را صدا بزنید"
+    )
+
+
+@risk(Risk.DESTRUCTIVE)
+def calendar_verify(*, code: str, client_id: str, client_secret: str,
+                    redirect_uri: str = "urn:ietf:wg:oauth:2.0:oob",
+                    context: ActionContext) -> str:
+    """Complete OAuth2 flow and save token."""
+    auth_code = str(code).strip()
+    if not auth_code:
+        raise AssistantError("code خالی است")
+
+    # Try to load pending secrets
+    data_dir = context.runtime.settings.data_dir
+    secret_file = data_dir / "_cal_oauth_pending.json"
+    cid = str(client_id).strip()
+    csec = str(client_secret).strip()
+    ruri = str(redirect_uri or "urn:ietf:wg:oauth:2.0:oob").strip()
+
+    if (not cid or not csec) and secret_file.is_file():
+        try:
+            pending = json.loads(secret_file.read_text(encoding="utf-8"))
+            cid = cid or pending.get("client_id", "")
+            csec = csec or pending.get("client_secret", "")
+            ruri = ruri or pending.get("redirect_uri", ruri)
+        except Exception:
+            pass
+
+    if not cid or not csec:
+        raise AssistantError("client_id و client_secret لازم است.")
+
+    # Exchange code for tokens
+    try:
+        resp = requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": auth_code,
+                "client_id": cid,
+                "client_secret": csec,
+                "redirect_uri": ruri,
+                "grant_type": "authorization_code",
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        token_data = resp.json()
+    except requests.RequestException as exc:
+        raise AssistantError(f"Exchange code ناموفق: {exc}")
+
+    # Save token
+    token_file = data_dir / "calendar_token.json"
+    token_file.write_text(json.dumps(token_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # Clean up pending file
+    secret_file.unlink(missing_ok=True)
+
+    # Verify by listing calendars
+    try:
+        access_token = token_data.get("access_token", "")
+        cal_data = _cal_get("/users/me/calendarList", access_token)
+        count = len(cal_data.get("items", []))
+    except Exception:
+        count = "?"
+
+    return (
+        f"✅ Google Calendar وصل شد!\n"
+        f"  Token ذخیره شد: {token_file}\n"
+        f"  تقویم‌ها: {count}\n"
+        f"  حالا می‌توانید از calendar.list_events و بقیه ابزارها استفاده کنید."
+    )
 
 
 # ===========================================================================

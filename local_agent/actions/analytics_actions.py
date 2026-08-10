@@ -91,6 +91,33 @@ def register_analytics(registry: ActionRegistry, context: ActionContext) -> None
     )(compare_chats)
 
     registry.decorator(
+        name="analytics.schedule_report",
+        description=(
+            "زمان‌بندی گزارش تحلیل (analytics) برای اجرا در زمان مشخص. "
+            "مثلاً «هر روز ساعت ۹ صبح چت X را تحلیل کن». DESTRUCTIVE."
+        ),
+        parameters={
+            "at": {"type": "string", "description": "زمان اجرا (ISO, «تا ۵ دقیقه دیگر», «هر روز 09:00»)"},
+            "action": {"type": "string",
+                       "enum": ["analytics.analyze_chat", "analytics.analyze_group_members",
+                                "analytics.analyze_gmail", "analytics.compare_chats"],
+                       "description": "اکشن تحلیل برای اجرا"},
+            "arguments": {"type": "object", "description": "آرگومان‌های اکشن (chat, limit, ...)"},
+        },
+        required=("at", "action", "arguments"),
+        risk_level=Risk.DESTRUCTIVE,
+    )(schedule_analytics_report)
+
+    registry.decorator(
+        name="analytics.detect_language",
+        description="تشخیص زبان متن (فارسی/انگلیسی/عربی/...). SAFE.",
+        parameters={
+            "text": {"type": "string"},
+        },
+        required=("text",),
+    )(detect_language)
+
+    registry.decorator(
         name="analytics.data_analyze",
         description=(
             "تحلیل عمومی داده با Python (pandas). یک فایل CSV/JSON/Excel را "
@@ -415,6 +442,90 @@ def compare_chats(*, chats: list[str], limit: int = 300,
     return "\n".join(lines)
 
 
+@risk(Risk.DESTRUCTIVE)
+def schedule_analytics_report(*, at: str, action: str, arguments: dict,
+                              context: ActionContext) -> str:
+    """Schedule an analytics action to run at a specific time."""
+    scheduler = context.extra.get("scheduler")
+    if scheduler is None:
+        raise AssistantError("Scheduler در دسترس نیست.")
+
+    # Validate action name
+    valid_actions = {
+        "analytics.analyze_chat", "analytics.analyze_group_members",
+        "analytics.analyze_gmail", "analytics.compare_chats",
+    }
+    if action not in valid_actions:
+        raise AssistantError(f"اکشن {action} معتبر نیست. مجازها: {', '.join(valid_actions)}")
+
+    try:
+        job = scheduler.schedule_task(
+            at=str(at),
+            action_name=str(action),
+            arguments=dict(arguments),
+        )
+    except Exception as exc:
+        raise AssistantError(f"زمان‌بندی ناموفق بود: {exc}")
+
+    return (
+        f"📅 گزارش تحلیل زمان‌بندی شد:\n"
+        f"  اکشن: {action}\n"
+        f"  زمان: {at}\n"
+        f"  ID: {job.id if hasattr(job, 'id') else '?'}\n"
+        f"  آرگومان‌ها: {arguments}"
+    )
+
+
+@risk(Risk.SAFE)
+def detect_language(*, text: str, context: ActionContext) -> str:
+    """Detect the language of a text using character frequency analysis."""
+    content = str(text or "").strip()
+    if not content:
+        raise AssistantError("متن خالی است.")
+
+    # Character-based language detection
+    persian_range = sum(1 for c in content if '\u0600' <= c <= '\u06FF' or '\uFB50' <= c <= '\uFDFF')
+    arabic_range = sum(1 for c in content if '\u0600' <= c <= '\u06FF')
+    latin_range = sum(1 for c in content if c.isascii() and c.isalpha())
+    cyrillic_range = sum(1 for c in content if '\u0400' <= c <= '\u04FF')
+    cjk_range = sum(1 for c in content if '\u4E00' <= c <= '\u9FFF')
+    total_alpha = max(1, sum(1 for c in content if c.isalpha()))
+
+    scores = {
+        "فارسی (Persian)": persian_range / total_alpha,
+        "انگلیسی (English)": latin_range / total_alpha,
+        "روسی (Russian)": cyrillic_range / total_alpha,
+        "چینی (Chinese)": cjk_range / total_alpha,
+    }
+
+    # Distinguish Persian from Arabic (Persian has extra characters)
+    persian_specific = sum(1 for c in content if c in "پچژگی‌ک")
+    if persian_specific > 0 and persian_range > latin_range:
+        scores["فارسی (Persian)"] += 0.1
+        scores["عربی (Arabic)"] = (arabic_range - persian_specific) / total_alpha
+    elif arabic_range > persian_specific and arabic_range > latin_range:
+        scores["عربی (Arabic)"] = arabic_range / total_alpha
+
+    # Turkish detection (Latin + special chars)
+    turkish_chars = sum(1 for c in content if c in "çğıöşüÇĞİÖŞÜ")
+    if turkish_chars > 0 and latin_range > total_alpha * 0.5:
+        scores["ترکی (Turkish)"] = (latin_range + turkish_chars) / total_alpha
+
+    # Sort by score
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    detected = ranked[0][0] if ranked[0][1] > 0.1 else "نامشخص"
+
+    lines = [f"🌐 تشخیص زبان ({len(content)} کاراکتر):"]
+    lines.append(f"  زبان: {detected}")
+    lines.append(f"  امتیازها:")
+    for lang, score in ranked[:5]:
+        if score > 0.01:
+            bar = "█" * int(score * 30)
+            lines.append(f"    {lang:25s} {bar} ({score:.0%})")
+
+    return "\n".join(lines)
+
+
 @risk(Risk.SAFE)
 def data_analyze(*, path: str, operation: str, column: str = "",
                  query_str: str = "", group_column: str = "",
@@ -507,21 +618,62 @@ def data_analyze(*, path: str, operation: str, column: str = "",
         return f"📊 ماتریس همبستگی:\n\n{corr.to_string()}"
 
     if op == "plot":
-        # Generate a text-based plot
         col = str(column).strip()
-        if col and col in df.columns:
-            data = df[col].dropna()
-            if pd.api.types.is_numeric_dtype(data):
-                # Simple histogram
-                import numpy as np
-                hist, edges = np.histogram(data, bins=20)
-                max_bar = max(hist) if len(hist) > 0 else 1
-                lines = [f"📊 هیستوگرام «{col}» ({len(data)} مقدار):"]
-                for i, count in enumerate(hist):
-                    bar = "█" * int(count / max_bar * 40)
-                    lines.append(f"  {edges[i]:>10.1f}-{edges[i+1]:>10.1f} | {bar} ({count})")
-                lines.append(f"\n  میانگین: {data.mean():.2f} | میانه: {data.median():.2f} | انحراف: {data.std():.2f}")
-                return "\n".join(lines)
-        return "ستون عددی مشخص کنید."
+        if not col or col not in df.columns:
+            return "ستون مشخص کنید (parameter: column)."
+        data = df[col].dropna()
+        if not pd.api.types.is_numeric_dtype(data):
+            return f"ستون «{col}» عددی نیست."
+
+        # Try matplotlib PNG first, fall back to text histogram
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+            # Histogram
+            axes[0].hist(data, bins=min(30, max(10, len(data) // 5)),
+                         color="#6c63ff", alpha=0.7, edgecolor="white")
+            axes[0].set_title(f"Histogram: {col}")
+            axes[0].axvline(data.mean(), color="red", linestyle="--", label=f"Mean: {data.mean():.2f}")
+            axes[0].legend()
+
+            # Box plot
+            axes[1].boxplot(data, vert=True)
+            axes[1].set_title(f"Box Plot: {col}")
+
+            # Line/index plot
+            axes[2].plot(data.values, color="#6c63ff", linewidth=0.8)
+            axes[2].set_title(f"Values: {col}")
+            axes[2].set_xlabel("Index")
+
+            plt.tight_layout()
+            out_path = p.parent / f"{p.stem}_plot_{col}.png"
+            counter = 1
+            while out_path.exists():
+                out_path = p.parent / f"{p.stem}_plot_{col}_{counter}.png"
+                counter += 1
+            fig.savefig(str(out_path), dpi=120, bbox_inches="tight")
+            plt.close(fig)
+
+            return (
+                f"📊 نمودار ذخیره شد: {out_path}\n"
+                f"  ستون: {col} ({len(data)} مقدار)\n"
+                f"  میانگین: {data.mean():.2f} | میانه: {data.median():.2f}\n"
+                f"  انحراف معیار: {data.std():.2f} | min: {data.min():.2f} | max: {data.max():.2f}"
+            )
+        except ImportError:
+            # Fallback: text-based histogram
+            import numpy as np
+            hist, edges = np.histogram(data, bins=20)
+            max_bar = max(hist) if len(hist) > 0 else 1
+            lines = [f"📊 هیستوگرام «{col}» ({len(data)} مقدار) — matplotlib نصب نیست:"]
+            for i, count in enumerate(hist):
+                bar = "█" * int(count / max_bar * 40)
+                lines.append(f"  {edges[i]:>10.1f}-{edges[i+1]:>10.1f} | {bar} ({count})")
+            lines.append(f"\n  میانگین: {data.mean():.2f} | میانه: {data.median():.2f} | انحراف: {data.std():.2f}")
+            return "\n".join(lines)
 
     raise AssistantError(f"operation نامعتبر: {op}")

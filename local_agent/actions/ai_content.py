@@ -232,6 +232,37 @@ def register_ai_content(registry: ActionRegistry, context: ActionContext) -> Non
     )(list_ai_models)
 
     registry.decorator(
+        name="edit_image",
+        description=(
+            "ویرایش تصویر با AvalAI API (ماسک + prompt). DESTRUCTIVE."
+        ),
+        parameters={
+            "image_path": {"type": "string", "description": "مسیر تصویر اصلی"},
+            "mask_path": {"type": "string", "description": "مسیر ماسک (PNG شفاف)"},
+            "prompt": {"type": "string", "description": "توضیح تغییرات"},
+            "model": {"type": "string", "description": "مدل (gpt-image-1, dall-e-2)"},
+            "filename": {"type": "string"},
+        },
+        required=("image_path", "prompt"),
+        risk_level=Risk.DESTRUCTIVE,
+    )(edit_image)
+
+    registry.decorator(
+        name="generate_video",
+        description=(
+            "ساخت ویدیو از متن با AvalAI Video API (Sora, Veo). DESTRUCTIVE."
+        ),
+        parameters={
+            "prompt": {"type": "string", "description": "توضیح ویدیو"},
+            "model": {"type": "string", "description": "مدل (sora, veo-3, ...)"},
+            "duration": {"type": "integer", "description": "مدت ثانیه (پیش‌فرض 5)"},
+            "filename": {"type": "string"},
+        },
+        required=("prompt",),
+        risk_level=Risk.DESTRUCTIVE,
+    )(generate_video)
+
+    registry.decorator(
         name="run_code",
         description="اجرای امن کد Python/JavaScript. DESTRUCTIVE.",
         parameters={
@@ -671,6 +702,119 @@ def list_ai_models(*, context: ActionContext) -> str:
 # ===========================================================================
 # Non-AI tools (kept from previous version)
 # ===========================================================================
+
+
+@risk(Risk.DESTRUCTIVE)
+def edit_image(*, image_path: str, mask_path: str = "",
+               prompt: str = "", model: str = "gpt-image-1",
+               filename: str = "",
+               context: ActionContext) -> str:
+    """Edit an image via AvalAI /v1/images/edits."""
+    base_url, api_key = _get_avalai_config(context)
+
+    img = Path(image_path).expanduser()
+    if not img.is_absolute():
+        img = context.work_dir / img
+    if not img.is_file():
+        raise AssistantError(f"تصویر پیدا نشد: {img}")
+
+    text = str(prompt).strip()
+    if not text:
+        raise AssistantError("prompt خالی است")
+
+    m = str(model or "gpt-image-1").strip()
+    target = _unique_filename(context.work_dir, filename or "edited", ".png")
+
+    try:
+        with open(str(img), "rb") as img_file:
+            files: dict[str, Any] = {"image": (img.name, img_file, "image/png")}
+            mask_file_handle = None
+            if mask_path:
+                msk = Path(mask_path).expanduser()
+                if not msk.is_absolute():
+                    msk = context.work_dir / msk
+                if msk.is_file():
+                    mask_file_handle = open(str(msk), "rb")
+                    files["mask"] = (msk.name, mask_file_handle, "image/png")
+
+            try:
+                resp = requests.post(
+                    f"{base_url}/images/edits",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    files=files,
+                    data={"model": m, "prompt": text, "response_format": "b64_json", "n": "1"},
+                    timeout=120,
+                )
+            finally:
+                if mask_file_handle:
+                    mask_file_handle.close()
+
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as exc:
+        raise AssistantError(f"Image edit ناموفق بود: {exc}")
+
+    image_data = data.get("data", [{}])[0]
+    if "b64_json" in image_data:
+        target.write_bytes(base64.b64decode(image_data["b64_json"]))
+    elif "url" in image_data:
+        img_resp = requests.get(image_data["url"], timeout=60)
+        img_resp.raise_for_status()
+        target.write_bytes(img_resp.content)
+    else:
+        raise AssistantError("خروجی نامعتبر.")
+
+    return f"✅ تصویر ویرایش شد: {target}\n  مدل: {m}\n  Prompt: {text[:200]}"
+
+
+@risk(Risk.DESTRUCTIVE)
+def generate_video(*, prompt: str, model: str = "",
+                   duration: int = 5, filename: str = "",
+                   context: ActionContext) -> str:
+    """Generate video via AvalAI /v1/videos."""
+    base_url, api_key = _get_avalai_config(context)
+    text = str(prompt).strip()
+    if not text:
+        raise AssistantError("prompt خالی است")
+
+    m = str(model or "sora").strip()
+    dur = max(2, min(int(duration or 5), 20))
+    target = _unique_filename(context.work_dir, filename or "video", ".mp4")
+
+    try:
+        resp = requests.post(
+            f"{base_url}/videos",
+            headers=_avalai_headers(api_key),
+            json={
+                "model": m,
+                "prompt": text,
+                "duration": dur,
+                "response_format": "url",
+            },
+            timeout=300,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as exc:
+        raise AssistantError(f"Video generation ناموفق بود: {exc}")
+
+    # Video may be async — check for URL or task ID
+    video_data = data.get("data", [{}])[0] if "data" in data else data
+    if "url" in video_data:
+        vid_resp = requests.get(video_data["url"], timeout=120)
+        vid_resp.raise_for_status()
+        target.write_bytes(vid_resp.content)
+        return f"✅ ویدیو ساخته شد: {target}\n  مدل: {m} | مدت: {dur}s\n  Prompt: {text[:200]}"
+    elif "id" in data or "task_id" in video_data:
+        task_id = data.get("id", video_data.get("task_id", "?"))
+        return (
+            f"⏳ ویدیو در حال ساخت (task: {task_id})\n"
+            f"  مدل: {m} | مدت: {dur}s\n"
+            f"  Prompt: {text[:200]}\n"
+            f"  نتیجه بعداً آماده می‌شود."
+        )
+    else:
+        return f"📹 پاسخ API:\n{json.dumps(data, ensure_ascii=False, indent=2)[:2000]}"
 
 
 @risk(Risk.DESTRUCTIVE)

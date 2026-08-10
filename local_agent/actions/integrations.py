@@ -32,6 +32,11 @@ def register_integrations(registry: ActionRegistry, context: ActionContext) -> N
          {"channel_id": {"type": "string"}, "text": {"type": "string"}}, ("channel_id", "text"), Risk.DESTRUCTIVE),
         ("discord.delete_message", discord_delete_message, "حذف پیام از کانال Discord. DESTRUCTIVE.",
          {"channel_id": {"type": "string"}, "message_id": {"type": "string"}}, ("channel_id", "message_id"), Risk.DESTRUCTIVE),
+        ("discord.create_webhook", discord_create_webhook, "ساخت webhook در کانال Discord. DESTRUCTIVE.",
+         {"channel_id": {"type": "string"}, "name": {"type": "string"}}, ("channel_id",), Risk.DESTRUCTIVE),
+        ("discord.send_webhook", discord_send_webhook, "ارسال پیام از webhook (بدون bot token). SAFE.",
+         {"webhook_url": {"type": "string"}, "text": {"type": "string"},
+          "username": {"type": "string"}, "avatar_url": {"type": "string"}}, ("webhook_url", "text"), Risk.SAFE),
     ):
         registry.decorator(name=name, description=desc, parameters=params,
                            required=required, risk_level=rsk)(func)
@@ -183,6 +188,51 @@ def discord_delete_message(*, channel_id: str, message_id: str, context: ActionC
     token = _discord_token(context)
     _discord_delete(f"/channels/{channel_id}/messages/{message_id}", token)
     return f"✅ پیام {message_id} حذف شد."
+
+
+@risk(Risk.DESTRUCTIVE)
+def discord_create_webhook(*, channel_id: str, name: str = "LocalAgent",
+                           context: ActionContext) -> str:
+    """Create a webhook in a Discord channel for receiving messages."""
+    token = _discord_token(context)
+    result = _discord_post(f"/channels/{channel_id}/webhooks", token, {
+        "name": str(name or "LocalAgent"),
+    })
+    webhook_url = result.get("url", "")
+    webhook_id = result.get("id", "")
+    webhook_token = result.get("token", "")
+    return (
+        f"✅ Webhook ساخته شد:\n"
+        f"  ID: {webhook_id}\n"
+        f"  Name: {result.get('name', '?')}\n"
+        f"  URL: {webhook_url}\n"
+        f"  Token: {webhook_token[:20]}...\n"
+        f"\n  برای دریافت پیام، از POST {webhook_url} استفاده کنید."
+    )
+
+
+@risk(Risk.SAFE)
+def discord_send_webhook(*, webhook_url: str, text: str,
+                         username: str = "", avatar_url: str = "",
+                         context: ActionContext) -> str:
+    """Send a message via a Discord webhook URL (no bot token needed)."""
+    url = str(webhook_url).strip()
+    if not url:
+        raise AssistantError("webhook_url خالی است")
+
+    payload: dict[str, Any] = {"content": str(text)}
+    if username:
+        payload["username"] = str(username)
+    if avatar_url:
+        payload["avatar_url"] = str(avatar_url)
+
+    try:
+        resp = requests.post(url, json=payload, timeout=15)
+        resp.raise_for_status()
+    except Exception as exc:
+        raise AssistantError(f"Webhook send ناموفق: {exc}")
+
+    return f"✅ پیام از webhook ارسال شد."
 
 
 # ===========================================================================

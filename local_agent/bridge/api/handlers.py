@@ -211,6 +211,17 @@ class BridgeHandlers:
         from ...core.skills import SkillManager
         skill_manager = SkillManager(settings.data_dir)
         context.extra["skill_manager"] = skill_manager
+        # Wire skill changes to the event bus so frontends update in real-time
+        def _on_skill_change(event_type: str, skill_id: str) -> None:
+            try:
+                handlers.event_bus.publish(Event(
+                    type=EventType.SKILLS_CHANGED.value,
+                    payload={"event": event_type, "skill_id": skill_id},
+                    run_id="",
+                ))
+            except Exception:
+                pass
+        skill_manager.set_change_callback(_on_skill_change)
         handlers = cls(
             settings=settings,
             runtime=runtime,
@@ -263,9 +274,13 @@ class BridgeHandlers:
             if type_ == MessageType.HELLO.value:
                 return Response(id=request_id, ok=True, result=Hello().to_dict()).to_dict()
             if type_ == MessageType.LIST_ACTIONS.value:
+                skill_mgr = self.context.extra.get("skill_manager")
+                actions = self.registry.all()
+                if skill_mgr is not None:
+                    actions = [a for a in actions if not skill_mgr.should_hide_action(a.name)]
                 return Response(
                     id=request_id, ok=True,
-                    result=[describe_action(a) for a in self.registry.all()],
+                    result=[describe_action(a) for a in actions],
                 ).to_dict()
             if type_ == MessageType.LIST_MODELS.value:
                 client = create_client(self.settings.llm)
@@ -1068,15 +1083,14 @@ class BridgeHandlers:
         runtime.append(ConversationMessage(role="user", content=user_message))
 
         max_turns = max(1, self.settings.safety.max_agent_turns)
-        tools = [a.to_tool_definition() for a in self.registry.all()]
 
-        # Skill-based action filtering: hide tools from inactive skills
+        # Skill manager reference for per-turn routing and filtering
         skill_mgr = self.context.extra.get("skill_manager")
-        if skill_mgr is not None:
-            tools = skill_mgr.filter_tool_definitions(tools)
 
-        # Skill-based model routing: detect if the message matches a skill
-        # with a model override, and create a client with that model
+        # Initial tool definitions (filtered by active skills)
+        all_tools = [a.to_tool_definition() for a in self.registry.all()]
+
+        # Per-turn model routing: detect skill from first message
         llm_settings = self.settings.llm
         if skill_mgr is not None:
             detected_skill = skill_mgr.detect_skill_for_message(user_message)
@@ -1088,6 +1102,7 @@ class BridgeHandlers:
                     logger.info("model routed to %s for skill %s", routed_model, detected_skill)
 
         client = create_client(llm_settings)
+        tools = skill_mgr.filter_tool_definitions(all_tools) if skill_mgr else all_tools
 
         for turn in range(max_turns):
             if stop_event.is_set():
@@ -1115,6 +1130,10 @@ class BridgeHandlers:
                     payload={"text": piece},
                     run_id=run_id,
                 ))
+
+            # Per-turn: refresh tool definitions (picks up skill changes mid-conversation)
+            if skill_mgr is not None and turn > 0:
+                tools = skill_mgr.filter_tool_definitions(all_tools)
 
             # ``complete_streaming`` is optional: any object exposing the
             # plain ``complete`` method (including test doubles and third
