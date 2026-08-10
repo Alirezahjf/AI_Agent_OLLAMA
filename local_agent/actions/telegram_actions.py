@@ -39,6 +39,17 @@ def register_telegram(registry: ActionRegistry, context: ActionContext) -> None:
 
     # ---- Safe / read-only -----------------------------------------------
     registry.decorator(
+        name="telegram.statistics",
+        description=(
+            "آمار کلی اکانت تلگرام: تعداد چت‌های خصوصی/گروه/کانال/ربات، مخاطبین، "
+            "چت‌های خوانده‌نشده و ۱۰ چت با بیشترین پیام خوانده‌نشده. SAFE."
+        ),
+        parameters={
+            "account": {"type": "string", "description": "نام اکانت (پیش‌فرض: اکانت فعال)"},
+        },
+    )(statistics)
+
+    registry.decorator(
         name="telegram.list_accounts",
         description=(
             "فهرست اکانت‌های شخصی تلگرام با نام، شماره و وضعیت اتصال هرکدام و نام اکانت فعال. "
@@ -399,7 +410,31 @@ def _format_chats(chats: list[Any]) -> str:
         if getattr(chat, "is_group", False):
             return "گروه"
         return "شخصی"
-    lines = [f"  • {c.title} [نوع: {label(c)}] (id={c.id})" for c in chats]
+
+    lines = []
+    for c in chats:
+        parts = [f"  • {c.title} [{label(c)}] (id={c.id})"]
+        extras = []
+        if getattr(c, "username", None):
+            extras.append(f"@{c.username}")
+        if getattr(c, "phone", None):
+            extras.append(f"📱{c.phone}")
+        unread = getattr(c, "unread_count", 0)
+        if unread:
+            extras.append(f"🔔{unread}")
+        if getattr(c, "pinned", False):
+            extras.append("📌")
+        if getattr(c, "is_muted", False):
+            extras.append("🔇")
+        members = getattr(c, "members_count", 0)
+        if members:
+            extras.append(f"👥{members}")
+        if extras:
+            parts.append(" | " + " ".join(extras))
+        last = getattr(c, "last_message", None)
+        if last:
+            parts.append(f" — {last[:80]}")
+        lines.append("".join(parts))
     head = f"تعداد {len(chats)} گفتگو:\n"
     return head + "\n".join(lines) if lines else "هیچ گفتگویی یافت نشد؛ در این فهرست گفتگویی نیست."
 
@@ -433,6 +468,27 @@ def remove_account(*, name: str, confirmed: bool = False, context: ActionContext
         raise AssistantError("مدیریت اکانت در این حالت در دسترس نیست")
     owner.remove_telegram_account(name, confirmed=bool(confirmed))
     return f"✅ اکانت «{name}» و سشن آن حذف شد."
+
+
+@risk(Risk.SAFE)
+def statistics(*, account: str | None = None, context: ActionContext) -> str:
+    stats = _client(context, account).get_statistics()
+    lines = [
+        f"📊 آمار اکانت تلگرام:",
+        f"  کل گفتگوها: {stats.get('total_chats', 0)}",
+        f"  چت خصوصی: {stats.get('private_chats', 0)}",
+        f"  گروه‌ها: {stats.get('groups', 0)}",
+        f"  کانال‌ها: {stats.get('channels', 0)}",
+        f"  ربات‌ها: {stats.get('bots', 0)}",
+        f"  مخاطبین: {stats.get('total_contacts', 0)}",
+        f"  خوانده‌نشده: {stats.get('unread_chats', 0)} چت ({stats.get('total_unread_messages', 0)} پیام)",
+    ]
+    top = stats.get("top_unread", [])
+    if top:
+        lines.append("  بیشترین خوانده‌نشده:")
+        for item in top[:5]:
+            lines.append(f"    • {item['title']} (id={item['id']}) — {item['unread']} پیام")
+    return "\n".join(lines)
 
 
 @risk(Risk.SAFE)

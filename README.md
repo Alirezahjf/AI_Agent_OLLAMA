@@ -1,322 +1,242 @@
-# عامل حرفه‌ای فارسی برای Telegram و Bale — Ollama / GapGPT / AvalAI
+# 🤖 دستیار هوشمند فارسی — AI Agent Platform
 
-یک **عامل واقعی برای workflow توسعه و مدیریت workspace** است، نه یک chatbot که فقط جواب یا یک JSON نمایشی می‌دهد. کاربر در تلگرام یا بله هدف را با زبان طبیعی می‌گوید؛ عامل وضعیت واقعی پوشه را بررسی می‌کند، برنامهٔ اجرایی می‌چیند، فایل‌ها و ساختار پروژه را مرحله‌ای می‌سازد، برای هر تغییر تأیید می‌گیرد، تست را اجرا می‌کند، خطا را تحلیل می‌کند و تا سقف مشخص اصلاح/اعتبارسنجی را ادامه می‌دهد. خروجی دستورها و تست‌های اجراشده نیز به‌شکل تصویر PNG ترمینال در همان پیام‌رسان فرستاده می‌شود.
+یک پلتفرم **ایجنت هوشمند فارسی** با بیش از **۱۰۰ ابزار**، **۱۳ Skill**، **Skill System** با Model Routing و Action Filtering، **Analytics Engine** برای تحلیل داده و ارتباطات، و یکپارچگی با **GitHub, Discord, Slack, Notion, Google Calendar, Home Assistant** و بسیاری دیگر. همه ابزارهای AI از **AvalAI API** (همان کلید و endpoint پروژه) استفاده می‌کنند.
 
-## ⭐ دو رابط، یک موتور
+## ⭐ دو ایجنت، یک اکوسیستم
 
-این مخزن شامل **دو ایجنت مستقل** است:
-
-| ایجنت | کجا اجرا می‌شود | چه کار می‌کند |
+| ایجنت | مسیر | چه کار می‌کند |
 |---|---|---|
-| **ربات تلگرام/بله** (`agent/`) | سرور/سرور شما | فایل، کد، command، وب، screenshot وب — از راه دور از تلگرام |
-| **ایجنت محلی ویندوز** (`local_agent/`) | **دسکتاپ ویندوز شما** | باز کردن برنامه‌ها، کنترل GUI، **اکانت شخصی تلگرام**، Task Manager، فایل، shell |
+| **ربات تلگرام/بله** | `agent/` | عامل کدنویسی و مدیریت workspace از راه دور |
+| **دستیار محلی** | `local_agent/` | کنترل دسکتاپ + **۱۰۰+ ابزار** + Skill System + Analytics |
 
-ایجنت محلی چهار رابط دارد که همگی یک حافظه و یک وضعیت مشترک دارند:
+### رابط‌های دستیار محلی
 
-| رابط | دستور | مستندات |
+| رابط | دستور | توضیح |
 |---|---|---|
-| 🖥️ اپ دسکتاپ ویندوز | `python local_agent_setup.py desktop` | [DESKTOP.md](local_agent/DESKTOP.md) |
-| 🌐 رابط وب | `python local_agent_setup.py web` | [WEB_UI.md](local_agent/WEB_UI.md) |
-| ⌨️ CLI | `python -m local_agent` | [README.md](local_agent/README.md) |
-| ✈️ ربات تلگرام/بله | `python local_agent_setup.py bot-telegram` | [BRIDGE.md](local_agent/BRIDGE.md) |
-
-![رابط وب دستیار محلی](docs/images/web-dark.png)
-
-برای مستندات کامل ایجنت محلی، فایل [`local_agent/README.md`](local_agent/README.md) را ببینید.
-
-> **امنیت قبل از اتوماسیون:** این برنامه روی فایل‌ها و فرمان‌های واقعی کار می‌کند. هیچ LLM—even بهترین مدل ابری—جایگزین تأیید انسان و محیط ایزوله نیست. برای کار جدی آن را در یک VM یا container بدون secret و با یک workspace mount‌شده اجرا کنید.
-
-## پشتیبانی کامل از بله کنار تلگرام
-
-این پروژه اکنون دو رابط پیام‌رسان دارد:
-
-- `python -m agent.bot` برای Telegram
-- `python -m agent.bale_bot` برای Bale / بله
-
-رابط بله از همان engine، همان ابزارها، همان تأیید مرحله‌ای، همان منوی مدل/API، همان history، همان ارسال PNG خروجی ترمینال و همان ارسال artifact استفاده می‌کند. API بازوی بله طبق مستندات رسمی بر پایهٔ Bot API تلگرام است؛ بنابراین برای حفظ parity، همان handlerهای تلگرام روی base URL بله (`https://tapi.bale.ai/bot<TOKEN>/METHOD`) اجرا می‌شوند. تنها تفاوت عملیاتی، توکن و allow-list جداگانهٔ بله است تا اگر کاربر به تلگرام دسترسی نداشت، دقیقاً همان کار را در بله انجام دهد.
+| 🖥️ اپ دسکتاپ | `python local_agent_setup.py desktop` | پنجره بومی + tray + hotkey |
+| 🌐 رابط وب | `python local_agent_setup.py web` | SPA فارسی RTL + Dark Mode |
+| ⌨️ CLI | `python -m local_agent` | ترمینال با Rich |
+| ✈️ ربات تلگرام/بله | `python local_agent_setup.py bot-telegram` | کنترل از راه دور |
 
 ---
 
-## چه چیزهایی نسبت به نسخهٔ ساده بهتر شده‌اند؟
+## 🧰 ۱۰۰+ ابزار در ۱۳ دسته
 
-### Agent workflow، نه پاسخ نمایشی
+### 🐙 GitHub (۲۷ ابزار)
+مدیریت کامل repos، issues، PRs، branches، releases، files، search و notifications.
+اتصال با **Device Flow** (OAuth 2.0) یا **Personal Access Token**.
+Web API endpoints در رابط وب.
 
-عامل دستورالعمل عملیاتی مشخصی دارد:
+### ✈️ تلگرام شخصی (۴۰+ ابزار)
+کنترل اکانت شخصی با **Telethon**: لیست چت‌ها (خصوصی/گروه/کانال)، جست‌وجوی مخاطبین،
+ارسال پیام/فایل/عکس/ویدیو/ویس/استیکر/لوکیشن، فوروارد، ریپلای، حذف، ویرایش،
+مدیریت مخاطبین، بلاک/آنبلاک، عضویت/خروج کانال، پروفایل.
+**Cache درون‌session** و **Fuzzy Entity Resolution** (شناسه عددی، @username، +phone، نام).
 
-1. **فهم هدف و بررسی واقعی:** ابتدا workspace و فایل‌های مرتبط را با ابزار می‌خواند؛ ساختار یا نام فایل را حدس نمی‌زند.
-2. **برنامه و ساختار:** برای پروژهٔ جدید، پوشه‌ها، manifest، ماژول‌ها، تست‌ها و فایل‌های لازم را مرحله‌ای می‌سازد. برای پروژهٔ موجود، ابتدا فایل مرتبط را می‌خواند و با patch کوچک تغییر می‌دهد.
-3. **کنترل تغییر:** نوشتن/patch فایل، ساخت پوشه، اجرای فرمان تغییردهنده، جابه‌جایی فایل و ساخت screenshot همگی در همان پیام‌رسان دکمهٔ **تأیید و اجرا / لغو** دارند.
-4. **تست و حلقهٔ اصلاح:** بعد از کد، عامل lint/test مناسب را اجرا یا پیشنهاد می‌کند. exit code و خروجی را تحلیل می‌کند؛ اگر خطا ببیند علت و اصلاح حداقلی را گزارش می‌کند و پس از تأیید دوباره اعتبارسنجی می‌کند.
-5. **گزارش قابل پیگیری:** در پایان فایل‌های مهم، تست‌های واقعاً اجراشده، خطاهای باقی‌مانده و گام بعدی را می‌گوید. رخدادها و history هر گفتگوی تلگرام/بله در SQLite ثبت می‌شوند.
+### 📧 Gmail (۶ ابزار)
+خواندن، جست‌وجو، ارسال، پاسخ، دانلود پیوست. OAuth2 یا IMAP/SMTP.
 
-حلقهٔ ابزار با `MAX_AGENT_TURNS` محدود شده تا مدل در loop بی‌پایان نماند. اگر به سقف برسد، صادقانه توقف را گزارش می‌کند.
+### 📅 Google Calendar (۸ ابزار)
+لیست/ساخت/حذف رویداد، OAuth flow، timezone Tehran.
 
-### ابزارهای واقعی و محافظت‌شده
+### 📈 Analytics Engine (۸ ابزار)
+تحلیل عمیق چت‌های تلگرام، گروه‌ها، Gmail و فایل‌های داده:
+- `analytics.analyze_chat` — ساعات اوج، فعال‌ترین اعضا، موضوعات، توزیع هفتگی
+- `analytics.analyze_person` — پروفایل شخص: کلمات، سبک، ایموجی، نسبت پیام
+- `analytics.analyze_group_members` — رتبه‌بندی اعضا با درصد فعالیت
+- `analytics.analyze_gmail` — فرستنده‌های برتر، موضوعات، توزیع ساعتی
+- `analytics.compare_chats` — مقایسه side-by-side چند چت
+- `analytics.data_analyze` — CSV/Excel با pandas (describe, groupby, query, plot)
+- `analytics.schedule_report` — زمان‌بندی گزارش تحلیل
+- `analytics.detect_language` — تشخیص زبان متن (فارسی/انگلیسی/عربی/ترکی/...)
 
-| قابلیت | رفتار |
-|---|---|
-| بررسی پروژه | `inspect_project`، درخت فایل، manifestها و تست‌ها را نشان می‌دهد |
-| جست‌وجوی کد | `search_files` با path:line و `read_many_files` برای خواندن چند فایل مرتبط در یک مرحله |
-| وضعیت تغییرات | `inspect_git` وضعیت branch، diff stat و فایل‌های تغییرکرده را فقط‌خواندنی گزارش می‌کند |
-| فایل | list، read با شمارهٔ خط، write اتمیک، و `patch_file` با تطابق دقیق یک‌باره |
-| ساخت پروژه | `create_directory` و `write_file`، با تأیید کاربر |
-| اجرا و تست | `run_command` با timeout، خروجی محدود، exit code و تصویر ترمینال |
-| دسته‌بندی فایل | ابتدا `analyze_directory` (پسوندها و duplicateهای تا 5MB)، سپس preview؛ جابه‌جایی فقط با `apply=true` و تأیید، بدون overwrite |
-| وب | `search_web` متادیتای نتایج عمومی را می‌گیرد و آن را صریحاً **دادهٔ غیرقابل‌اعتماد** می‌داند |
-| تشخیص مرورگر | `diagnose_browser_runtime` وضع Python/Playwright/Chromiumِ **همان interpreter ربات** را فقط‌خواندنی گزارش می‌کند و در صورت نقص، دستور نصب دقیق با همان interpreter را می‌دهد |
-| screenshot وب | `capture_screenshot` برای URLهای HTTP(S)، با Playwright اختیاری و خروجی PNG در workspace؛ فایل واقعی PNG بلافاصله با `reply_photo` به همان پیام‌رسان ارسال می‌شود |
-| screenshot خروجی command/test | خود ربات، تصویر خروجی دستورها و تست‌های اجراشده را بدون نیاز به desktop session می‌فرستد |
+### 🤖 AI Content — AvalAI API (۱۴ ابزار)
+همه از **همان AVALAI_API_KEY** پروژه:
+- `generate_image` — DALL-E 3, GPT-Image, FLUX, Stability AI, Qwen-Image
+- `edit_image` — ویرایش تصویر با ماسک
+- `generate_video` — Sora, Veo
+- `ocr` — Mistral OCR (خروجی Markdown) + Tesseract fallback
+- `text_to_speech` — OpenAI TTS (tts-1, tts-1-hd)
+- `speech_to_text` — Whisper (whisper-1, whisper-large-v3)
+- `translate` — ترجمه با LLM
+- `analyze_image` — Vision API (GPT-4o, Claude, Gemini)
+- `list_ai_models` — لیست مدل‌ها به‌صورت داینامیک
+- `run_code` — Python/JavaScript sandbox
+- `pdf_read` — PyPDF2
+- `generate_password` — Cryptographically secure
+- `db_query` / `db_tables` — SQLite read-only
 
-تمام pathها با `resolve()` زیر `WORKSPACE_ROOT` کنترل می‌شوند. `run_command` نیز دستورهایی را که به مسیر مطلق خارج از workspace (مثل `AppData` کاربر دیگر) یا به `..` خارج‌شونده اشاره دارند مسدود می‌کند. خواندن/نوشتن `.env`، credentialها، کلید SSH و مسیرهای حساس مسدود است. دستورهای واضحاً مخرب (`rm`، `mkfs`، shutdown، `git clean`، `git reset --hard` و …) و دستورهای مخرب Windows (`del`، `erase`، `rmdir`، `rd`، `format`، `diskpart`، `Remove-Item`) hard-block هستند. تشخیص «read-only» عمداً کوچک و بدون shell chaining است (`dir`، `tree`، `type`، `where`، `findstr` و همتاهای لینوکسی)؛ هر فرمان دیگر — از جمله chain مثل `cd /d folder && dir` — برای تأیید می‌آید.
+### 🎮 Discord (۸ ابزار)
+لیست سرورها/کانال‌ها، خواندن/ارسال/حذف پیام، ساخت webhook، ارسال از webhook.
 
-### اجرای command در Windows
+### 💬 Slack (۴ ابزار)
+لیست کانال‌ها، خواندن/ارسال پیام.
 
-اگر ربات روی Windows اجرا شود، `run_command` دستورها را با `cmd.exe /d /s /c` (از `COMSPEC` با fallback به `SystemRoot\System32\cmd.exe`) اجرا می‌کند و به Git Bash یا WSL وابستگی ندارد. در Linux/macOS همان `bash -lc` استفاده می‌شود. اگر پوستهٔ سیستم پیدا نشود، workflow با پیام فارسی خوانا و `exit code: unavailable` تمام می‌شود، نه crash.
+### 📝 Notion (۵ ابزار)
+جست‌وجو، خواندن/ساخت صفحه، لیست دیتابیس‌ها.
 
-مدل گاهی در چت نام فایل را به Markdown link تبدیل می‌کند (`check_[pw.py](http://pw.py)`) یا `&&` را به‌صورت `&amp;&amp;` می‌فرستد؛ یک normalizer داخل ابزارها متن visible را نگه می‌دارد، URL مخفی داخل link هرگز اجرا نمی‌شود و ورودی نامعتبر با ToolError رد می‌شود.
+### 🏠 Home Assistant (۴ ابزار)
+لیست entities، گرفتن/تغییر وضعیت، call service.
 
-### اسکرین‌شات وب و Playwright
+### 🔔 Notifications (۲ ابزار)
+ntfy.sh (رایگان) و Pushbullet.
 
-نکتهٔ مهم: Playwright باید در **همان Pythonی** نصب شود که ربات با آن اجرا می‌شود، نه لزوماً `py -3`. اگر `capture_screenshot` گفت Playwright/Chromium نصب نیست، خود پیام خطا دستور دقیق را با همان interpreter می‌دهد؛ مثلاً:
+### 🌐 اطلاعات و اخبار (۵ ابزار)
+آب‌وهوا (Open-Meteo)، ارز (150+)، رمزارز (CoinGecko)، YouTube (Invidious)، RSS.
 
-```bat
-"C:\path\to\project\.venv\Scripts\python.exe" -m pip install playwright
-"C:\path\to\project\.venv\Scripts\python.exe" -m playwright install chromium
-```
+### 📊 System Monitor (۴ ابزار)
+CPU/RAM/Disk/Network/Processes.
 
-این دستورها را می‌توانید مستقیم با run_command اجرا و تأیید کنید (داخل workspace اجرا می‌شوند و نیازی به cd خارج از workspace نیست). ابزار `diagnose_browser_runtime` نیز هر زمان این وضعیت را گزارش می‌دهد.
+### 🔗 API Tester (۳ ابزار)
+HTTP request (مثل Postman)، تست endpoint، بنچمارک.
 
----
-
-## ارائه‌دهندگان و مدل‌ها
-
-عامل یک لایهٔ provider مستقل دارد؛ ابزارها و workflow برای همه یکسان‌اند:
-
-| Provider | اتصال | مدل پیشنهادی برای agent/coding |
-|---|---|---|
-| **Ollama** | `http://127.0.0.1:11434/api/chat` | مدل محلی `OLLAMA_MODEL` (مثلاً `qwen2.5:7b`) |
-| **GapGPT** | OpenAI-compatible: `https://api.gapgpt.app/v1/chat/completions` | `claude-sonnet-5`؛ کیفیت بیشتر: `gpt-5.6-sol`؛ متعادل: `gpt-5.6-terra` |
-| **AvalAI** | OpenAI-compatible: `https://api.avalai.ir/v1/chat/completions` | `claude-sonnet-5`؛ استدلال بیشتر: `gpt-5.6-sol`؛ کدنویسی long-context: `kimi-k2.7-code` |
-
-مدل‌های OpenAI-compatible با native **function calling** صدا زده می‌شوند. اگر مدل یا Ollama نصب‌شده function call را برنگرداند، عامل fallback محدود JSON تک‌ابزاری دارد؛ هیچ متن تولیدشده توسط مدل مستقیماً به shell یا Python داده نمی‌شود.
-
-برای providerهای ابری، خطاهای گذرای شبکه، TLS/SSL EOF، timeout، 429 و 5xx با backoff نمایی و jitter چند بار retry می‌شوند. در AvalAI، `AVALAI_SERVICE_TIER=default` برای کار تعاملی پیشنهاد شده و اگر عمداً `flex` بگذارید، در خطای flex به `default` fallback می‌شود. اگر base URL را از متن Markdown کپی کرده باشید، ربات قبل از اتصال URLهایی مثل `https://[api.avalai.ir](http://api.avalai.ir)/v1` را به `https://api.avalai.ir/v1` تمیز می‌کند.
-
-### کلید API: امن و انعطاف‌پذیر
-
-دو روش وجود دارد:
-
-1. **پیشنهادی (پایدار):** کلید را فقط در محیط یا secret manager نگه دارید:
-
-```dotenv
-DEFAULT_PROVIDER=avalai
-AVALAI_API_KEY=sk-...
-# یا
-DEFAULT_PROVIDER=gapgpt
-GAPGPT_API_KEY=...
-```
-
-2. **موقت از داخل ربات:** منوی `⚙️ مدل و API` → GapGPT/AvalAI یا `🔎 تشخیص API`. کلید برای تشخیص با `GET /models` روی endpoint مستند هر سرویس بررسی می‌شود. در صورت تشخیص، دکمهٔ **درست است / اشتباه است** می‌آید و کاربر می‌تواند provider را دستی تعیین کند.
-
-کلید واردشده در ربات **هرگز در SQLite، audit یا تاریخچهٔ agent ذخیره نمی‌شود** و ربات تلاش می‌کند پیام کلید را حذف کند؛ با این حال هیچ پیام‌رسانی محیط secret manager نیست. برای کلید دائمی/حساس، `.env` یا secret manager روش درست است. کلید session با restart برنامه از RAM پاک می‌شود.
-
-از `/models` یا دکمهٔ `🔄 دریافت مدل‌های قابل‌دسترسی` برای فهرست واقعی مدل‌های account فعلی استفاده کنید. `/model MODEL_ID` نیز نام مدل دلخواه را تنظیم می‌کند.
+### 🔧 سایر
+فایل، شل، کلیپ‌بورد، پنجره‌ها، پروسس‌ها، GUI automation، screenshot، scheduler.
 
 ---
 
-## نصب
+## 🧠 Skill System
 
-### 1) پیش‌نیازها
+یک سیستم **مدیریت قابلیت‌ها** که هر ابزار را در یک Skill دسته‌بندی می‌کند:
 
-- Python **3.11+**
-- یک bot token از [@BotFather تلگرام](https://t.me/BotFather) یا [@botfather بله](https://ble.ir/botfather)
-- یک `WORKSPACE_ROOT` اختصاصی و موجود
-- برای حالت محلی: [Ollama](https://ollama.com) و یک مدل
+### ۱۳ Skill پیش‌فرض
+github, telegram, email, calendar, system, web_info, ai_content, database, discord, slack, notion, smart_home, analytics
 
-```bash
-ollama pull qwen2.5:7b
-ollama serve
+### قابلیت‌ها
+- **Activate/Deactivate** — ابزارهای skill غیرفعال از context LLM **حذف** می‌شوند
+- **Per-skill Model Override** — مثلاً skill GitHub از `claude-sonnet-5` و skill ترجمه از `gpt-4o-mini` استفاده کند
+- **Per-skill System Prompt** — دستورالعمل اختصاصی هر skill
+- **Model Routing** — تشخیص خودکار skill از پیام کاربر و route به model مناسب
+- **Action Filtering** — ابزارهای skill غیرفعال واقعاً از LLM مخفی می‌شوند
+- **Persistent** — وضعیت در `data_dir/skills.json` ذخیره می‌شود
+- **Web UI** — مدیریت skills از مودال تنظیمات رابط وب
+- **Real-time Sync** — تغییرات skill فوری به همه frontends ارسال می‌شود
+
+---
+
+## 🏗️ معماری
+
+```
+local_agent/
+├── core/
+│   ├── config.py          — AssistantSettings (frozen dataclass)
+│   ├── context.py         — RuntimeContext
+│   ├── skills.py          — SkillManager (13 skills, routing, filtering)
+│   ├── analytics.py       — Analytics Engine (people, chats, emails)
+│   ├── scheduler.py       — Scheduled reminders/tasks
+│   └── errors.py, logging_setup.py, notify.py, cleanup.py
+├── llm/
+│   └── client.py          — OllamaClient + OpenAICompatibleClient (streaming)
+├── telegram/
+│   └── client.py          — PersonalTelegram (cache, fuzzy resolve, rich data)
+├── github/
+│   └── client.py          — GitHubClient (Device Flow + PAT)
+├── gmail/
+│   └── client.py          — GmailClient (OAuth2 + IMAP/SMTP)
+├── actions/               — 100+ tools registered as actions
+│   ├── telegram_actions.py, github_actions.py, gmail_actions.py
+│   ├── google_calendar.py, integrations.py (Discord/Slack/Notion)
+│   ├── ai_content.py (AvalAI: image/ocr/tts/stt/translate/vision)
+│   ├── analytics_actions.py, api_tester.py, system_monitor.py
+│   ├── info_services.py (weather/currency/crypto/youtube/rss)
+│   ├── notifications.py (ntfy/pushbullet/home assistant)
+│   ├── skill_actions.py, config_actions.py, scheduler_actions.py
+│   ├── file_ops.py, web.py, system.py, app_control.py, ...
+│   └── registry.py, runner.py
+├── bridge/
+│   ├── api/handlers.py    — BridgeHandlers (chat loop, model routing, filtering)
+│   ├── server/server.py   — HTTP + SSE server
+│   ├── protocol.py        — Event types (SKILLS_CHANGED, ...)
+│   └── telegram_bot/      — Bot bridge
+├── web/
+│   ├── app.py             — FastAPI (50+ endpoints)
+│   ├── templates/index.html — SPA with Skills modal
+│   └── static/app.js, style.css
+├── desktop/               — pywebview + tray + hotkey + installer
+└── cli/                   — Rich terminal REPL
 ```
 
-### 2) نصب پکیج
+---
+
+## 📦 نصب
 
 ```bash
 git clone https://github.com/Alirezahjf/AI_Agent_OLLAMA.git
 cd AI_Agent_OLLAMA
 python3 -m venv .venv
-source .venv/bin/activate              # Windows PowerShell: .venv\Scripts\Activate.ps1
-pip install -e '.[dev]'                # PowerShell: pip install -e ".[dev]"
-cp .env.example .env
+source .venv/bin/activate              # Windows: .venv\Scripts\Activate.ps1
+pip install -e ".[all]"                # همه‌چیز
+# یا ساده‌تر:
+python local_agent_setup.py install-all
 ```
 
-> **ویندوز / PowerShell:** حتماً از دابل‌کوت استفاده کنید — `pip install -e ".[dev]"`.
-> برای دستیار محلی (رابط وب + اپ دسکتاپ) این را بزنید: `pip install -e ".[all]"`
-> یا ساده‌تر `python local_agent_setup.py install-all`.
+### پیش‌نیازها
+- Python **3.11+**
+- **AvalAI API Key** (یا GapGPT/Ollama) — برای AI tools و LLM
+- **Telegram Bot Token** (اختیاری) — برای ربات
+- **Telethon credentials** (اختیاری) — برای تلگرام شخصی
 
-برای screenshot واقعی صفحهٔ وب، browser اختیاری را هم نصب کنید — حتماً با **همان interpreterی** که ربات را اجرا می‌کنید (اگر venv فعال است، همان `python`):
-
-```bash
-pip install -e '.[browser,dev]'
-python -m playwright install chromium
-```
-
-در Windows اگر ربات را از `.venv` اجرا می‌کنید، `py -3 -m playwright install chromium` کافی نیست چون ممکن است به interpreter دیگری نصب کند؛ از ابزار `diagnose_browser_runtime` دستور دقیق را بگیرید.
-
-### 3) پیکربندی `.env`
-
-حداقل نمونه برای Ollama روی تلگرام:
+### پیکربندی
 
 ```dotenv
-TELEGRAM_BOT_TOKEN=123456:real-telegram-bot-token
-ALLOWED_TELEGRAM_USER_IDS=123456789
-WORKSPACE_ROOT=/home/me/projects
-DATA_DIR=/home/me/.local/share/persian-agent
-DEFAULT_PROVIDER=ollama
-OLLAMA_MODEL=qwen2.5:7b
-```
-
-حداقل نمونه برای Ollama روی بله:
-
-```dotenv
-BALE_BOT_TOKEN=123456:real-bale-bot-token
-ALLOWED_BALE_USER_IDS=987654321
-WORKSPACE_ROOT=/home/me/projects
-DATA_DIR=/home/me/.local/share/persian-agent
-DEFAULT_PROVIDER=ollama
-OLLAMA_MODEL=qwen2.5:7b
-# معمولاً لازم نیست تغییر کند:
-BALE_API_BASE_URL=https://tapi.bale.ai
-BALE_FILE_BASE_URL=https://tapi.bale.ai/file
-```
-
-نمونه GapGPT:
-
-```dotenv
-DEFAULT_PROVIDER=gapgpt
-GAPGPT_BASE_URL=https://api.gapgpt.app/v1
-GAPGPT_API_KEY=YOUR_GAPGPT_API_KEY
-DEFAULT_MODEL=claude-sonnet-5
-```
-
-نمونه AvalAI:
-
-```dotenv
+# .env — حداقل تنظیمات
 DEFAULT_PROVIDER=avalai
 AVALAI_BASE_URL=https://api.avalai.ir/v1
 AVALAI_API_KEY=sk-...
 DEFAULT_MODEL=claude-sonnet-5
+
+# تلگرام شخصی (اختیاری)
+# در config.json → telegram section
+
+# GitHub (اختیاری)
+# GITHUB_TOKEN یا از Device Flow در رابط وب
+
+# Discord / Slack / Notion (اختیاری)
+# DISCORD_BOT_TOKEN, SLACK_BOT_TOKEN, NOTION_API_KEY
 ```
 
-`DEFAULT_PROVIDER=auto` در صورت وجود `AVALAI_API_KEY` ابتدا AvalAI، سپس GapGPT و در نبود هر دو Ollama را انتخاب می‌کند. تمام تنظیمات و حدهای زمان در [`.env.example`](.env.example) توضیح داده شده‌اند.
-
-> ابتدا `/start` را در همان پیام‌رسان بفرستید تا ID عددی خود را ببینید؛ سپس برای تلگرام `ALLOWED_TELEGRAM_USER_IDS` و برای بله `ALLOWED_BALE_USER_IDS` را پر و برنامه را restart کنید. ربات با allow-list خالی نباید عمومی شود.
-
-### 4) اجرا
-
-برای تلگرام:
+### اجرا
 
 ```bash
-python -m agent.bot
-```
-
-برای بله:
-
-```bash
-python -m agent.bale_bot
-```
-
-اگر پکیج را editable نصب کرده‌اید، scriptهای زیر هم در دسترس‌اند:
-
-```bash
-persian-agent-telegram
-persian-agent-bale
+python local_agent_setup.py web        # رابط وب → http://127.0.0.1:7824
+python local_agent_setup.py desktop    # اپ دسکتاپ
+python -m local_agent                  # CLI
+python -m agent.bot                    # ربات تلگرام
+python -m agent.bale_bot               # ربات بله
 ```
 
 ---
 
-## تجربهٔ کاربری Telegram و Bale
+## 🔒 امنیت
 
-این فرمان‌ها و دکمه‌ها در هر دو پیام‌رسان یکسان‌اند:
-
-- `/start` — معرفی، ID کاربر همان پیام‌رسان و provider فعال
-- `/status` — مدل، منبع کلید (فقط «ENV» یا «جلسه»، نه خود کلید)، workspace و guardrailها
-- `/models` — فهرست مدل‌های واقعی provider فعلی
-- `/model claude-sonnet-5` — مدل دلخواه (بدون واردکردن secret)
-- `⚙️ مدل و API` — تغییر Ollama/GapGPT/AvalAI، ورود موقت کلید و auto-detection
-- `📜 تاریخچه` — پیام‌ها و auditهای گفتگوی فعلی
-- `➕ گفتگوی جدید` — thread جدید با حفظ threadهای قبلی
-- `🧹 پاک‌کردن حافظه` — فقط حافظهٔ thread فعلی را پاک می‌کند
-
-نمونه درخواست‌های درست:
-
-```text
-داخل پوشهٔ Machine_hesab اگر نبود آن را بساز. یک ماشین‌حساب پایتون CLI ساخت‌یافته
-با مدیریت ورودی نامعتبر، تقسیم بر صفر، README و تست pytest بنویس. قبل از هر تغییر
-فایل‌های فعلی را بررسی کن؛ بعد از ساخت pytest را اجرا کن و اگر خطا داشت علت را بگو و اصلاح کن.
-```
-
-```text
-این پروژه را بررسی کن، ساختار و تست‌هایش را گزارش بده. سپس endpoint health-check را
-با کمترین تغییر اضافه کن، تست مناسب بنویس و نتیجهٔ اجرای تست را با exit code گزارش کن.
-```
-
-```text
-پوشه downloads را فقط تحلیل و دسته‌بندی پیشنهادی بده؛ duplicateها را پیدا کن، اما تا
-وقتی preview را تأیید نکرده‌ام هیچ فایلی را جابه‌جا نکن.
-```
-
-```text
-برای مستندات رسمی FastAPI درباره lifespan وب جست‌وجو کن، لینک‌های منبع را بده و هیچ
-دستور یا کدی از صفحهٔ وب را بدون بررسی اجرا نکن.
-```
+1. **تأیید برای کارهای مخرب** — ابزارهای DESTRUCTIVE همیشه تأیید می‌خواهند
+2. **Sandbox مسیر** — فایل‌ها فقط داخل workspace
+3. **Hard-block** — `rm`, `mkfs`, `shutdown`, `del`, `format` و...
+4. **API Key** — هرگز در SQLite/audit ذخیره نمی‌شود
+5. **Allow-list** — فقط user IDهای مجاز
+6. **Skill Filtering** — ابزارهای skill غیرفعال از LLM مخفی‌اند
 
 ---
 
-## معماری
-
-> **دو بستهٔ مجزا در این ریپو:** پوشهٔ `agent/` (قدیمی‌تر) همان ربات
-> تلگرام/بله است که در این README توضیح داده شده. پوشهٔ `local_agent/`
-> «دستیار محلی دسکتاپ» (Bridge + وب‌اپ FastAPI + CLI + اپ دسکتاپ ویندوز)
-> است — راهنمای کاملش در [local_agent/README.md](local_agent/README.md)
-> است و از طریق `python local_agent_setup.py` نصب/اجرا می‌شود. هر دو
-> مستقل کار می‌کنند و کد مشترکی ندارند.
-
-```text
-agent/config.py     تنظیمات محیطی و حدها
-agent/providers.py  adapterهای Ollama و OpenAI-compatible (GapGPT/AvalAI)
-agent/brain.py      workflow bounded: inspect → plan → change → test → verify
-agent/tools.py      ابزارهای محلی، sandbox مسیر، policy، normalizer خروجی مدل و schemaهای function calling
-agent/storage.py    SQLite: history، preference غیرمحرمانه، pending action، audit
-agent/bot.py        Telegram UI و کلاس مشترک/زیرکلاس Bale؛ تأیید، provider picker، history، تصویر ترمینال و artifact
-agent/bale_bot.py   entry point بله با همان handlerها روی API بله
-tests/              تست‌های policy، ابزار، Windows، screenshot، ارسال artifact و provider
-```
-
-### مدل داده و privacy
-
-- conversation و audit تلگرام در `DATA_DIR/agent.sqlite3` و بله در `DATA_DIR/agent_bale.sqlite3` هستند؛ از آن‌ها backup خصوصی بگیرید.
-- preference فقط provider/model است؛ **API key هیچ جدول SQLite ندارد**.
-- `pending_actions` برای preview/approval ذخیره می‌شود؛ محتوای `write_file` در audit تکرار نمی‌شود.
-- history برای جلوگیری از پرشدن context به تعداد پیام و 55k کاراکتر اخیر محدود می‌شود؛ خروجی بزرگ ابزار در context کوتاه می‌شود.
-
----
-
-## امنیت و مرزها
-
-1. **تأیید به‌معنای sandbox نیست.** فرمان تأییدشده با سطح دسترسی process اجرا می‌شود. برای پروژه/دادهٔ حساس VM/container لازم است.
-2. **فایل secret وارد workspace نکنید.** guardrail جلوی مسیرهای شناخته‌شده را می‌گیرد اما جای مدیریت صحیح رازها را نمی‌گیرد.
-3. **خروجی وب، dependency و log می‌توانند prompt injection داشته باشند.** agent آن‌ها را دادهٔ غیرقابل‌اعتماد فریم می‌کند؛ تأیید انسانی هنوز ضروری است.
-4. `AUTO_APPROVE_MUTATIONS=true` فقط در VM disposable مجاز است. حتی با آن، hard blockها باقی می‌مانند.
-5. `run_command` برای workflow توسعه لازم است، ولی فرمان‌های install/test نیز ممکن است script دلخواه اجرا کنند؛ قبل از تأیید متن کامل را بخوانید.
-6. سرویس‌های ابری کد، context و خروجی ابزار لازم را به provider انتخاب‌شده می‌فرستند. برای دادهٔ محرمانه از Ollama محلی استفاده کنید.
-
----
-
-## تست و کیفیت
+## 🧪 تست
 
 ```bash
-pytest -q
-ruff check agent tests
+pytest tests_local_agent/ -v
 ```
 
-تست‌ها policy مهم را پوشش می‌دهند: sandbox مسیر، فایل حساس، write/patch اتمیک، hard block دستورات (POSIX و Windows)، مسدودسازی مسیر خارج از workspace در command، تشخیص صحیح read-only، انتخاب cmd.exe/bash بر اساس سیستم‌عامل و مدیریت نبود پوسته، normalizer لینک‌های Markdown، تشخیص Playwright با `sys.executable`، screenshot با artifact، ارسال واقعی PNG با reply_photo، پیش‌نمایش و جابه‌جایی بدون overwrite، provider routing و عدم ذخیرهٔ key.
+---
+
+## 📋 ابزارهای AvalAI API
+
+| Endpoint | مدل‌ها | ابزار |
+|---|---|---|
+| `/v1/chat/completions` | claude-sonnet-5, gpt-5.6-sol, kimi-k2.7-code, deepseek-v4-pro | چت + translate + vision |
+| `/v1/images/generations` | dall-e-3, gpt-image-1, flux-pro, qwen-image | generate_image |
+| `/v1/images/edits` | gpt-image-1, dall-e-2 | edit_image |
+| `/v1/ocr` | mistral-ocr-latest | ocr |
+| `/v1/audio/speech` | tts-1, tts-1-hd | text_to_speech |
+| `/v1/audio/transcriptions` | whisper-1, whisper-large-v3 | speech_to_text |
+| `/v1/videos` | sora, veo | generate_video |
+| `GET /v1/models` | — | list_ai_models |
+
+همه از **همان کلید** (`AVALAI_API_KEY`) و **همان base URL** استفاده می‌کنند.
