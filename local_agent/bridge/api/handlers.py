@@ -33,6 +33,7 @@ from ...actions.notifications import register_notifications
 from ...actions.google_calendar import register_google_calendar
 from ...actions.skill_actions import register_skills
 from ...actions.analytics_actions import register_analytics
+from ...actions.api_tester import register_api_tester
 from ...actions.registry import ActionContext, ConfirmationGate
 from ...actions.scheduler_actions import register_scheduler
 from ...actions.telegram_actions import register_telegram
@@ -197,6 +198,7 @@ class BridgeHandlers:
         register_google_calendar(registry, context)
         register_skills(registry, context)
         register_analytics(registry, context)
+        register_api_tester(registry, context)
         register_scheduler(registry, context)
         context.extra["telegram"] = None
         context.extra["registry"] = registry
@@ -1067,7 +1069,25 @@ class BridgeHandlers:
 
         max_turns = max(1, self.settings.safety.max_agent_turns)
         tools = [a.to_tool_definition() for a in self.registry.all()]
-        client = create_client(self.settings.llm)
+
+        # Skill-based action filtering: hide tools from inactive skills
+        skill_mgr = self.context.extra.get("skill_manager")
+        if skill_mgr is not None:
+            tools = skill_mgr.filter_tool_definitions(tools)
+
+        # Skill-based model routing: detect if the message matches a skill
+        # with a model override, and create a client with that model
+        llm_settings = self.settings.llm
+        if skill_mgr is not None:
+            detected_skill = skill_mgr.detect_skill_for_message(user_message)
+            if detected_skill:
+                routed_model = skill_mgr.get_model_for_skill(detected_skill)
+                if routed_model and routed_model != llm_settings.openai_model:
+                    from dataclasses import replace as _dc_replace
+                    llm_settings = _dc_replace(llm_settings, openai_model=routed_model)
+                    logger.info("model routed to %s for skill %s", routed_model, detected_skill)
+
+        client = create_client(llm_settings)
 
         for turn in range(max_turns):
             if stop_event.is_set():

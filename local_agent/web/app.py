@@ -782,6 +782,82 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                 raise HTTPException(400, error_text)
             return {"status": "pending", "message": error_text}
 
+    # ---- Skills -------------------------------------------------------
+
+    class SkillToggleRequest(BaseModel):
+        skill_id: str
+
+    class SkillModelRequest(BaseModel):
+        skill_id: str
+        model: str
+
+    class SkillPromptRequest(BaseModel):
+        skill_id: str
+        prompt: str
+
+    @app.get("/api/skills")
+    async def skills_list() -> dict[str, Any]:
+        """Return all skills with their current state."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "skills need an in-process bridge")
+        mgr = server.handlers.context.extra.get("skill_manager")
+        if mgr is None:
+            raise HTTPException(503, "Skill Manager not initialised")
+        return {"skills": [s.to_dict() for s in mgr.list_skills()]}
+
+    @app.post("/api/skills/activate")
+    async def skill_activate(req: SkillToggleRequest) -> dict[str, Any]:
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "skills need an in-process bridge")
+        mgr = server.handlers.context.extra.get("skill_manager")
+        if mgr is None:
+            raise HTTPException(503, "Skill Manager not initialised")
+        ok = mgr.activate(req.skill_id)
+        if not ok:
+            raise HTTPException(404, f"Skill '{req.skill_id}' not found")
+        return {"ok": True, "skill_id": req.skill_id, "is_active": True}
+
+    @app.post("/api/skills/deactivate")
+    async def skill_deactivate(req: SkillToggleRequest) -> dict[str, Any]:
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "skills need an in-process bridge")
+        mgr = server.handlers.context.extra.get("skill_manager")
+        if mgr is None:
+            raise HTTPException(503, "Skill Manager not initialised")
+        ok = mgr.deactivate(req.skill_id)
+        if not ok:
+            raise HTTPException(404, f"Skill '{req.skill_id}' not found")
+        return {"ok": True, "skill_id": req.skill_id, "is_active": False}
+
+    @app.post("/api/skills/set-model")
+    async def skill_set_model(req: SkillModelRequest) -> dict[str, Any]:
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "skills need an in-process bridge")
+        mgr = server.handlers.context.extra.get("skill_manager")
+        if mgr is None:
+            raise HTTPException(503, "Skill Manager not initialised")
+        ok = mgr.set_model(req.skill_id, req.model)
+        if not ok:
+            raise HTTPException(404, f"Skill '{req.skill_id}' not found")
+        return {"ok": True, "skill_id": req.skill_id, "model": req.model}
+
+    @app.post("/api/skills/set-prompt")
+    async def skill_set_prompt(req: SkillPromptRequest) -> dict[str, Any]:
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "skills need an in-process bridge")
+        mgr = server.handlers.context.extra.get("skill_manager")
+        if mgr is None:
+            raise HTTPException(503, "Skill Manager not initialised")
+        ok = mgr.set_prompt(req.skill_id, req.prompt)
+        if not ok:
+            raise HTTPException(404, f"Skill '{req.skill_id}' not found")
+        return {"ok": True, "skill_id": req.skill_id}
+
     @app.post("/api/elevate/restart")
     async def elevate_restart() -> dict[str, Any]:
         """Relaunch the assistant with administrator rights (best-effort).
