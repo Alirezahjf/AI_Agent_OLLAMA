@@ -689,6 +689,99 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
             raise HTTPException(503, "gmail needs an in-process bridge")
         return server.handlers.disconnect_gmail()
 
+    # ---- GitHub -------------------------------------------------------
+
+    class GitHubTokenRequest(BaseModel):
+        token: str = ""
+
+    class GitHubDeviceFlowRequest(BaseModel):
+        client_id: str = ""
+        scopes: str = "repo,read:user,notifications"
+
+    class GitHubDeviceFlowPollRequest(BaseModel):
+        device_code: str
+        client_id: str
+        interval: int = 5
+
+    @app.get("/api/github/status")
+    async def github_status() -> dict[str, Any]:
+        """Return GitHub connection status."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "github needs an in-process bridge")
+        gh = server.handlers.context.extra.get("github")
+        if gh is None:
+            return {"connected": False, "message": "GitHub client not configured"}
+        return gh.status()
+
+    @app.post("/api/github/connect")
+    async def github_connect(req: GitHubTokenRequest) -> dict[str, Any]:
+        """Connect GitHub with a Personal Access Token."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "github needs an in-process bridge")
+        gh = server.handlers.context.extra.get("github")
+        if gh is None:
+            raise HTTPException(503, "GitHub client not initialised")
+        if not req.token.strip():
+            raise HTTPException(400, "توکن GitHub خالی است")
+        gh.set_token(req.token.strip())
+        try:
+            user = gh.get_user()
+            return {"connected": True, "login": user.get("login", ""), "name": user.get("name", "")}
+        except Exception as exc:
+            gh.clear_token()
+            raise HTTPException(400, f"توکن نامعتبر است: {exc}")
+
+    @app.post("/api/github/disconnect")
+    async def github_disconnect() -> dict[str, Any]:
+        """Disconnect GitHub (remove stored token)."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "github needs an in-process bridge")
+        gh = server.handlers.context.extra.get("github")
+        if gh is None:
+            raise HTTPException(503, "GitHub client not initialised")
+        gh.clear_token()
+        return {"connected": False, "message": "GitHub disconnected"}
+
+    @app.post("/api/github/device-flow/start")
+    async def github_device_flow_start(req: GitHubDeviceFlowRequest) -> dict[str, Any]:
+        """Start the GitHub Device Flow (returns user_code + verification_uri)."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "github needs an in-process bridge")
+        gh = server.handlers.context.extra.get("github")
+        if gh is None:
+            raise HTTPException(503, "GitHub client not initialised")
+        try:
+            return gh.start_device_flow(client_id=req.client_id.strip(), scopes=req.scopes)
+        except Exception as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.post("/api/github/device-flow/poll")
+    async def github_device_flow_poll(req: GitHubDeviceFlowPollRequest) -> dict[str, Any]:
+        """Poll GitHub for Device Flow completion. Call repeatedly."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "github needs an in-process bridge")
+        gh = server.handlers.context.extra.get("github")
+        if gh is None:
+            raise HTTPException(503, "GitHub client not initialised")
+        try:
+            result = gh.poll_device_flow(
+                device_code=req.device_code,
+                client_id=req.client_id,
+                interval=req.interval,
+                timeout=15,  # short timeout per poll — UI re-calls
+            )
+            return {"status": "authorized", **result}
+        except Exception as exc:
+            error_text = str(exc)
+            if "منقضی" in error_text or "رد کرد" in error_text:
+                raise HTTPException(400, error_text)
+            return {"status": "pending", "message": error_text}
+
     @app.post("/api/elevate/restart")
     async def elevate_restart() -> dict[str, Any]:
         """Relaunch the assistant with administrator rights (best-effort).

@@ -507,16 +507,25 @@ class OpenAICompatibleClient(LLMClient):
         piece at a time.  We accumulate them by index and only parse the
         JSON once the stream finishes, falling back to the blocking call
         if anything about the stream looks wrong.
+
+        When *tools* are present, many providers (AvalAI, some GapGPT
+        models) reject ``stream=true`` with HTTP 400 because they cannot
+        combine function calling with streaming.  In that case we skip
+        streaming entirely — tool-call results are structural and do not
+        benefit from token-by-token output.
         """
+        if tools:
+            # Streaming + function calling is unreliable across providers;
+            # fall back to the blocking endpoint which already handles the
+            # tools/no-tools retry correctly.
+            return self.complete(messages, tools)
+
         body: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "temperature": self._temperature,
             "stream": True,
         }
-        if tools:
-            body["tools"] = [tool.to_openai() for tool in tools]
-            body["tool_choice"] = "auto"
 
         try:
             response = requests.post(

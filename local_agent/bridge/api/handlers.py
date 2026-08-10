@@ -24,6 +24,15 @@ from urllib.parse import urlparse
 from ...actions import build_default_registry, describe_action, run_action
 from ...actions.config_actions import register_config
 from ...actions.gmail_actions import register_gmail
+from ...actions.github_actions import register_github
+from ...actions.system_monitor import register_system_monitor
+from ...actions.info_services import register_info_services
+from ...actions.ai_content import register_ai_content
+from ...actions.integrations import register_integrations
+from ...actions.notifications import register_notifications
+from ...actions.google_calendar import register_google_calendar
+from ...actions.skill_actions import register_skills
+from ...actions.analytics_actions import register_analytics
 from ...actions.registry import ActionContext, ConfirmationGate
 from ...actions.scheduler_actions import register_scheduler
 from ...actions.telegram_actions import register_telegram
@@ -41,6 +50,7 @@ from ...core.notify import notify_desktop
 from ...core.scheduler import ScheduledJob, Scheduler
 from ...gmail import GmailClient
 from ...gmail.client import GmailError
+from ...github.client import GitHubClient
 from ...llm import create_client
 from ...telegram import PersonalTelegram
 from ...telegram.client import TelegramError
@@ -178,11 +188,27 @@ class BridgeHandlers:
         register_telegram(registry, context)
         register_config(registry, context)
         register_gmail(registry, context)
+        register_github(registry, context)
+        register_system_monitor(registry, context)
+        register_info_services(registry, context)
+        register_ai_content(registry, context)
+        register_integrations(registry, context)
+        register_notifications(registry, context)
+        register_google_calendar(registry, context)
+        register_skills(registry, context)
+        register_analytics(registry, context)
         register_scheduler(registry, context)
         context.extra["telegram"] = None
         context.extra["registry"] = registry
         gmail = _build_gmail_client(settings)
         context.extra["gmail"] = gmail
+        # GitHub client: PAT from config or env, token persisted in data_dir
+        github = _build_github_client(settings)
+        context.extra["github"] = github
+        # Skill Manager: persistent capability bundles with per-skill models
+        from ...core.skills import SkillManager
+        skill_manager = SkillManager(settings.data_dir)
+        context.extra["skill_manager"] = skill_manager
         handlers = cls(
             settings=settings,
             runtime=runtime,
@@ -204,7 +230,13 @@ class BridgeHandlers:
         scheduler.start()
         runtime.set_system_prompt(_build_system_prompt(
             registry, settings, is_gui_available(), telegram_has_clients(handlers),
+            skill_manager=skill_manager,
         ))
+        # Append active skill prompts to the system prompt
+        skill_fragment = skill_manager.build_system_prompt_fragment()
+        if skill_fragment:
+            current_prompt = runtime.system_prompt or ""
+            runtime.set_system_prompt(current_prompt + "\n\n# مهارت‌های فعال\n" + skill_fragment)
         return handlers
 
     # -----------------------------------------------------------------
@@ -530,8 +562,10 @@ class BridgeHandlers:
         active = self._telegram_accounts.get(tg.active_account)
         self.telegram = active
         self.context.extra["telegram"] = active
+        skill_mgr = self.context.extra.get("skill_manager")
         self.runtime.set_system_prompt(_build_system_prompt(
             self.registry, self.settings, is_gui_available(), telegram_has_clients(self),
+            skill_manager=skill_mgr,
         ))
 
     def _sync_gmail_client(self, old: AssistantSettings) -> None:
@@ -1451,11 +1485,19 @@ def _capabilities(handlers: BridgeHandlers) -> list[str]:
     return caps
 
 
-def _build_system_prompt(registry, settings, gui_available: bool, telegram_enabled: bool) -> str:
+def _build_system_prompt(registry, settings, gui_available: bool, telegram_enabled: bool,
+                         skill_manager=None) -> str:
     from ...cli.prompts import build_system_prompt
+    actions = registry.all()
+    # Filter out actions belonging to inactive skills
+    if skill_manager is not None:
+        actions = [
+            a for a in actions
+            if not skill_manager.should_hide_action(a.name)
+        ]
     return build_system_prompt(
         settings=settings,
-        actions=registry.all(),
+        actions=actions,
         gui_available=gui_available,
         telegram_enabled=telegram_enabled,
     )
@@ -1490,6 +1532,22 @@ def _build_gmail_client(
     except GmailError as exc:
         logger.debug("gmail client not built: %s", exc)
         return None
+
+
+def _build_github_client(settings: AssistantSettings) -> GitHubClient:
+    """Build the GitHub client from config or env.
+
+    Token sources (priority):
+      1. ``LOCAL_AGENT_GITHUB__TOKEN`` env var
+      2. ``settings.extra["github_token"]`` (config.json → extra)
+      3. Persisted token in ``<data_dir>/github_token.json``
+    """
+    import os
+    token = os.environ.get("LOCAL_AGENT_GITHUB__TOKEN", "").strip()
+    if not token:
+        token = settings.extra.get("github_token", "").strip()
+    token_path = settings.data_dir / "github_token.json"
+    return GitHubClient(token=token, token_path=token_path)
 
 
 def _auto_select_provider(settings: AssistantSettings) -> AssistantSettings:
