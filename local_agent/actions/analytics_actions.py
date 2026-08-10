@@ -459,8 +459,9 @@ def schedule_analytics_report(*, at: str, action: str, arguments: dict,
         raise AssistantError(f"اکشن {action} معتبر نیست. مجازها: {', '.join(valid_actions)}")
 
     try:
-        job = scheduler.schedule_task(
+        job = scheduler.add(
             at=str(at),
+            type_="task",
             action_name=str(action),
             arguments=dict(arguments),
         )
@@ -471,7 +472,7 @@ def schedule_analytics_report(*, at: str, action: str, arguments: dict,
         f"📅 گزارش تحلیل زمان‌بندی شد:\n"
         f"  اکشن: {action}\n"
         f"  زمان: {at}\n"
-        f"  ID: {job.id if hasattr(job, 'id') else '?'}\n"
+        f"  ID: {job.id}\n"
         f"  آرگومان‌ها: {arguments}"
     )
 
