@@ -531,7 +531,7 @@ class OpenAICompatibleClient(LLMClient):
             return self.complete(messages, tools)
 
         if response.status_code >= 400:
-            logger.warning("streaming rejected with HTTP %s; falling back", response.status_code)
+            logger.warning("streaming rejected with HTTP %s: %s; falling back", response.status_code, response.text[:500])
             return self.complete(messages, tools)
 
         text_parts: list[str] = []
