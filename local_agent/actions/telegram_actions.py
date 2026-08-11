@@ -286,7 +286,7 @@ def register_telegram(registry: ActionRegistry, context: ActionContext) -> None:
         context=context,
     )(forward_message)
 
-    # قابلیت‌های مدیریتی فراتر از ربات مرجع
+    # قابلیت‌های مدیریتی پیشرفته (God-Mode)
     for action_name, function, params, required, risk_level in (
         ("telegram.delete_message", delete_message, {"chat": {"type": "string"}, "msg_id": {"type": "integer"}}, ("chat", "msg_id"), Risk.DESTRUCTIVE),
         ("telegram.edit_message", edit_message, {"chat": {"type": "string"}, "msg_id": {"type": "integer"}, "text": {"type": "string"}}, ("chat", "msg_id", "text"), Risk.DESTRUCTIVE),
@@ -304,10 +304,47 @@ def register_telegram(registry: ActionRegistry, context: ActionContext) -> None:
         ("telegram.update_username", update_username, {"username": {"type": "string"}}, ("username",), Risk.DESTRUCTIVE),
         ("telegram.set_profile_photo", set_profile_photo, {"path": {"type": "string"}}, ("path",), Risk.DESTRUCTIVE),
         ("telegram.set_online_status", set_online_status, {"online": {"type": "boolean"}}, (), Risk.DESTRUCTIVE),
+        # بخش سشن و امنیت
+        ("telegram.get_sessions", get_sessions, {}, (), Risk.SAFE),
+        ("telegram.terminate_session", terminate_session, {"hash": {"type": "integer"}}, ("hash",), Risk.SYSTEM),
+        ("telegram.get_privacy", get_privacy_settings, {}, (), Risk.SAFE),
+        # بخش اتوماسیون و اکسپورت
+        ("telegram.export_chat", export_chat, {"chat": {"type": "string"}, "limit": {"type": "integer"}}, ("chat",), Risk.SAFE),
+        ("telegram.bulk_send", bulk_send, {"targets": {"type": "array", "items": {"type": "string"}}, "text": {"type": "string"}}, ("targets", "text"), Risk.DESTRUCTIVE),
+        # ابزارهای فوق‌پیشرفته (Super Tools)
+        ("telegram.global_search", global_search, {"query": {"type": "string"}, "limit": {"type": "integer"}}, ("query",), Risk.SAFE),
+        ("telegram.get_full_details", get_full_chat_details, {"chat": {"type": "string"}}, ("chat",), Risk.SAFE),
+        ("telegram.get_pinned", get_pinned_messages, {"chat": {"type": "string"}}, ("chat",), Risk.SAFE),
     ):
-        registry.decorator(name=action_name, description="ابزار مدیریت حساب تلگرام شخصی؛ بدون اتصال به ربات.",
+        registry.decorator(name=action_name, description="ابزار مدیریت حرفه‌ای تلگرام (Telethon Super Pro).",
                            parameters={**params, "account": {"type": "string"}}, required=required,
                            risk_level=risk_level)(function)
+
+
+# ---------------------------------------------------------------------------
+# Implementations for new Super Tools
+# ---------------------------------------------------------------------------
+
+@risk(Risk.SAFE)
+def global_search(*, query: str, limit: int = 50, account: str | None = None, context: ActionContext) -> str:
+    results = _client(context, account).global_search(query, limit=int(limit))
+    if not results:
+        return "موردی در جستجوی جهانی یافت نشد."
+    lines = [f"  • {r['name'] if 'name' in r else r['title']} (@{r['username']}) [{r['type']}] (id={r['id']})" for r in results]
+    return f"نتایج جستجوی جهانی برای «{query}»:\n" + "\n".join(lines)
+
+@risk(Risk.SAFE)
+def get_full_chat_details(*, chat: str, account: str | None = None, context: ActionContext) -> str:
+    details = _client(context, account).get_full_chat_details(chat)
+    return "جزئیات کامل گفتگو:\n" + "\n".join(f"  {k}: {v}" for k, v in details.items())
+
+@risk(Risk.SAFE)
+def get_pinned_messages(*, chat: str, account: str | None = None, context: ActionContext) -> str:
+    messages = _client(context, account).get_pinned_messages(chat)
+    if not messages:
+        return "هیچ پیام پین شده‌ای یافت نشد."
+    lines = [f"  • [ID: {m['id']}] {m['text'][:100]}" for m in messages]
+    return f"پیام‌های پین شده در «{chat}»:\n" + "\n".join(lines)
 
 
 def _register_send(registry, name, confirm_send, description, parameters, *, required, context):
