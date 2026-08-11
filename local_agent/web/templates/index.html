@@ -805,53 +805,6 @@
             </div>
           </div>
         </div>
-        <!-- Skills Management -->
-        <div class="field">
-          <label>🧠 مدیریت Skill ها</label>
-          <p class="field__hint">Skill ها دسته‌هایی از ابزارها هستند. غیرفعال کردن یک Skill، ابزارهایش را از context مدل حذف می‌کند.</p>
-          <div x-show="skills.length === 0" class="field__hint">در حال بارگذاری...</div>
-          <div class="skills-list" style="display:flex;flex-direction:column;gap:8px;max-height:400px;overflow-y:auto;margin-top:8px">
-            <template x-for="skill in skills" :key="skill.id">
-              <div style="border:1px solid var(--border, #333);border-radius:8px;padding:10px;background:var(--card-bg, #1a1a2e)">
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-                  <div style="display:flex;align-items:center;gap:8px">
-                    <span x-text="skill.icon" style="font-size:1.3em"></span>
-                    <div>
-                      <strong x-text="skill.name"></strong>
-                      <div style="font-size:0.8em;opacity:0.7" x-text="skill.description"></div>
-                    </div>
-                  </div>
-                  <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
-                    <input type="checkbox" :checked="skill.is_active" @change="toggleSkill(skill)">
-                    <span x-text="skill.is_active ? 'فعال' : 'غیرفعال'" style="font-size:0.85em"></span>
-                  </label>
-                </div>
-                <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;font-size:0.8em;opacity:0.7">
-                  <span x-text="skill.actions.length + ' ابزار'"></span>
-                  <span x-text="'دسته: ' + skill.category"></span>
-                  <span x-show="skill.model_override" x-text="'مدل: ' + skill.model_override" style="color:var(--accent, #6c63ff)"></span>
-                </div>
-                <details style="margin-top:6px">
-                  <summary style="cursor:pointer;font-size:0.85em;opacity:0.8">تنظیمات پیشرفته</summary>
-                  <div style="margin-top:6px;display:flex;flex-direction:column;gap:6px">
-                    <div>
-                      <label style="font-size:0.8em">مدل اختصاصی:</label>
-                      <input type="text" :value="skill.model_override" @blur="setSkillModel(skill, $event.target.value)"
-                             placeholder="خالی = پیش‌فرض" style="width:100%;font-size:0.85em" dir="ltr">
-                    </div>
-                    <div>
-                      <label style="font-size:0.8em">System Prompt:</label>
-                      <textarea :value="skill.system_prompt" @blur="setSkillPrompt(skill, $event.target.value)"
-                                rows="3" style="width:100%;font-size:0.85em;font-family:monospace" dir="ltr"></textarea>
-                    </div>
-                  </div>
-                </details>
-              </div>
-            </template>
-          </div>
-          <button class="btn btn--ghost btn--sm" @click="loadSkills()" style="margin-top:8px">🔄 به‌روزرسانی</button>
-        </div>
-
       </div>
       <footer class="modal__foot">
         <button class="btn btn--ghost" @click="settingsOpen = false">انصراف</button>
