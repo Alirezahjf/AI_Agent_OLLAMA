@@ -1,6 +1,8 @@
 """Stable, user-facing groups for selecting which tools a chat sees."""
 from __future__ import annotations
+
 from dataclasses import dataclass
+
 
 @dataclass(frozen=True)
 class ToolGroup:

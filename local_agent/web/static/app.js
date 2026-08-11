@@ -187,6 +187,7 @@
       historyOpen: false,
       panelOpen: false,
       settingsOpen: false,
+      settingsTab: 'model',
       exportOpen: false,
       shortcutsOpen: false,
       dragging: false,
@@ -198,6 +199,10 @@
 
       actions: [],
       actionQuery: "",
+      toolGroups: [],
+      toolGroupsActive: [],
+      toolCount: 0,
+      toolCap: 120,
 
       models: [],
       modelsLoading: false,
@@ -220,7 +225,7 @@
         autostart: false,
         telegram: { enabled: false, api_id: "", api_hash: "", phone: "", confirm_send: true },
         gmail: { enabled: false, username: "", credentials_file: "", token_file: "", app_password: "", confirm_send: true },
-        github: { enabled: false, auth_mode: "oauth", client_id: "", client_secret: "", confirm_push: true, pat: "" },
+        github: { enabled: false, auth_mode: "oauth", client_id: "", client_secret: "", callback_url: "", confirm_push: true, pat: "" },
       },
       fullAccessWanted: false,
       fullAccessArmed: false,
@@ -268,6 +273,31 @@
 
       /* ---------------------------------------------------------- init */
 
+      get toolCountClass() {
+        return this.toolCount >= this.toolCap ? 'tool-count--bad' : (this.toolCount > 115 ? 'tool-count--warn' : 'tool-count--ok');
+      },
+      async loadToolGroups() {
+        const sid = this.conversationId || 'default';
+        try {
+          const data = await this.api('/api/tools/groups?session_id=' + encodeURIComponent(sid));
+          this.toolGroups = data.groups || [];
+          const saved = localStorage.getItem('tool-groups:' + sid);
+          this.toolGroupsActive = saved ? JSON.parse(saved) : (data.active || []);
+          this.toolCount = data.enabled_tool_count || 0;
+          this.toolCap = data.cap || 120;
+        } catch (_) {}
+      },
+      async toggleToolGroup(id) {
+        const on = this.toolGroupsActive.includes(id);
+        const next = on ? this.toolGroupsActive.filter(x => x !== id) : [...this.toolGroupsActive, id];
+        try {
+          const data = await this.api('/api/tools/groups', { method: 'POST', body: JSON.stringify({ session_id: this.conversationId || 'default', groups: next }) });
+          this.toolGroupsActive = data.active || next;
+          this.toolCount = data.enabled_tool_count || 0;
+          localStorage.setItem('tool-groups:' + (this.conversationId || 'default'), JSON.stringify(this.toolGroupsActive));
+        } catch (_) {}
+      },
+
       init() {
         configureMarked();
         this.loadPrefs();
@@ -283,6 +313,7 @@
           this.connect();
           this.refreshStatus();
           this.refreshActions();
+          this.loadToolGroups();
         }
 
         this.$watch("messages", () => {

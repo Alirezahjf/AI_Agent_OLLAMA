@@ -337,6 +337,14 @@
 
   <!-- ================= Composer ================= -->
   <footer class="composer">
+    <div class="tool-groups" role="toolbar" aria-label="گروه‌های ابزار">
+      <template x-for="group in toolGroups" :key="group.id">
+        <button type="button" class="tool-group-chip" :class="{ 'tool-group-chip--on': toolGroupsActive.includes(group.id) }" @click="toggleToolGroup(group.id)" :title="group.description">
+          <span x-text="group.icon"></span><span x-text="group.label"></span>
+        </button>
+      </template>
+      <span class="tool-count" :class="toolCountClass" x-text="toolCount + ' ابزار فعال'"></span>
+    </div>
     <template x-if="attachments.length">
       <div class="composer__attachments">
         <template x-for="(a, i) in attachments" :key="a.name + i">
@@ -479,7 +487,15 @@
           <svg viewBox="0 0 24 24" class="icon"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
       </header>
-      <div class="modal__body">
+      <div class="settings-tabs" role="tablist">
+        <button class="settings-tab" :class="{ 'settings-tab--active': settingsTab === 'model' }" @click="settingsTab='model'">🧠 مدل و API</button>
+        <button class="settings-tab" @click="settingsTab='telegram'">✈️ تلگرام</button>
+        <button class="settings-tab" @click="settingsTab='gmail'">📧 جیمیل</button>
+        <button class="settings-tab" @click="settingsTab='github'">🐙 گیت‌هاب</button>
+        <button class="settings-tab" @click="settingsTab='security'">🛡️ امنیت و دسترسی</button>
+        <button class="settings-tab" @click="settingsTab='folders'">📁 پوشه‌ها و اجرا</button>
+      </div>
+      <div class="modal__body settings-accordion">
         <div class="field">
           <button class="btn btn--ghost btn--sm" @click="useAvalai()">اتصال سریع به AvalAI</button>
           <p class="field__hint">ارائه‌دهنده را روی «سازگار با OpenAI» و آدرس را روی https://api.avalai.ir/v1 تنظیم می‌کند؛ فقط کلید API را وارد کنید.</p>
@@ -758,6 +774,7 @@
             </select>
             <input x-model="form.github.client_id" placeholder="client_id (برای OAuth)" dir="ltr" aria-label="client_id گیتهاب">
           </div>
+          <input x-model="form.github.callback_url" placeholder="callback URL دقیق" dir="ltr" aria-label="callback URL گیتهاب">
           <input x-model="form.github.client_secret" type="password" placeholder="client_secret (برای OAuth؛ اختیاری برای PAT)" dir="ltr" autocomplete="off">
           <input x-model="form.github.pat" type="password" placeholder="توکن PAT (ghp_... / github_pat_...)" dir="ltr" autocomplete="off">
           <p class="field__hint">

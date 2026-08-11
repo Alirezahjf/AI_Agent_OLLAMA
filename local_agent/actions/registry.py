@@ -10,9 +10,9 @@ from enum import Enum
 from typing import Any
 
 from ..core.context import RuntimeContext
-from .groups import infer_group, group_by_id
 from ..core.errors import ActionRefused, AssistantError, DependencyMissing
 from ..core.logging_setup import get_logger
+from .groups import group_by_id, infer_group
 
 logger = get_logger("actions")
 

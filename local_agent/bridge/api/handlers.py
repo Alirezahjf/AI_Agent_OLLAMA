@@ -22,10 +22,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ...actions import build_default_registry, describe_action, run_action
-from ...actions.groups import TOOL_GROUPS, DEFAULT_GROUP_IDS
 from ...actions.config_actions import register_config
-from ...actions.gmail_actions import register_gmail
 from ...actions.github_actions import register_github
+from ...actions.gmail_actions import register_gmail
+from ...actions.groups import DEFAULT_GROUP_IDS, TOOL_GROUPS
 from ...actions.registry import ActionContext, ConfirmationGate
 from ...actions.scheduler_actions import register_scheduler
 from ...actions.telegram_actions import register_telegram
@@ -43,10 +43,10 @@ from ...core.errors import ActionRefused, AssistantError, DependencyMissing
 from ...core.logging_setup import get_logger
 from ...core.notify import notify_desktop
 from ...core.scheduler import ScheduledJob, Scheduler
-from ...gmail import GmailClient
-from ...gmail.client import GmailError
 from ...github import GitHubClient
 from ...github.client import GitHubError, PendingOAuth
+from ...gmail import GmailClient
+from ...gmail.client import GmailError
 from ...llm import create_client
 from ...telegram import PersonalTelegram
 from ...telegram.client import TelegramError
@@ -778,7 +778,6 @@ class BridgeHandlers:
         if not confirmed:
             raise AssistantError("حذف اکانت خطرناک است؛ برای تأیید confirmed=true بفرستید")
         tg = self.settings.telegram
-        account = tg.account(name)
         session = self.settings.telegram_session_path_for(name)
         client = self._telegram_accounts.pop(name, None)
         if client is not None:
@@ -952,10 +951,15 @@ class BridgeHandlers:
             self._github_accounts[name] = self._build_github_client(name, acc)
         active = self._github_accounts.get(gh.active_account)
         if active is not None and self.settings.github_token_path_for(gh.active_account).is_file():
-            try:
-                active.connect()  # validate stored token only
-            except Exception as exc:  # noqa: BLE001 - status is user-facing
-                active.last_error = str(exc)
+            active.login_state = "connecting"
+            def validate() -> None:
+                try:
+                    active.connect()  # validate stored token only
+                except Exception as exc:  # noqa: BLE001 - status is user-facing
+                    active.last_error = str(exc)
+                    active.login_state = "disconnected"
+                self._publish_github_state()
+            threading.Thread(target=validate, name="github-auto-connect", daemon=True).start()
         self.github = active
         self.context.extra["github"] = active
         self._publish_github_state()
