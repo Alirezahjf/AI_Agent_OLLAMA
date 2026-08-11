@@ -187,7 +187,6 @@
       historyOpen: false,
       panelOpen: false,
       settingsOpen: false,
-      skills: [],
       exportOpen: false,
       shortcutsOpen: false,
       dragging: false,
@@ -959,9 +958,8 @@
       },
 
       openSettings() {
-          this.settingsOpen = true;
+        this.settingsOpen = true;
         if (this.models.length === 0) this.refreshModels();
-        if (this.skills.length === 0) this.loadSkills();
       },
 
       /* ------------------------------------------------ billing / tokens */
@@ -1101,58 +1099,6 @@
           this.refreshStatus();
         } catch (_) {
           this.toast("bad", "❌", "ذخیرهٔ تنظیمات ناموفق بود");
-        }
-      },
-
-      // ---- Skills management ----
-
-      async loadSkills() {
-        try {
-          const data = await this.api("/api/skills");
-          this.skills = data.skills || [];
-        } catch (_) {
-          this.skills = [];
-        }
-      },
-
-      async toggleSkill(skill) {
-        const endpoint = skill.is_active ? "/api/skills/deactivate" : "/api/skills/activate";
-        try {
-          await this.api(endpoint, {
-            method: "POST",
-            body: JSON.stringify({ skill_id: skill.id }),
-          });
-          skill.is_active = !skill.is_active;
-          this.toast("ok", skill.is_active ? "✅" : "⏸️",
-            `Skill «${skill.name}» ${skill.is_active ? "فعال" : "غیرفعال"} شد`);
-        } catch (_) {
-          this.toast("bad", "❌", "تغییر وضعیت skill ناموفق بود");
-        }
-      },
-
-      async setSkillModel(skill, model) {
-        try {
-          await this.api("/api/skills/set-model", {
-            method: "POST",
-            body: JSON.stringify({ skill_id: skill.id, model: model || "" }),
-          });
-          skill.model_override = model || "";
-          this.toast("ok", "✅", `مدل «${skill.name}» تنظیم شد`);
-        } catch (_) {
-          this.toast("bad", "❌", "تنظیم مدل ناموفق بود");
-        }
-      },
-
-      async setSkillPrompt(skill, prompt) {
-        try {
-          await this.api("/api/skills/set-prompt", {
-            method: "POST",
-            body: JSON.stringify({ skill_id: skill.id, prompt }),
-          });
-          skill.system_prompt = prompt;
-          this.toast("ok", "✅", `Prompt «${skill.name}» ذخیره شد`);
-        } catch (_) {
-          this.toast("bad", "❌", "ذخیره prompt ناموفق بود");
         }
       },
 

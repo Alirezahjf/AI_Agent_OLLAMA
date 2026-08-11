@@ -70,7 +70,6 @@ class EventType(str, Enum):
     LOG = "log"
     TELEGRAM_STATE = "telegram_state"
     SCHEDULED_FIRED = "scheduled_fired"
-    SKILLS_CHANGED = "skills_changed"
 
 
 @dataclass
