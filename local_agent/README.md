@@ -319,7 +319,78 @@ python -m local_agent
 
 ---
 
-### ۷) (اختیاری) یادآوری و کار زمان‌بندی‌شده
+### ۷) (اختیاری) اتصال GitHub
+
+بخش `github` در `config.json`:
+
+```json
+{
+  "github": {
+    "enabled": true,
+    "active_account": "اصلی",
+    "default_scope": "repo workflow read:user",
+    "accounts": [
+      {
+        "name": "اصلی",
+        "enabled": true,
+        "auth_mode": "oauth",
+        "client_id": "YOUR_OAUTH_APP_CLIENT_ID",
+        "client_secret": "YOUR_OAUTH_APP_CLIENT_SECRET",
+        "confirm_push": true
+      }
+    ]
+  }
+}
+```
+
+دو روش اتصال (هر دو کاملاً واقعی):
+
+* **OAuth (ریدایرکت — ترجیحی):** در
+  [github.com/settings/developers](https://github.com/settings/developers) یک **OAuth
+  App** بسازید و در فیلد *Authorization callback URL* این آدرس را بگذارید:
+
+  ```
+  http://localhost:7824/api/github/callback
+  ```
+
+  (اگر پورت دیگری اجرا می‌کنید، همان پورت را بگذارید.) سپس `client_id` و
+  `client_secret` آن App را در مودال تنظیمات یا `config.json` وارد کنید و
+  **«🔌 اتصال OAuth»** را بزنید. مرورگر به صفحهٔ GitHub می‌رود، شما تأیید
+  می‌کنید و GitHub شما را به اپ برمی‌گرداند؛ توکن به‌صورت خودکار ذخیره
+  و اکانت فعال می‌شود.
+* **توکن دسترسی شخصی (PAT — سریع):** در
+  [github.com/settings/tokens](https://github.com/settings/tokens) یک **fine-grained**
+  یا classic token با دسترسی `repo`, `workflow` بسازید، آن را در فیلد PAT در
+  مودال تنظیمات پیست کنید و **«🔑 اتصال با PAT»** را بزنید. نیازی به ساخت
+  OAuth App نیست.
+
+**چند اکانت:** می‌توانید چند هویت GitHub (مثلاً «شخصی» و «کاری») تعریف
+کنید و با `auth_mode` مستقل و تعویض سریع بین آن‌ها جابه‌جا شوید (مثل تلگرام).
+
+**امنیت:** توکن در یک فایل جدا (`github/github_<account>.json` در پوشهٔ داده،
+نه در `config.json`) ذخیره می‌شود. برای `push`/`pull` توکن فقط از طریق یک
+متغیر محیطی موقت به `git` داده می‌شود و **هرگز** در `.git/config` یا آرگومانِ
+دستور یا لاگ نمی‌نشیند. `client_secret` و توکن در همهٔ پاسخ‌ها ماسک می‌شوند.
+`force-push` به‌صورت پیش‌فرض مسدود است و فقط با تأیید صریح و با
+`--force-with-lease` اجرا می‌شود.
+
+**۲۱ اکشن GitHub:** `github.whoami`, `github.list_repos`,
+`github.get_repo`, `github.create_repo` (Destructive), `github.clone`,
+`github.init`, `github.status`, `github.diff`, `github.add_commit`,
+`github.push`/`github.pull`/`github.branch`/`github.merge` (Destructive +
+تأیید، با احترام به `github.confirm_push`)، `github.create_pr`,
+`github.list_prs`, `github.merge_pr`, `github.create_issue`,
+`github.list_issues`, `github.create_release`, `github.fetch_url` و
+`github.run_action` (مدیریت GitHub Actions).
+
+> **نکته:** برای `clone`/`push`/`pull` نیاز به `git` نصب‌شده روی سیستم دارید
+> (بدون آن، اکشن‌های REST API مثل ساخت مخزن/PR/issue همچنان کار می‌کنند).
+> callback روی `localhost` فقط وقتی مرورگر روی همان ماشینِ دستیار باشد کار
+> می‌کند؛ برای اتصال از ماشین دیگر از PAT استفاده کنید.
+
+---
+
+### ۸) (اختیاری) یادآوری و کار زمان‌بندی‌شده
 
 می‌توانید روی سیستم «تایم» ست کنید و دستیار سرِ همان زمان یک **اعلان**
 نشان دهد یا یک **کار مشخص را خودکار اجرا کند**:
@@ -344,7 +415,7 @@ python -m local_agent
 
 ---
 
-### ۸) (اختیاری) دسترسی کامل سیستم (Admin/Root)
+### ۹) (اختیاری) دسترسی کامل سیستم (Admin/Root)
 
 فیلد `safety.full_system_access` (پیش‌فرض **خاموش**):
 
