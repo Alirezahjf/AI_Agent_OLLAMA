@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 from ...actions import build_default_registry, describe_action, run_action
 from ...actions.config_actions import register_config
 from ...actions.gmail_actions import register_gmail
+from ...actions.github_actions import register_github
 from ...actions.registry import ActionContext, ConfirmationGate
 from ...actions.scheduler_actions import register_scheduler
 from ...actions.telegram_actions import register_telegram
@@ -31,6 +32,8 @@ from ...automation import is_gui_available, register_gui
 from ...core.config import (
     AssistantSettings,
     ConfigError,
+    GitHubAccount,
+    GitHubSettings,
     TelegramAccount,
     TelegramSettings,
 )
@@ -41,6 +44,8 @@ from ...core.notify import notify_desktop
 from ...core.scheduler import ScheduledJob, Scheduler
 from ...gmail import GmailClient
 from ...gmail.client import GmailError
+from ...github import GitHubClient
+from ...github.client import GitHubError, PendingOAuth
 from ...llm import create_client
 from ...telegram import PersonalTelegram
 from ...telegram.client import TelegramError
@@ -150,6 +155,12 @@ class BridgeHandlers:
     telegram: PersonalTelegram | None = None
     # Every enabled account's client, keyed by account name (F2).
     _telegram_accounts: dict[str, PersonalTelegram] = field(default_factory=dict)
+    # The *active* GitHub account's client (backward-compatible accessor).
+    github: GitHubClient | None = None
+    # Every enabled GitHub account's client, keyed by account name.
+    _github_accounts: dict[str, GitHubClient] = field(default_factory=dict)
+    # In-flight OAuth flows: state -> PendingOAuth (CSRF + account routing).
+    _github_pending: dict[str, PendingOAuth] = field(default_factory=dict)
     # Per-session runtimes keyed by session_id (F4); the default runtime is
     # ``self.runtime`` under the key "default".
     _sessions: dict[str, RuntimeContext] = field(default_factory=dict)
@@ -178,8 +189,10 @@ class BridgeHandlers:
         register_telegram(registry, context)
         register_config(registry, context)
         register_gmail(registry, context)
+        register_github(registry, context)
         register_scheduler(registry, context)
         context.extra["telegram"] = None
+        context.extra["github"] = None
         context.extra["registry"] = registry
         gmail = _build_gmail_client(settings)
         context.extra["gmail"] = gmail
@@ -196,6 +209,7 @@ class BridgeHandlers:
         context.extra["settings_owner"] = handlers
         handlers._sync_telegram_accounts()
         handlers._start_telegram_auto_connect()
+        handlers._sync_github_accounts()
         # Scheduled reminders/tasks: persisted in data_dir/scheduled.json,
         # fired by a daemon thread, streamed to every frontend.
         scheduler = Scheduler(settings.data_dir)
@@ -304,6 +318,11 @@ class BridgeHandlers:
                 "telegram_phone": telegram_state["phone"],
                 "gmail_enabled": bool(self.settings.gmail.enabled),
                 "gmail_connected": self.gmail_connected(),
+                "github_enabled": bool(self.settings.github.enabled),
+                "github_connected": bool(self.github and self.github.is_connected),
+                "github_login": (self.github.login if self.github and self.github.is_connected else ""),
+                "github_active_account": self.settings.github.active_account,
+                "github_confirm_push": bool(self.settings.github.confirm_push),
                 "full_system_access": bool(self.settings.safety.full_system_access),
                 "elevation": elevation_level(),
                 "confirm_mode": self.settings.safety.confirm_mode,
@@ -601,6 +620,11 @@ class BridgeHandlers:
         """
         tg = self.settings.telegram
         name = (account or tg.active_account) or "اصلی"
+        # Active-account fast path: honour the mirrored ``self.telegram``
+        # (set by ``_sync_telegram_accounts`` and overridable in tests / by
+        # the UI) instead of silently bypassing it for a freshly-built client.
+        if account is None and self.telegram is not None:
+            return name, self.telegram
         acc = tg.account(name)
         if name not in self._telegram_accounts:
             client = None
@@ -866,6 +890,176 @@ class BridgeHandlers:
         self.event_bus.publish(Event(
             type=EventType.TELEGRAM_STATE.value,
             payload={"telegram": self.telegram_status(), "accounts": self.telegram_accounts_status()},
+            run_id="",
+        ))
+
+    # ----------------------------------------------------------- github flow
+
+    def _build_github_client(self, name: str, acc: GitHubAccount) -> GitHubClient:
+        return GitHubClient(
+            account_name=name,
+            api_base=acc.api_base or "https://api.github.com",
+            client_id=acc.client_id,
+            client_secret=acc.client_secret,
+            token_file=self.settings.github_token_path_for(name),
+            default_scope=self.settings.github.default_scope,
+            data_dir=self.settings.data_dir,
+        )
+
+    def _sync_github_accounts(self) -> None:
+        """Build one GitHubClient per enabled account; auto-connect stored tokens.
+
+        Mirrors the active account onto ``self.github`` and
+        ``context.extra["github"]`` so the single-account action code keeps
+        working unchanged.  ``connect()`` only validates an existing token
+        file; it never starts the OAuth flow (that is UI-driven).
+        """
+        gh = self.settings.github
+        desired = {a.name: a for a in gh.accounts if a.enabled}
+        for name in list(self._github_accounts):
+            if name not in desired:
+                self._github_accounts.pop(name, None)
+        for name, acc in desired.items():
+            if name in self._github_accounts:
+                continue
+            self._github_accounts[name] = self._build_github_client(name, acc)
+        active = self._github_accounts.get(gh.active_account)
+        if active is not None and self.settings.github_token_path_for(gh.active_account).is_file():
+            try:
+                active.connect()  # validate stored token only
+            except Exception as exc:  # noqa: BLE001 - status is user-facing
+                active.last_error = str(exc)
+        self.github = active
+        self.context.extra["github"] = active
+        self._publish_github_state()
+
+    def github_status(self, account: str | None = None) -> dict[str, Any]:
+        """Connection state for one GitHub account (default: active) — no secrets."""
+        gh = self.settings.github
+        name = (account or gh.active_account) or "اصلی"
+        acc = gh.account(name)
+        client = self._github_accounts.get(name)
+        if client is not None:
+            state = client.login_state
+            login = client.login
+            connected = client.is_connected
+            last_error = client.last_error
+        elif acc.enabled and (acc.client_id or acc.auth_mode == "pat"):
+            state = "disconnected"
+            login = ""
+            connected = False
+            last_error = ""
+        else:
+            state = "disabled"
+            login = ""
+            connected = False
+            last_error = ""
+        return {
+            "account": name,
+            "enabled": bool(acc.enabled),
+            "feature_enabled": bool(gh.enabled),
+            "connected": bool(connected),
+            "state": state,
+            "login": login,
+            "auth_mode": acc.auth_mode,
+            "has_client_id": bool(acc.client_id),
+            "token_file_exists": self.settings.github_token_path_for(name).is_file(),
+            "confirm_push": bool(acc.confirm_push),
+            "last_error": last_error,
+        }
+
+    def github_accounts_status(self) -> dict[str, Any]:
+        gh = self.settings.github
+        names = [a.name for a in gh.accounts] or [gh.active_account or "اصلی"]
+        return {
+            "enabled": bool(gh.enabled),
+            "active_account": gh.active_account,
+            "accounts": [self.github_status(name) for name in names],
+        }
+
+    def switch_github_account(self, name: str) -> dict[str, Any]:
+        gh = self.settings.github
+        if not any(a.name == name for a in gh.accounts):
+            if name != gh.active_account:
+                raise AssistantError(f"اکانت گیتهاب «{name}» وجود ندارد")
+            accounts = [replace(gh.account(name), enabled=True)]
+        else:
+            accounts = [replace(a, enabled=True) if a.name == name else a for a in gh.accounts]
+        new_gh = GitHubSettings(enabled=gh.enabled, active_account=name, accounts=tuple(accounts))
+        self._apply_settings(self.settings.with_overrides(github=new_gh))
+        return self.github_accounts_status()
+
+    def start_github_oauth(self, account: str | None = None, *, redirect_uri: str) -> dict[str, Any]:
+        """Begin the OAuth redirect flow for one account; returns the authorize URL."""
+        name = (account or self.settings.github.active_account) or "اصلی"
+        acc = self.settings.github.account(name)
+        client = self._github_accounts.get(name) or self._build_github_client(name, acc)
+        self._github_accounts[name] = client
+        try:
+            url, state = client.authorize_url(redirect_uri, state_registry=self._github_pending)
+        except GitHubError as exc:
+            raise AssistantError(str(exc)) from exc
+        return {"account": name, "authorize_url": url, "state": state}
+
+    def complete_github_oauth(self, code: str, state: str) -> dict[str, Any]:
+        """Finish the OAuth flow: validate ``state``, exchange ``code``."""
+        pending = self._github_pending.pop(state, None)
+        if pending is None:
+            raise AssistantError("درخواست OAuth نامعتبر یا منقضی است؛ دوباره دکمهٔ اتصال را بزنید.")
+        client = self._github_accounts.get(pending.account)
+        if client is None:
+            acc = self.settings.github.account(pending.account)
+            client = self._build_github_client(pending.account, acc)
+            self._github_accounts[pending.account] = client
+        try:
+            result = client.exchange_code(code, client_secret=pending.client_secret)
+        except GitHubError as exc:
+            client.last_error = str(exc)
+            self._publish_github_state()
+            raise AssistantError(str(exc)) from exc
+        self._mark_github_enabled(pending.account)
+        self._publish_github_state()
+        return {**result, **self.github_status(pending.account)}
+
+    def connect_github_pat(self, token: str, account: str | None = None) -> dict[str, Any]:
+        """Validate a Personal Access Token and store it for the account."""
+        name = (account or self.settings.github.active_account) or "اصلی"
+        acc = self.settings.github.account(name)
+        client = self._github_accounts.get(name) or self._build_github_client(name, acc)
+        self._github_accounts[name] = client
+        try:
+            result = client.connect_pat(token)
+        except GitHubError as exc:
+            client.last_error = str(exc)
+            self._publish_github_state()
+            raise AssistantError(str(exc)) from exc
+        self._mark_github_enabled(name)
+        self._publish_github_state()
+        return {**result, **self.github_status(name)}
+
+    def disconnect_github(self, account: str | None = None) -> dict[str, Any]:
+        name = (account or self.settings.github.active_account) or "اصلی"
+        client = self._github_accounts.get(name)
+        if client is not None:
+            try:
+                client.forget_token()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("github disconnect failed: %s", exc)
+        self._publish_github_state()
+        return self.github_status(name)
+
+    def _mark_github_enabled(self, name: str) -> None:
+        gh = self.settings.github
+        accounts = [replace(a, enabled=True) if a.name == name else a for a in gh.accounts]
+        if not any(a.name == name for a in accounts):
+            accounts.append(replace(gh.account(name), enabled=True))
+        new_gh = GitHubSettings(enabled=True, active_account=gh.active_account, accounts=tuple(accounts))
+        self._apply_settings(self.settings.with_overrides(github=new_gh))
+
+    def _publish_github_state(self) -> None:
+        self.event_bus.publish(Event(
+            type=EventType.GITHUB_STATE.value,
+            payload={"github": self.github_status(), "accounts": self.github_accounts_status()},
             run_id="",
         ))
 
@@ -1298,6 +1492,14 @@ def _is_telegram_network_error(exc: Exception) -> bool:
         or "timed out" in text
         or "network" in text
         or "dns" in text
+        # Telethon raises these when the socket is reset mid-handshake;
+        # they are connectivity problems, not bad credentials.
+        or "0 bytes read" in text
+        or "bytes read on a total of" in text
+        or "server closed the connection" in text
+        or "eof occurred" in text
+        or "reset by peer" in text
+        or "handshake" in text
     )
 
 

@@ -220,6 +220,7 @@
         autostart: false,
         telegram: { enabled: false, api_id: "", api_hash: "", phone: "", confirm_send: true },
         gmail: { enabled: false, username: "", credentials_file: "", token_file: "", app_password: "", confirm_send: true },
+        github: { enabled: false, auth_mode: "oauth", client_id: "", client_secret: "", confirm_push: true, pat: "" },
       },
       fullAccessWanted: false,
       fullAccessArmed: false,
@@ -236,6 +237,9 @@
       switchingTelegram: false,
       gmailConnected: false,
       gmailBusy: false,
+      githubConnected: false,
+      githubBusy: false,
+      githubLogin: "",
 
       status: {},
       warnings: [],
@@ -369,6 +373,9 @@
             if (p.accounts) this.telegramAccounts = p.accounts;
             if (p.telegram && p.telegram.account) this.activeTelegramAccount = p.telegram.account;
             this.refreshStatus();
+            break;
+          case "github_state":
+            this.applyGitHubState(p.github || {});
             break;
           case "scheduled_fired": {
             const job = p.job || {};
@@ -642,6 +649,10 @@
           this.gmailConnected = Boolean(s.gmail_connected);
           this.form.gmail.enabled = Boolean(s.gmail_enabled);
           if (typeof s.gmail_confirm_send === "boolean") this.form.gmail.confirm_send = s.gmail_confirm_send;
+          this.githubConnected = Boolean(s.github_connected);
+          this.githubLogin = s.github_login || "";
+          this.form.github.enabled = Boolean(s.github_enabled);
+          if (typeof s.github_confirm_push === "boolean") this.form.github.confirm_push = s.github_confirm_push;
         } catch (_) { /* keep previous values */ }
       },
 
@@ -675,6 +686,11 @@
 
       get gmailStateLabel() {
         return this.gmailConnected ? "✅ متصل" : "وصل نیست";
+      },
+
+      get githubStateLabel() {
+        if (this.githubBusy) return "در حال اتصال…";
+        return this.githubConnected ? ("✅ متصل" + (this.githubLogin ? " به‌عنوان @" + this.githubLogin : "")) : "وصل نیست";
       },
 
       get elevationLabel() {
@@ -810,6 +826,74 @@
           this.toast("info", "ℹ️", "جیمیل قطع شد");
         } catch (_) {
           this.toast("bad", "❌", "قطع اتصال جیمیل ناموفق بود");
+        }
+      },
+
+      /* ---------------------------------------------------------- github flow */
+      applyGitHubState(state) {
+        this.githubConnected = Boolean(state.connected);
+        this.githubLogin = state.login || this.githubLogin;
+        if (typeof state.confirm_push === "boolean") this.form.github.confirm_push = state.confirm_push;
+      },
+
+      async _saveGithubSettings() {
+        // Persist client_id/secret/auth_mode before starting a connect flow.
+        try {
+          await this.api("/api/settings", { method: "POST", body: JSON.stringify({ github: this.form.github }) });
+        } catch (_) { /* surface error in the connect call below */ }
+      },
+
+      async connectGitHub() {
+        if (this.connection === "offline") return;
+        this.githubBusy = true;
+        try {
+          await this._saveGithubSettings();
+          const result = await this.api("/api/github/oauth", { method: "POST" });
+          if (result && result.authorize_url) {
+            this.toast("info", "🐙", "در حال انتقال به GitHub…");
+            window.open(result.authorize_url, "_blank");
+          } else {
+            this.toast("bad", "⚠️", "لینک اتصال GitHub دریافت نشد");
+          }
+        } catch (err) {
+          this.toast("bad", "⚠️", "شروع اتصال GitHub ناموفق بود — " + err.message);
+        } finally {
+          this.githubBusy = false;
+        }
+      },
+
+      async connectGitHubPat() {
+        if (this.connection === "offline") return;
+        const token = (this.form.github.pat || "").trim();
+        if (!token) {
+          this.toast("bad", "⚠️", "ابتدا توکن PAT را وارد کنید");
+          return;
+        }
+        this.githubBusy = true;
+        try {
+          await this._saveGithubSettings();
+          const result = await this.api("/api/github/pat", {
+            method: "POST", body: JSON.stringify({ token }),
+          });
+          this.applyGitHubState(result);
+          if (result.connected) this.toast("ok", "✅", "GitHub متصل شد");
+          this.form.github.pat = "";
+        } catch (err) {
+          this.toast("bad", "⚠️", "اتصال GitHub با PAT ناموفق بود — " + err.message);
+        } finally {
+          this.githubBusy = false;
+        }
+      },
+
+      async disconnectGitHub() {
+        if (this.connection === "offline") return;
+        try {
+          await this.api("/api/github/disconnect", { method: "POST" });
+          this.githubConnected = false;
+          this.githubLogin = "";
+          this.toast("info", "ℹ️", "اتصال GitHub قطع شد و توکن پاک شد");
+        } catch (_) {
+          this.toast("bad", "❌", "قطع اتصال GitHub ناموفق بود");
         }
       },
 

@@ -309,8 +309,15 @@ def register_telegram(registry: ActionRegistry, context: ActionContext) -> None:
         ("telegram.terminate_session", terminate_session, {"hash": {"type": "integer"}}, ("hash",), Risk.SYSTEM),
         ("telegram.get_privacy", get_privacy_settings, {}, (), Risk.SAFE),
         # بخش اتوماسیون و اکسپورت
-        ("telegram.export_chat", export_chat, {"chat": {"type": "string"}, "limit": {"type": "integer"}}, ("chat",), Risk.SAFE),
+        ("telegram.export_chat", export_chat, {"chat": {"type": "string"}, "limit": {"type": "integer"}, "fmt": {"type": "string", "enum": ["json", "txt"], "description": "فرمت خروجی (پیش‌فرض json)"}}, ("chat",), Risk.SAFE),
         ("telegram.bulk_send", bulk_send, {"targets": {"type": "array", "items": {"type": "string"}}, "text": {"type": "string"}}, ("targets", "text"), Risk.DESTRUCTIVE),
+        ("telegram.bulk_forward", bulk_forward, {"from_chat": {"type": "string"}, "to_chats": {"type": "array", "items": {"type": "string"}}, "msg_id": {"type": "integer"}}, ("from_chat", "to_chats", "msg_id"), Risk.DESTRUCTIVE),
+        # آمار و تحلیل
+        ("telegram.statistics", get_statistics, {}, (), Risk.SAFE),
+        ("telegram.chat_statistics", get_chat_statistics, {"chat": {"type": "string"}, "limit": {"type": "integer"}}, ("chat",), Risk.SAFE),
+        # استخراج رسانه
+        ("telegram.download_all_media", download_all_media, {"chat": {"type": "string"}, "limit": {"type": "integer"}, "types": {"type": "array", "items": {"type": "string"}, "description": "فقط این انواع: photo/video/audio/document/gif"}}, ("chat",), Risk.SAFE),
+        ("telegram.download_profile_photo", download_profile_photo, {"target": {"type": "string"}}, ("target",), Risk.SAFE),
         # ابزارهای فوق‌پیشرفته (Super Tools)
         ("telegram.global_search", global_search, {"query": {"type": "string"}, "limit": {"type": "integer"}}, ("query",), Risk.SAFE),
         ("telegram.get_full_details", get_full_chat_details, {"chat": {"type": "string"}}, ("chat",), Risk.SAFE),
@@ -762,3 +769,111 @@ def set_profile_photo(*, path: str, account: str | None = None, context: ActionC
 def set_online_status(*, online: bool = True, account: str | None = None, context: ActionContext) -> str:
     _client(context, account).set_online_status(bool(online))
     return "✅ وضعیت آنلاین به‌روزرسانی شد."
+
+
+# --------------------------------------------------------------------------- #
+# Sessions / privacy / export / bulk  (God-Mode — were referenced but missing)
+# --------------------------------------------------------------------------- #
+
+
+@risk(Risk.SAFE)
+def get_sessions(*, account: str | None = None, context: ActionContext) -> str:
+    sessions = _client(context, account).get_sessions()
+    if not sessions:
+        return "هیچ سشن/دستگاه دیگری یافت نشد."
+    lines = [
+        f"  • [{s.get('device_model', '?')}] {s.get('platform', '')} {s.get('system_version', '')}"
+        f" — {s.get('app_name', '')}"
+        f"\n     ip={s.get('ip', '?')} ({s.get('country', '')}/{s.get('region', '')})"
+        f" | آخرین فعالیت: {s.get('date_active', '?')}"
+        f" | hash={s.get('hash')}"
+        for s in sessions
+    ]
+    return f"دستگاه‌ها/سشن‌های متصل ({len(sessions)}):\n" + "\n".join(lines)
+
+
+@risk(Risk.SYSTEM)
+def terminate_session(*, hash: int, account: str | None = None, context: ActionContext) -> str:
+    _client(context, account).terminate_session(int(hash))
+    return f"✅ سشن با hash={hash} قطع/خارج شد."
+
+
+@risk(Risk.SAFE)
+def get_privacy_settings(*, account: str | None = None, context: ActionContext) -> str:
+    settings = _client(context, account).get_privacy_settings()
+    return "تنظیمات حریم خصوصی:\n" + "\n".join(f"  • {k}: {v}" for k, v in settings.items())
+
+
+@risk(Risk.SAFE)
+def export_chat(*, chat: str, limit: int = 1000, fmt: str = "json",
+                account: str | None = None, context: ActionContext) -> str:
+    path = _client(context, account).export_chat(chat, limit=max(1, int(limit or 1000)), fmt=fmt)
+    return f"✅ خروجی «{chat}» ذخیره شد: {path}"
+
+
+@risk(Risk.DESTRUCTIVE)
+def bulk_send(*, targets: list, text: str, account: str | None = None, context: ActionContext) -> str:
+    if not isinstance(targets, list) or not targets:
+        raise AssistantError("targets باید یک آرایهٔ غیرخالی باشد.")
+    if not isinstance(text, str) or not text.strip():
+        raise AssistantError("text نباید خالی باشد.")
+    results = _client(context, account).bulk_send(list(targets), text)
+    ok = sum(1 for v in results.values() if v)
+    fail = len(results) - ok
+    return f"✅ ارسال انبوه انجام شد: {ok} موفق، {fail} ناموفق از {len(results)} گیرنده."
+
+
+# --------------------------------------------------------------------------- #
+# Advanced analytics / mass operations / media harvesting (new capabilities)
+# --------------------------------------------------------------------------- #
+
+
+@risk(Risk.SAFE)
+def get_statistics(*, account: str | None = None, context: ActionContext) -> str:
+    stats = _client(context, account).get_statistics()
+    return "آمار حساب تلگرام:\n" + "\n".join(f"  • {k}: {v}" for k, v in stats.items())
+
+
+@risk(Risk.SAFE)
+def get_chat_statistics(*, chat: str, limit: int = 500,
+                        account: str | None = None, context: ActionContext) -> str:
+    stats = _client(context, account).get_chat_statistics(chat, limit=max(1, int(limit or 500)))
+    breakdown = ", ".join(f"{k}={v}" for k, v in stats.get("type_breakdown", {}).items()) or "—"
+    top = ", ".join(f"{name}({n})" for name, n in stats.get("top_senders", [])[:5]) or "—"
+    return (
+        f"آمار «{chat}»:\n"
+        f"  • مجموع پیام‌ها: {stats.get('total_messages', 0)}\n"
+        f"  • تفکیک: {breakdown}\n"
+        f"  • پرپیام‌ترین‌ها: {top}"
+    )
+
+
+@risk(Risk.DESTRUCTIVE)
+def bulk_forward(*, from_chat: str, to_chats: list, msg_id: int,
+                 account: str | None = None, context: ActionContext) -> str:
+    if not isinstance(to_chats, list) or not to_chats:
+        raise AssistantError("to_chats باید یک آرایهٔ غیرخالی باشد.")
+    results = _client(context, account).bulk_forward(from_chat, list(to_chats), int(msg_id))
+    ok = sum(1 for v in results.values() if v)
+    fail = len(results) - ok
+    return f"✅ فوروارد انبوه: {ok} موفق، {fail} ناموفق از {len(results)} مقصد."
+
+
+@risk(Risk.SAFE)
+def download_all_media(*, chat: str, limit: int = 50, types: list | None = None,
+                       account: str | None = None, context: ActionContext) -> str:
+    files = _client(context, account).download_all_media(
+        chat, limit=max(1, int(limit or 50)), media_types=list(types) if types else None,
+        media_dir=_media_dir(context),
+    )
+    if not files:
+        return "مدیایی برای دانلود یافت نشد."
+    return "✅ مدیاها دانلود شدند:\n" + "\n".join(f"  • {f}" for f in files[:50]) + (
+        f"\n… (و {len(files) - 50} مورد دیگر)" if len(files) > 50 else ""
+    )
+
+
+@risk(Risk.SAFE)
+def download_profile_photo(*, target: str, account: str | None = None, context: ActionContext) -> str:
+    path = _client(context, account).download_profile_photo(target, media_dir=_media_dir(context))
+    return f"✅ عکس پروفایل ذخیره شد: {path}"

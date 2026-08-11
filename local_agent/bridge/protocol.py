@@ -69,6 +69,7 @@ class EventType(str, Enum):
     CHAT_FAILED = "chat_failed"
     LOG = "log"
     TELEGRAM_STATE = "telegram_state"
+    GITHUB_STATE = "github_state"
     SCHEDULED_FIRED = "scheduled_fired"
 
 
