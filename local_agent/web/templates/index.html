@@ -741,6 +741,40 @@
             <span class="field__hint" x-text="gmailStateLabel"></span>
           </div>
         </div>
+        <div class="field">
+          <label>🐙 GitHub</label>
+          <div class="field field--switch">
+            <label for="set-gh-enabled">فعال</label>
+            <input id="set-gh-enabled" type="checkbox" class="switch" x-model="form.github.enabled">
+          </div>
+          <div class="field field--switch">
+            <label for="set-gh-confirm">✅ تأیید قبل از push/merge</label>
+            <input id="set-gh-confirm" type="checkbox" class="switch" x-model="form.github.confirm_push">
+          </div>
+          <div class="field__row">
+            <select x-model="form.github.auth_mode" aria-label="روش اتصال گیتهاب" dir="ltr">
+              <option value="oauth">OAuth App (ریدایرکت)</option>
+              <option value="pat">توکن دسترسی شخصی (PAT)</option>
+            </select>
+            <input x-model="form.github.client_id" placeholder="client_id (برای OAuth)" dir="ltr" aria-label="client_id گیتهاب">
+          </div>
+          <input x-model="form.github.client_secret" type="password" placeholder="client_secret (برای OAuth؛ اختیاری برای PAT)" dir="ltr" autocomplete="off">
+          <input x-model="form.github.pat" type="password" placeholder="توکن PAT (ghp_... / github_pat_...)" dir="ltr" autocomplete="off">
+          <p class="field__hint">
+            برای OAuth: در github.com/settings/developers یک OAuth App بسازید با callback
+            <code dir="ltr">http://localhost:7824/api/github/callback</code> و client_id/secret را اینجا بگذارید،
+            سپس «اتصال OAuth» را بزنید. برای سریع‌تر، یک توکن PAT بسازید و پیست کنید.
+          </p>
+          <div class="field__row">
+            <button class="btn btn--ghost btn--sm" type="button" @click="connectGitHub()" :disabled="githubBusy">
+              <span x-show="!githubBusy">🔌 اتصال OAuth</span>
+              <span x-show="githubBusy" x-cloak>در حال اتصال…</span>
+            </button>
+            <button class="btn btn--ghost btn--sm" type="button" @click="connectGitHubPat()" :disabled="githubBusy">🔑 اتصال با PAT</button>
+            <button class="btn btn--ghost btn--sm" type="button" @click="disconnectGitHub()" x-show="githubConnected" x-cloak>قطع اتصال</button>
+            <span class="field__hint" x-text="githubStateLabel"></span>
+          </div>
+        </div>
         <div class="field field--danger">
           <div class="field__row">
             <label for="set-fullaccess">🛡 دسترسی کامل سیستم (Admin/Root)</label>

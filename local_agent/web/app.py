@@ -89,10 +89,11 @@ class SettingsRequest(BaseModel):
     confirm_mode: str | None = None
     work_dir: str | None = None
     full_system_access: bool | None = None
-    # ``telegram`` / ``gmail`` accept a partial dict; only the given keys
-    # are applied (blank secret fields keep their stored value).
+    # ``telegram`` / ``gmail`` / ``github`` accept a partial dict; only the
+    # given keys are applied (blank secret fields keep their stored value).
     telegram: dict[str, Any] | None = None
     gmail: dict[str, Any] | None = None
+    github: dict[str, Any] | None = None
 
 
 class UploadRequest(BaseModel):
@@ -130,6 +131,19 @@ class TelegramSwitchRequest(BaseModel):
 class TelegramAccountToggleRequest(BaseModel):
     name: str
     enabled: bool = False
+
+
+class GitHubConnectRequest(BaseModel):
+    account: str | None = None
+
+
+class GitHubPatRequest(BaseModel):
+    token: str
+    account: str | None = None
+
+
+class GitHubSwitchRequest(BaseModel):
+    name: str
 
 
 class ConfirmRequest(BaseModel):
@@ -271,6 +285,35 @@ def _coerce_gmail_field(key: str, raw: Any) -> Any:
             return raw
         return str(raw).strip().lower() in {"true", "1", "yes", "on"}
     return str(raw).strip()
+
+
+def _github_callback_page(*, ok: bool, title: str, detail: str) -> str:
+    """Tiny standalone HTML page shown after the OAuth redirect completes.
+
+    Served on its own (no app shell) because the browser lands here straight
+    from github.com; it must render fine without our CSS/JS bundle.
+    """
+    icon = "✅" if ok else "❌"
+    color = "#16a34a" if ok else "#dc2626"
+    return (
+        '<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8">'
+        '<title>اتصال GitHub</title>'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        "<style>body{font-family:Vazirmatn,system-ui,sans-serif;background:#0f172a;"
+        "color:#e2e8f0;margin:0;display:flex;min-height:100vh;align-items:center;"
+        "justify-content:center}.card{background:#1e293b;border:1px solid #334155;"
+        "border-radius:16px;padding:40px;max-width:440px;text-align:center;"
+        'box-shadow:0 20px 50px rgba(0,0,0,.4)}h1{color:'
+        + color
+        + ";font-size:40px;margin:8px 0}p{color:#94a3b8;line-height:1.7}</style></head>"
+        '<body><div class="card"><h1>'
+        + icon
+        + '</h1><h2 style="color:#f1f5f9">'
+        + title
+        + "</h2><p>"
+        + detail
+        + "</p></div></body></html>"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +623,27 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                     gmail=type(new_settings.gmail)(**gm_dict)
                 )
 
+        # ---- github -----------------------------------------------------
+        if req.github:
+            gh_changes: dict[str, Any] = {}
+            if "accounts" in req.github:
+                gh_changes["accounts"] = req.github["accounts"]
+            for key in ("enabled", "active_account", "default_scope"):
+                if key in req.github:
+                    gh_changes[key] = req.github[key]
+            for key in ("auth_mode", "client_id", "client_secret", "token_file",
+                        "api_base", "confirm_push"):
+                if key not in req.github:
+                    continue
+                raw = req.github[key]
+                if key in ("client_secret", "token_file") and (not raw or not str(raw).strip()):
+                    continue  # blank secret = keep stored value
+                gh_changes[key] = raw
+            if gh_changes:
+                new_settings = new_settings.with_overrides(
+                    github=new_settings.github.updated(gh_changes)
+                )
+
         handlers._apply_settings(new_settings)
         llm = new_settings.llm
         model = llm.openai_model if llm.provider != "ollama" else llm.ollama_model
@@ -688,6 +752,80 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         if server is None:
             raise HTTPException(503, "gmail needs an in-process bridge")
         return server.handlers.disconnect_gmail()
+
+    # ----------------------------------------------------------- github
+    @app.post("/api/github/oauth")
+    async def github_oauth(request: Request, req: GitHubConnectRequest | None = None) -> dict[str, Any]:
+        """Start the OAuth redirect flow; returns the github.com authorize URL."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "github needs an in-process bridge")
+        account = req.account if req is not None else None
+        # The callback must point back at THIS server, regardless of port.
+        base = str(request.base_url).rstrip("/")
+        redirect_uri = f"{base}/api/github/callback"
+        try:
+            return server.handlers.start_github_oauth(account, redirect_uri=redirect_uri)
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.get("/api/github/callback")
+    async def github_callback(request: Request) -> Any:
+        """OAuth redirect target: exchange code, then show a result page."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "github needs an in-process bridge")
+        code = request.query_params.get("code", "")
+        state = request.query_params.get("state", "")
+        try:
+            if not code or not state:
+                raise AssistantError("پاسخ GitHub ناقص است.")
+            result = server.handlers.complete_github_oauth(code, state)
+            user = (result.get("user") or {})
+            return HTMLResponse(_github_callback_page(
+                ok=True, title=f"وصل شدی به‌عنوان @{user.get('login', '?')}",
+                detail="می‌توانی این زبانه را ببندی و به اپ برگردی.",
+            ))
+        except AssistantError as exc:
+            return HTMLResponse(_github_callback_page(ok=False, title="اتصال ناموفق بود",
+                                                       detail=str(exc)), status_code=400)
+
+    @app.post("/api/github/pat")
+    async def github_pat(req: GitHubPatRequest) -> dict[str, Any]:
+        """Connect via a Personal Access Token (validate + store)."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "github needs an in-process bridge")
+        try:
+            return server.handlers.connect_github_pat(req.token, req.account)
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.post("/api/github/disconnect")
+    async def github_disconnect(req: GitHubConnectRequest | None = None) -> dict[str, Any]:
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "github needs an in-process bridge")
+        account = req.account if req is not None else None
+        return server.handlers.disconnect_github(account)
+
+    @app.post("/api/github/switch")
+    async def github_switch(req: GitHubSwitchRequest) -> dict[str, Any]:
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "github needs an in-process bridge")
+        try:
+            return server.handlers.switch_github_account(str(req.name))
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.get("/api/github/status")
+    async def github_status() -> dict[str, Any]:
+        """Status of every GitHub account (no secrets)."""
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "github needs an in-process bridge")
+        return server.handlers.github_accounts_status()
 
     @app.post("/api/elevate/restart")
     async def elevate_restart() -> dict[str, Any]:

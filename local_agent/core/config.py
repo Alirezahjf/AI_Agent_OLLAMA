@@ -53,7 +53,7 @@ def _looks_like_assistant_config(payload: dict) -> bool:
     """
     return any(
         key in payload
-        for key in ("llm", "telegram", "gmail", "safety",
+        for key in ("llm", "telegram", "gmail", "github", "safety",
                     "allowed_user_ids", "telegram_token", "bale_token")
     )
 
@@ -68,7 +68,7 @@ def _has_real_settings(payload: dict) -> bool:
     if not isinstance(payload, dict) or not payload:
         return False
     if _looks_like_assistant_config(payload):
-        for key in ("llm", "telegram", "gmail", "safety",
+        for key in ("llm", "telegram", "gmail", "github", "safety",
                     "allowed_user_ids", "telegram_token", "bale_token"):
             value = payload.get(key)
             if value not in (None, "", False, 0, [], {}, ()):
@@ -309,6 +309,103 @@ class GmailSettings:
 
 
 @dataclass(frozen=True)
+class GitHubAccount:
+    """One GitHub identity (OAuth App credentials OR a Personal Access Token).
+
+    ``auth_mode='oauth'``: the user creates their own OAuth App at
+    github.com/settings/developers (Authorization callback URL =
+    ``http://localhost:<port>/api/github/callback``) and provides
+    ``client_id``/``client_secret``.  The redirect flow exchanges the
+    returned code for an ``access_token`` stored in ``token_file``.
+
+    ``auth_mode='pat'``: the user pastes a fine-grained/classic Personal
+    Access Token directly; no OAuth App is needed.
+
+    ``client_secret``/``token_file`` are secrets and are auto-masked
+    everywhere by the ``config_set`` suffix rules.
+    """
+
+    name: str = "اصلی"
+    enabled: bool = False
+    auth_mode: str = "oauth"  # oauth | pat
+    client_id: str = ""
+    client_secret: str = ""  # OAuth only (masked)
+    token_file: str = ""  # default: <data_dir>/github_<name>.json (masked suffix)
+    api_base: str = "https://api.github.com"
+    confirm_push: bool = True  # ask before every push/merge/force
+
+
+@dataclass(frozen=True)
+class GitHubSettings:
+    """Multi-account GitHub integration (OAuth redirect flow + PAT).
+
+    ``enabled`` toggles the feature; ``accounts`` holds every identity and
+    ``active_account`` names the default one.  ``default_scope`` is the
+    space-separated OAuth scope requested during the redirect flow.
+    """
+
+    enabled: bool = False
+    active_account: str = "اصلی"
+    accounts: tuple[GitHubAccount, ...] = field(default_factory=tuple)
+    default_scope: str = "repo workflow read:user"
+
+    def account(self, name: str | None = None) -> GitHubAccount:
+        name = (name or self.active_account) or "اصلی"
+        for acc in self.accounts:
+            if acc.name == name:
+                return acc
+        return GitHubAccount(name=name, enabled=False)
+
+    def active(self) -> GitHubAccount:
+        return self.account(self.active_account)
+
+    def updated(self, changes: dict[str, Any]) -> GitHubSettings:
+        enabled = changes.get("enabled", self.enabled)
+        active = changes.get("active_account", self.active_account)
+        if "accounts" in changes:
+            accounts = tuple(
+                _github_account_from_dict(a) for a in (changes["accounts"] or [])
+            )
+        else:
+            fields = {
+                k: v for k, v in changes.items()
+                if k in ("auth_mode", "client_id", "client_secret", "token_file",
+                         "api_base", "confirm_push", "enabled")
+            }
+            current = list(self.accounts)
+            if not current:
+                current = [GitHubAccount(name=active, enabled=enabled)]
+            accounts = tuple(
+                replace(acc, **fields) if acc.name == active else acc
+                for acc in current
+            )
+        return GitHubSettings(
+            enabled=enabled, active_account=active, accounts=accounts,
+            default_scope=changes.get("default_scope", self.default_scope),
+        )
+
+    @property
+    def auth_mode(self) -> str:
+        return self.active().auth_mode
+
+    @property
+    def client_id(self) -> str:
+        return self.active().client_id
+
+    @property
+    def client_secret(self) -> str:
+        return self.active().client_secret
+
+    @property
+    def api_base(self) -> str:
+        return self.active().api_base or "https://api.github.com"
+
+    @property
+    def confirm_push(self) -> bool:
+        return self.active().confirm_push
+
+
+@dataclass(frozen=True)
 class AssistantSettings:
     """Top-level, immutable configuration."""
 
@@ -317,6 +414,7 @@ class AssistantSettings:
     llm: LLMSettings = field(default_factory=LLMSettings)
     telegram: TelegramSettings = field(default_factory=TelegramSettings)
     gmail: GmailSettings = field(default_factory=GmailSettings)
+    github: GitHubSettings = field(default_factory=GitHubSettings)
     safety: SafetySettings = field(default_factory=SafetySettings)
     # The exact file :func:`load_settings` read from.  This is the *single
     # source of truth* for persistence: every write must target the same
@@ -373,6 +471,19 @@ class AssistantSettings:
         raw = self.gmail.token_file.strip()
         return Path(raw).expanduser() if raw else self.data_dir / "gmail_token.json"
 
+    def github_token_path_for(self, account: str | None = None) -> Path:
+        """Token file for a GitHub account (default: active)."""
+        acc = self.github.account(account)
+        raw = (acc.token_file or "").strip()
+        if raw:
+            return Path(raw).expanduser()
+        safe = "".join(c if c.isalnum() else "_" for c in acc.name) or "account"
+        return self.data_dir / "github" / f"github_{safe}.json"
+
+    @property
+    def github_token_path(self) -> Path:
+        return self.github_token_path_for()
+
     @property
     def log_dir(self) -> Path:
         return self.data_dir / "logs"
@@ -412,6 +523,7 @@ class AssistantSettings:
             safety = SafetySettings(**(payload.get("safety") or {}))
             tg = _telegram_from_payload(tg_payload)
             gmail = GmailSettings(**(payload.get("gmail") or {}))
+            github = _github_from_payload(payload.get("github") or {})
             data_dir = Path(payload.get("data_dir", _default_data_dir())).expanduser()
             work_dir = Path(payload.get("work_dir", str(Path.cwd()))).expanduser()
             extra = payload.get("extra") or {}
@@ -427,6 +539,7 @@ class AssistantSettings:
                 llm=llm,
                 telegram=tg,
                 gmail=gmail,
+                github=github,
                 safety=safety,
                 telegram_token=telegram_token,
                 bale_token=bale_token,
@@ -497,6 +610,48 @@ def _telegram_account_from_dict(raw: dict) -> TelegramAccount:
         phone=str(raw.get("phone", "")),
         session_name=str(raw.get("session_name", "assistant") or "assistant"),
         confirm_send=bool(raw.get("confirm_send", True)),
+    )
+
+
+def _github_from_payload(gh_payload: dict) -> GitHubSettings:
+    """Build GitHubSettings, migrating legacy single-account fields."""
+    enabled = bool(gh_payload.get("enabled", False))
+    active = str(gh_payload.get("active_account", "اصلی") or "اصلی")
+    default_scope = str(gh_payload.get("default_scope", "repo workflow read:user"))
+    raw_accounts = gh_payload.get("accounts") or []
+    if not raw_accounts:
+        raw_accounts = [{
+            "name": "اصلی",
+            "enabled": enabled,
+            "auth_mode": str(gh_payload.get("auth_mode", "oauth") or "oauth"),
+            "client_id": gh_payload.get("client_id", ""),
+            "client_secret": gh_payload.get("client_secret", ""),
+            "token_file": gh_payload.get("token_file", ""),
+            "api_base": gh_payload.get("api_base", "https://api.github.com"),
+            "confirm_push": gh_payload.get("confirm_push", True),
+        }]
+    accounts = [_github_account_from_dict(a) for a in raw_accounts if isinstance(a, dict)]
+    if not accounts:
+        accounts = [GitHubAccount(name="اصلی", enabled=enabled)]
+    names = {a.name for a in accounts}
+    if active not in names:
+        active = accounts[0].name
+    return GitHubSettings(
+        enabled=enabled, active_account=active,
+        accounts=tuple(accounts), default_scope=default_scope,
+    )
+
+
+def _github_account_from_dict(raw: dict) -> GitHubAccount:
+    return GitHubAccount(
+        name=str(raw.get("name", "اصلی") or "اصلی"),
+        enabled=bool(raw.get("enabled", True)),
+        auth_mode=str(raw.get("auth_mode", "oauth") or "oauth"),
+        client_id=str(raw.get("client_id", "")),
+        client_secret=str(raw.get("client_secret", "")),
+        token_file=str(raw.get("token_file", "")),
+        api_base=str(raw.get("api_base", "https://api.github.com") or "https://api.github.com"),
+        confirm_push=bool(raw.get("confirm_push", True)),
     )
 
 
