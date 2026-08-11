@@ -510,6 +510,20 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
     async def history(limit: int = 50, session_id: str | None = None) -> list[dict[str, Any]]:
         return client.get_history(limit=limit, session_id=session_id)
 
+    @app.get("/api/tools/groups")
+    async def tool_groups(session_id: str | None = None) -> dict[str, Any]:
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "tool groups نیازمند bridge است")
+        return server.handlers.tool_groups(session_id)
+
+    @app.post("/api/tools/groups")
+    async def set_tool_groups(payload: dict[str, Any]) -> dict[str, Any]:
+        server = _server_of(client)
+        if server is None:
+            raise HTTPException(503, "tool groups نیازمند bridge است")
+        return server.handlers.set_tool_groups(payload.get("session_id"), payload.get("groups"))
+
     @app.post("/api/clear")
     async def clear(session_id: str | None = None) -> dict[str, bool]:
         client.clear_history(session_id=session_id)
@@ -763,9 +777,11 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         account = req.account if req is not None else None
         # The callback must point back at THIS server, regardless of port.
         base = str(request.base_url).rstrip("/")
-        redirect_uri = f"{base}/api/github/callback"
+        acc = server.handlers.settings.github.account(account)
+        redirect_uri = (acc.callback_url or f"{base}/api/github/callback").strip()
         try:
-            return server.handlers.start_github_oauth(account, redirect_uri=redirect_uri)
+            result = server.handlers.start_github_oauth(account, redirect_uri=redirect_uri)
+            return {**result, "redirect_uri": redirect_uri}
         except AssistantError as exc:
             raise HTTPException(400, str(exc))
 

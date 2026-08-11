@@ -330,6 +330,7 @@ class GitHubAccount:
     auth_mode: str = "oauth"  # oauth | pat
     client_id: str = ""
     client_secret: str = ""  # OAuth only (masked)
+    callback_url: str = ""
     token_file: str = ""  # default: <data_dir>/github_<name>.json (masked suffix)
     api_base: str = "https://api.github.com"
     confirm_push: bool = True  # ask before every push/merge/force
@@ -369,7 +370,7 @@ class GitHubSettings:
         else:
             fields = {
                 k: v for k, v in changes.items()
-                if k in ("auth_mode", "client_id", "client_secret", "token_file",
+                if k in ("auth_mode", "client_id", "client_secret", "callback_url", "token_file",
                          "api_base", "confirm_push", "enabled")
             }
             current = list(self.accounts)
@@ -626,6 +627,7 @@ def _github_from_payload(gh_payload: dict) -> GitHubSettings:
             "auth_mode": str(gh_payload.get("auth_mode", "oauth") or "oauth"),
             "client_id": gh_payload.get("client_id", ""),
             "client_secret": gh_payload.get("client_secret", ""),
+            "callback_url": gh_payload.get("callback_url", ""),
             "token_file": gh_payload.get("token_file", ""),
             "api_base": gh_payload.get("api_base", "https://api.github.com"),
             "confirm_push": gh_payload.get("confirm_push", True),
@@ -649,6 +651,7 @@ def _github_account_from_dict(raw: dict) -> GitHubAccount:
         auth_mode=str(raw.get("auth_mode", "oauth") or "oauth"),
         client_id=str(raw.get("client_id", "")),
         client_secret=str(raw.get("client_secret", "")),
+        callback_url=str(raw.get("callback_url", "")),
         token_file=str(raw.get("token_file", "")),
         api_base=str(raw.get("api_base", "https://api.github.com") or "https://api.github.com"),
         confirm_push=bool(raw.get("confirm_push", True)),

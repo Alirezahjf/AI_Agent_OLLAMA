@@ -22,6 +22,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ...actions import build_default_registry, describe_action, run_action
+from ...actions.groups import TOOL_GROUPS, DEFAULT_GROUP_IDS
 from ...actions.config_actions import register_config
 from ...actions.gmail_actions import register_gmail
 from ...actions.github_actions import register_github
@@ -67,6 +68,7 @@ logger = get_logger("bridge.handlers")
 # Multi-session limits (F4): cap live sessions and drop idle ones.
 MAX_SESSIONS = 20
 SESSION_TIMEOUT_SECONDS = 24 * 3600
+_TOOL_CAP = 120
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +166,7 @@ class BridgeHandlers:
     # Per-session runtimes keyed by session_id (F4); the default runtime is
     # ``self.runtime`` under the key "default".
     _sessions: dict[str, RuntimeContext] = field(default_factory=dict)
+    _session_tool_groups: dict[str, frozenset[str]] = field(default_factory=dict)
     _sessions_lock: threading.RLock = field(default_factory=threading.RLock)
     _lock: threading.RLock = field(default_factory=threading.RLock)
     _active_runs: dict[str, threading.Event] = field(default_factory=dict)
@@ -268,6 +271,8 @@ class BridgeHandlers:
                 return Response(id=request_id, ok=True, result={"cleared": True}).to_dict()
             if type_ == MessageType.SET_MODEL.value:
                 return Response(id=request_id, ok=True, result=self._set_model(payload)).to_dict()
+            if type_ == "SET_TOOL_GROUPS":
+                return Response(id=request_id, ok=True, result=self.set_tool_groups(payload.get("session_id"), payload.get("groups"))).to_dict()
             if type_ == MessageType.CHAT.value:
                 # Returns a run_id immediately; events flow over the bus.
                 run_id = self._start_chat_run(
@@ -297,6 +302,28 @@ class BridgeHandlers:
             ok=False,
             error=ErrorPayload(code=code, message=message),
         ).to_dict()
+
+    # ---------------------------------------------------------------- tool groups
+
+    def tool_groups(self, session_id: str | None = None) -> dict[str, Any]:
+        sid = session_id or "default"
+        active = self._session_tool_groups.get(sid, frozenset(DEFAULT_GROUP_IDS))
+        count = len([a for a in self.registry.all() if not a.unavailable and a.group in active])
+        return {"groups": [{**g.__dict__} for g in TOOL_GROUPS], "active": sorted(active), "enabled_tool_count": min(count, _TOOL_CAP), "cap": _TOOL_CAP}
+
+    def set_tool_groups(self, session_id: str | None, groups: Any) -> dict[str, Any]:
+        sid = session_id or "default"
+        valid = frozenset(str(g) for g in (groups or []) if any(x.id == str(g) for x in TOOL_GROUPS))
+        self._session_tool_groups[sid] = valid
+        return self.tool_groups(sid)
+
+    def _visible_tools(self, session_id: str | None = None) -> list[Any]:
+        active = self._session_tool_groups.get(session_id or "default", frozenset(DEFAULT_GROUP_IDS))
+        tools = [a for a in self.registry.all() if not a.unavailable and a.group in active]
+        if len(tools) > _TOOL_CAP:
+            logger.warning("تعداد ابزارهای فعال بیش از سقف است؛ فقط %s ابزار به مدل ارسال شد.", _TOOL_CAP)
+            tools = tools[:_TOOL_CAP]
+        return tools
 
     # ---------------------------------------------------------------- status
 
@@ -999,7 +1026,7 @@ class BridgeHandlers:
             url, state = client.authorize_url(redirect_uri, state_registry=self._github_pending)
         except GitHubError as exc:
             raise AssistantError(str(exc)) from exc
-        return {"account": name, "authorize_url": url, "state": state}
+        return {"account": name, "authorize_url": url, "state": state, "redirect_uri": redirect_uri}
 
     def complete_github_oauth(self, code: str, state: str) -> dict[str, Any]:
         """Finish the OAuth flow: validate ``state``, exchange ``code``."""
@@ -1226,7 +1253,8 @@ class BridgeHandlers:
         runtime.append(ConversationMessage(role="user", content=user_message))
 
         max_turns = max(1, self.settings.safety.max_agent_turns)
-        tools = [a.to_tool_definition() for a in self.registry.all()]
+        session_id = next((sid for sid, rt in self._sessions.items() if rt is runtime), None)
+        tools = [a.to_tool_definition() for a in self._visible_tools(session_id)]
         client = create_client(self.settings.llm)
 
         for turn in range(max_turns):

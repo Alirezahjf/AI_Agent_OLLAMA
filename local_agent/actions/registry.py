@@ -10,6 +10,7 @@ from enum import Enum
 from typing import Any
 
 from ..core.context import RuntimeContext
+from .groups import infer_group, group_by_id
 from ..core.errors import ActionRefused, AssistantError, DependencyMissing
 from ..core.logging_setup import get_logger
 
@@ -72,6 +73,12 @@ class Action:
     risk_level: Risk = Risk.SAFE
     unavailable: bool = False
     unavailable_reason: str = ""
+    group: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.group or group_by_id(self.group) is None:
+            self.group = infer_group(self.name)
+
     # Optional runtime override: when set and returns True, the action
     # always asks for confirmation regardless of confirm_mode/risk
     # (used e.g. by ``telegram.confirm_send``).  Signature:
