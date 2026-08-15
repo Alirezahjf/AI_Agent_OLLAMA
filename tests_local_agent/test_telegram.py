@@ -26,21 +26,33 @@ from local_agent.telegram.client import (
 
 
 class _FakeUser:
-    def __init__(self, id: int, first_name: str, username: str = "me", last_name: str = "") -> None:
+    def __init__(self, id: int, first_name: str, username: str = "me", last_name: str = "",
+                 phone: str = "+10000000000", *, bot: bool = False) -> None:
         self.id = id
         self.first_name = first_name
         self.username = username
         self.last_name = last_name
-        self.phone = "+10000000000"
+        self.phone = phone
+        self.bot = bot
+        self.contact = True
+        self.mutual_contact = False
+        self.verified = False
+        self.deleted = False
+        self.status = None
 
 
 class _FakeDialog:
-    def __init__(self, entity, message=None, unread: int = 0) -> None:
+    def __init__(self, entity, message=None, unread: int = 0, *, folder_id=None,
+                 pinned: bool = False) -> None:
         self.entity = entity
         self.id = getattr(entity, "id", 0)
         self.message = message
         self.unread_count = unread
         self.name = getattr(entity, "title", None) or getattr(entity, "first_name", "?")
+        self.folder_id = folder_id
+        self.pinned = pinned
+        self.notify_settings = None
+        self.date = getattr(message, "date", None)
 
 
 class _FakeEntity:
@@ -84,6 +96,11 @@ class _FakeTelegramClient:
         self.sent: list[tuple[Any, str]] = []
         self.uploaded: list[tuple[Any, str]] = []
         self.password_prompted = False
+        self.contacts = [
+            _FakeUser(101, "علی", "ali", "رضایی", "+989121234567"),
+            _FakeUser(102, "Sara", "sara", "Ahmadi", "+989351111111"),
+        ]
+        self.contact_requests = 0
 
     async def connect(self) -> None:
         self.connected = True
@@ -115,9 +132,14 @@ class _FakeTelegramClient:
                 return d.entity
         raise RuntimeError(f"cannot find {target}")
 
-    async def iter_dialogs(self, limit: int):
-        for dialog in self.dialogs[:limit]:
+    async def iter_dialogs(self, limit=None):
+        dialogs = self.dialogs if limit is None else self.dialogs[:limit]
+        for dialog in dialogs:
             yield dialog
+
+    async def contacts_request(self, request):
+        self.contact_requests += 1
+        return type("ContactsResult", (), {"users": list(self.contacts)})()
 
     async def send_message(self, entity, text: str) -> _FakeMessage:
         self.sent.append((entity, text))
@@ -164,6 +186,9 @@ def _patch_telethon(monkeypatch: pytest.MonkeyPatch, fake: _FakeTelegramClient) 
                 attr = getattr(fake, name)
                 if callable(attr):
                     setattr(self, name, attr.__get__(fake, type(fake)))
+
+        async def __call__(self, request):
+            return await self._fake.contacts_request(request)
 
     telethon_module = sys.modules.get("telethon") or telethon
     monkeypatch.setattr(telethon_module, "TelegramClient", _FakeTelegramClientClass)
@@ -311,6 +336,103 @@ def test_search_messages_returns_results(patched_telethon: _FakeTelegramClient, 
     messages = client.search_messages("Alice", "hit", limit=10)
     assert len(messages) == 2
     assert messages[0].text == "first hit"
+
+
+def test_contacts_use_live_get_contacts_request(patched_telethon: _FakeTelegramClient, tmp_path: Path) -> None:
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+
+    first = client.list_contacts(limit=100)
+    assert {row["id"] for row in first} == {101, 102}
+    assert first[0].keys() >= {"id", "name", "username", "phone", "is_contact", "is_mutual_contact"}
+
+    # A second call must hit Telegram again, not return an application cache.
+    patched_telethon.contacts.append(_FakeUser(103, "New", "new_user"))
+    second = client.list_contacts(limit=100)
+    assert {row["id"] for row in second} == {101, 102, 103}
+    assert patched_telethon.contact_requests == 2
+
+
+def test_contact_search_normalizes_persian_username_and_phone(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+
+    assert client.search_contacts("علي رضايي")[0]["id"] == 101
+    assert client.search_contacts("@ALI")[0]["id"] == 101
+    assert client.search_contacts("09121234567")[0]["id"] == 101
+    assert patched_telethon.contact_requests == 3
+
+
+def test_private_filter_applies_before_limit_and_reads_live_dialogs(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    groups = [_FakeDialog(_FakeEntity(1000 + i, f"Group {i}", is_group=True)) for i in range(40)]
+    privates = [_FakeDialog(_FakeEntity(2000 + i, f"Person {i}")) for i in range(5)]
+    patched_telethon.dialogs = groups + privates
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+
+    result = client.list_chats(limit=3, kind="private")
+    assert [chat.title for chat in result] == ["Person 0", "Person 1", "Person 2"]
+    assert all(chat.is_private and chat.kind == "private" for chat in result)
+
+    # Every call reads the current Telegram dialogs, so new activity is visible.
+    patched_telethon.dialogs.insert(0, _FakeDialog(_FakeEntity(3000, "Newest Person")))
+    assert client.list_chats(limit=1, kind="private")[0].title == "Newest Person"
+
+
+def test_chat_query_searches_beyond_initial_limit(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialogs = [
+        _FakeDialog(_FakeEntity(i, f"گروه {i}", is_group=True)) for i in range(50)
+    ] + [_FakeDialog(_FakeEntity(999, "توسعه\u200cدهندگان پایتون", username="PythonDevs"))]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+
+    by_name = client.list_chats(limit=5, kind="private", query="توسعه دهندگان")
+    by_username = client.list_chats(limit=5, query="@pythondevs")
+    assert [chat.id for chat in by_name] == [999]
+    assert [chat.id for chat in by_username] == [999]
+
+
+def test_chat_classification_and_live_metadata(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    supergroup = _FakeEntity(10, "Super", is_group=False)
+    supergroup.megagroup = True
+    channel = _FakeEntity(20, "News")
+    channel.broadcast = True
+    bot = _FakeUser(30, "Helper", "helper_bot", bot=True)
+    patched_telethon.dialogs = [
+        _FakeDialog(supergroup, _FakeMessage(1, "sg"), unread=2),
+        _FakeDialog(channel, _FakeMessage(2, "news"), folder_id=1, pinned=True),
+        _FakeDialog(bot, _FakeMessage(3, "bot")),
+    ]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+
+    assert client.list_chats(kind="supergroup")[0].kind == "supergroup"
+    channel_result = client.list_chats(kind="channel")[0]
+    assert channel_result.archived and channel_result.pinned
+    assert channel_result.last_message_date is not None
+    assert client.list_chats(kind="bot")[0].kind == "bot"
+    # group is intentionally inclusive of supergroups for backward compatibility.
+    assert client.list_chats(kind="group")[0].title == "Super"
+
+
+def test_unread_sort_scans_all_matching_dialogs(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialogs = [
+        _FakeDialog(_FakeEntity(i, f"Person {i}"), unread=i) for i in range(1, 8)
+    ]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    result = client.list_chats(limit=3, kind="private", sort="unread")
+    assert [chat.unread_count for chat in result] == [7, 6, 5]
 
 
 # ---------------------------------------------------------------------------

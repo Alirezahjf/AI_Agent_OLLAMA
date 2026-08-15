@@ -9,7 +9,7 @@ honours its own ``confirm_send`` flag.
 Risk levels follow the README contract:
 
 * read-only tools (``list_chats``, ``search_messages``, ``get_me``,
-  ``search_contacts``, ``get_chat_history``, ``get_profile``,
+  ``list_contacts``, ``search_contacts``, ``get_chat_history``, ``get_profile``,
   ``download_media``, ``mark_read``, ``resolve_username``,
   ``list_accounts``, ``switch_account``) — Safe
 * sending tools (``send_message``, ``send_photo``, ``send_file``,
@@ -71,9 +71,9 @@ def register_telegram(registry: ActionRegistry, context: ActionContext) -> None:
         ),
         parameters={
             "limit": {"type": "integer", "description": "حداکثر تعداد گفتگو (پیش‌فرض 30)"},
-            "kind": {"type": "string", "enum": ["all", "private", "group", "channel", "bot"], "description": "نوع چت برای فیلتر سمت تلگرام"},
-            "query": {"type": "string", "description": "فیلتر نام یا نام کاربری"},
-            "sort": {"type": "string", "enum": ["", "unread"], "description": "مرتب‌سازی اختیاری"},
+            "kind": {"type": "string", "enum": ["all", "private", "group", "supergroup", "channel", "bot"], "description": "نوع چت؛ group شامل گروه عادی و سوپرگروه است"},
+            "query": {"type": "string", "description": "جست‌وجوی زنده در نام یا نام کاربری همهٔ گفتگوها"},
+            "sort": {"type": "string", "enum": ["", "recent", "unread"], "description": "مرتب‌سازی اختیاری"},
             "account": {"type": "string", "description": "نام اکانت (پیش‌فرض: اکانت فعال)"},
         },
     )(list_chats)
@@ -287,6 +287,15 @@ def register_telegram(registry: ActionRegistry, context: ActionContext) -> None:
     )(forward_message)
 
     # قابلیت‌های مدیریتی فراتر از ربات مرجع
+    management_descriptions = {
+        "telegram.list_contacts": (
+            "فهرست زندهٔ مخاطبین اکانت از خود تلگرام، شامل شناسه، نام، نام کاربری، "
+            "شماره و وضعیت مخاطب دوطرفه؛ از کش برنامه استفاده نمی‌کند. SAFE."
+        ),
+        "telegram.get_contact_info": (
+            "اطلاعات تازهٔ یک مخاطب با شناسه، نام، نام کاربری یا شماره. SAFE."
+        ),
+    }
     for action_name, function, params, required, risk_level in (
         ("telegram.delete_message", delete_message, {"chat": {"type": "string"}, "msg_id": {"type": "integer"}}, ("chat", "msg_id"), Risk.DESTRUCTIVE),
         ("telegram.edit_message", edit_message, {"chat": {"type": "string"}, "msg_id": {"type": "integer"}, "text": {"type": "string"}}, ("chat", "msg_id", "text"), Risk.DESTRUCTIVE),
@@ -305,9 +314,15 @@ def register_telegram(registry: ActionRegistry, context: ActionContext) -> None:
         ("telegram.set_profile_photo", set_profile_photo, {"path": {"type": "string"}}, ("path",), Risk.DESTRUCTIVE),
         ("telegram.set_online_status", set_online_status, {"online": {"type": "boolean"}}, (), Risk.DESTRUCTIVE),
     ):
-        registry.decorator(name=action_name, description="ابزار مدیریت حساب تلگرام شخصی؛ بدون اتصال به ربات.",
-                           parameters={**params, "account": {"type": "string"}}, required=required,
-                           risk_level=risk_level)(function)
+        registry.decorator(
+            name=action_name,
+            description=management_descriptions.get(
+                action_name, "ابزار مدیریت حساب تلگرام شخصی؛ بدون اتصال به ربات."
+            ),
+            parameters={**params, "account": {"type": "string"}},
+            required=required,
+            risk_level=risk_level,
+        )(function)
 
 
 def _register_send(registry, name, confirm_send, description, parameters, *, required, context):
@@ -396,11 +411,28 @@ def _format_chats(chats: list[Any]) -> str:
             return "ربات"
         if getattr(chat, "is_channel", False):
             return "کانال"
+        if getattr(chat, "is_supergroup", False):
+            return "سوپرگروه"
         if getattr(chat, "is_group", False):
             return "گروه"
         return "شخصی"
-    lines = [f"  • {c.title} [نوع: {label(c)}] (id={c.id})" for c in chats]
-    head = f"تعداد {len(chats)} گفتگو:\n"
+
+    lines = []
+    for chat in chats:
+        details = [f"نوع: {label(chat)}", f"id={chat.id}"]
+        if getattr(chat, "username", None):
+            details.append(f"@{str(chat.username).lstrip('@')}")
+        unread = int(getattr(chat, "unread_count", 0) or 0)
+        if unread:
+            details.append(f"خوانده‌نشده: {unread}")
+        if getattr(chat, "pinned", False):
+            details.append("سنجاق‌شده")
+        if getattr(chat, "muted", False):
+            details.append("بی‌صدا")
+        if getattr(chat, "archived", False):
+            details.append("بایگانی")
+        lines.append(f"  • {chat.title} [{', '.join(details)}]")
+    head = f"تعداد {len(chats)} گفتگو (دادهٔ زندهٔ تلگرام):\n"
     return head + "\n".join(lines) if lines else "هیچ گفتگویی یافت نشد؛ در این فهرست گفتگویی نیست."
 
 
@@ -410,6 +442,22 @@ def _format_messages(messages: list[Any]) -> str:
         direction = "من" if msg.is_outgoing else msg.sender
         lines.append(f"  [{msg.date:%Y-%m-%d %H:%M}] {direction}: {msg.text[:200]}")
     return "\n".join(lines) if lines else "پیامی یافت نشد."
+
+
+def _format_contact_row(row: dict[str, Any]) -> str:
+    name = str(row.get("name") or " ".join(
+        part for part in (row.get("first_name", ""), row.get("last_name", "")) if part
+    ).strip() or "?")
+    details = [f"id={row.get('id')}"]
+    if row.get("username"):
+        details.append(f"@{str(row['username']).lstrip('@')}")
+    if row.get("phone"):
+        details.append(str(row["phone"]))
+    if row.get("is_mutual_contact"):
+        details.append("مخاطب دوطرفه")
+    if row.get("is_bot"):
+        details.append("ربات")
+    return f"  • {name} [{', '.join(details)}]"
 
 
 # ---------------------------------------------------------------------------
@@ -504,9 +552,8 @@ def search_contacts(*, query: str, limit: int = 30, account: str | None = None, 
     results = _client(context, account).search_contacts(query, limit=max(1, int(limit or 30)))
     if not results:
         return "مخاطبی مطابق عبارت یافت نشد."
-    lines = [f"  • {r['name'] or '?'}" + (f" (@{r['username']})" if r['username'] else "")
-             + (f" — {r['phone']}" if r['phone'] else "") for r in results]
-    return f"تعداد {len(results)} مخاطب:\n" + "\n".join(lines)
+    lines = [_format_contact_row(row) for row in results]
+    return f"تعداد {len(results)} مخاطب (دادهٔ زندهٔ تلگرام):\n" + "\n".join(lines)
 
 
 @risk(Risk.SAFE)
@@ -658,8 +705,9 @@ def list_contacts(*, limit: int = 100, account: str | None = None, context: Acti
     rows = _client(context, account).list_contacts(max(1, int(limit)))
     if not rows:
         return "مخاطبی یافت نشد."
-    return "مخاطبین ({}):\n{}".format(len(rows), "\n".join(
-        f"• {r['first_name']} {r['last_name']} (id={r['id']})" for r in rows))
+    return "مخاطبین زندهٔ تلگرام ({}):\n{}".format(
+        len(rows), "\n".join(_format_contact_row(row) for row in rows)
+    )
 
 @risk(Risk.SAFE)
 def get_contact_info(*, contact: str, account: str | None = None, context: ActionContext) -> str:

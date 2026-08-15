@@ -10,8 +10,9 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,7 @@ class TelegramError(AssistantError):
 
 @dataclass
 class Chat:
-    """A dialog summary returned by :meth:`PersonalTelegram.list_chats`."""
+    """A live dialog summary returned by :meth:`PersonalTelegram.list_chats`."""
 
     id: int
     title: str
@@ -38,24 +39,90 @@ class Chat:
     is_channel: bool = False
     is_bot: bool = False
     is_private: bool = False
+    is_supergroup: bool = False
     is_forum: bool = False
     verified: bool = False
     pinned: bool = False
+    muted: bool = False
+    archived: bool = False
+    folder_id: int | None = None
+    members_count: int | None = None
+    last_message_date: datetime | None = None
+
+    @property
+    def kind(self) -> str:
+        if self.is_bot:
+            return "bot"
+        if self.is_channel:
+            return "channel"
+        if self.is_supergroup:
+            return "supergroup"
+        if self.is_group:
+            return "group"
+        return "private"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "title": self.title,
             "username": self.username,
+            "kind": self.kind,
             "is_group": self.is_group,
             "is_channel": self.is_channel,
             "is_bot": self.is_bot,
             "is_private": self.is_private,
+            "is_supergroup": self.is_supergroup,
             "is_forum": self.is_forum,
             "verified": self.verified,
             "pinned": self.pinned,
+            "muted": self.muted,
+            "archived": self.archived,
+            "folder_id": self.folder_id,
+            "members_count": self.members_count,
             "last_message": self.last_message,
+            "last_message_date": (
+                self.last_message_date.isoformat() if self.last_message_date else None
+            ),
             "unread_count": self.unread_count,
+        }
+
+
+@dataclass
+class Contact:
+    """Fresh contact data returned by Telegram's contacts.getContacts API."""
+
+    id: int
+    first_name: str
+    last_name: str = ""
+    username: str = ""
+    phone: str = ""
+    is_contact: bool = True
+    is_mutual_contact: bool = False
+    is_bot: bool = False
+    verified: bool = False
+    deleted: bool = False
+    status: str = "unknown"
+    last_seen: datetime | None = None
+
+    @property
+    def name(self) -> str:
+        return " ".join(part for part in (self.first_name, self.last_name) if part).strip()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "first_name": self.first_name,
+            "last_name": self.last_name,
+            "username": self.username,
+            "phone": self.phone,
+            "is_contact": self.is_contact,
+            "is_mutual_contact": self.is_mutual_contact,
+            "is_bot": self.is_bot,
+            "verified": self.verified,
+            "deleted": self.deleted,
+            "status": self.status,
+            "last_seen": self.last_seen.isoformat() if self.last_seen else None,
         }
 
 
@@ -248,9 +315,16 @@ class PersonalTelegram:
 
     def list_chats(self, limit: int = 30, kind: str = "all", query: str = "", sort: str = "") -> list[Chat]:
         kind = str(kind or "all").lower()
-        if kind not in {"private", "group", "channel", "bot", "all"}:
-            raise TelegramError("نوع چت باید private، group، channel، bot یا all باشد")
-        return self._run(self._list_chats(limit, kind=kind, query=query, sort=sort))
+        if kind not in {"private", "group", "supergroup", "channel", "bot", "all"}:
+            raise TelegramError(
+                "نوع چت باید private، group، supergroup، channel، bot یا all باشد"
+            )
+        sort = str(sort or "").lower()
+        if sort not in {"", "unread", "recent"}:
+            raise TelegramError("مرتب‌سازی باید recent یا unread باشد")
+        return self._run(
+            self._list_chats(max(1, int(limit or 30)), kind=kind, query=query, sort=sort)
+        )
 
     def send_message(self, chat: str | int, text: str) -> Message:
         if not isinstance(text, str) or not text:
@@ -276,7 +350,9 @@ class PersonalTelegram:
         return self._run(self._get_me())
 
     def search_contacts(self, query: str, limit: int = 30) -> list[dict[str, Any]]:
-        return self._run(self._search_contacts(query, limit))
+        return [item.to_dict() for item in self._run(
+            self._search_contacts(query, max(1, int(limit or 30)))
+        )]
 
     def get_chat_history(self, chat: str | int, limit: int = 30, offset_id: int = 0) -> list[Message]:
         return self._run(self._get_chat_history(chat, limit, offset_id))
@@ -318,7 +394,9 @@ class PersonalTelegram:
         return self._run(self._edit_message(chat, int(msg_id), text))
 
     def list_contacts(self, limit: int = 100) -> list[dict[str, Any]]:
-        return self._run(self._list_contacts(limit))
+        return [item.to_dict() for item in self._run(
+            self._list_contacts(max(1, int(limit or 100)))
+        )]
 
     def get_contact_info(self, contact: str | int) -> dict[str, Any]:
         return self._run(self._get_contact_info(contact))
@@ -408,7 +486,7 @@ class PersonalTelegram:
             # Session file is already valid — no re-login needed.
             self._login_state = "connected"
             self._connected = True
-            self._connected_at = datetime.now()
+            self._connected_at = datetime.now(UTC)
             me = await client.get_me()
             return {
                 "state": "connected",
@@ -461,7 +539,7 @@ class PersonalTelegram:
     async def _finish_login(self) -> dict[str, Any]:
         self._login_state = "connected"
         self._connected = True
-        self._connected_at = datetime.now()
+        self._connected_at = datetime.now(UTC)
         me = await self._get_me()
         return {
             "state": "connected",
@@ -496,24 +574,27 @@ class PersonalTelegram:
         result = await self._client.edit_message(entity, msg_id, text)
         return _message_from_telethon(result, chat_id=getattr(entity, "id", 0))
 
-    async def _list_contacts(self, limit: int) -> list[dict[str, Any]]:
-        out = []
-        async for user in self._client.iter_contacts(limit=max(1, limit)):
-            out.append({"id": int(user.id), "first_name": getattr(user, "first_name", "") or "",
-                        "last_name": getattr(user, "last_name", "") or "",
-                        "username": getattr(user, "username", "") or "",
-                        "phone": getattr(user, "phone", "") or "",
-                        "is_bot": bool(getattr(user, "bot", False))})
-        return out
+    async def _fetch_contacts(self) -> list[Contact]:
+        """Read the current contact list from Telegram; no application cache is used."""
+        from telethon.tl.functions.contacts import GetContactsRequest
+
+        try:
+            result = await self._client(GetContactsRequest(hash=0))
+        except Exception as exc:
+            raise TelegramError(f"دریافت مخاطبین از تلگرام ناموفق بود: {exc}") from exc
+        users = list(getattr(result, "users", ()) or ())
+        return [_contact_from_telethon(user) for user in users]
+
+    async def _list_contacts(self, limit: int) -> list[Contact]:
+        contacts = await self._fetch_contacts()
+        contacts.sort(key=lambda item: (_normalize_text(item.name), item.id))
+        return contacts[:max(1, limit)]
 
     async def _get_contact_info(self, contact) -> dict[str, Any]:
-        entity = await self._resolve_entity(contact)
-        return {"id": int(entity.id), "first_name": getattr(entity, "first_name", "") or "",
-                "last_name": getattr(entity, "last_name", "") or "",
-                "username": getattr(entity, "username", "") or "",
-                "phone": getattr(entity, "phone", "") or "",
-                "is_bot": bool(getattr(entity, "bot", False)),
-                "bio": getattr(entity, "about", "") or ""}
+        entity = await self._resolve_contact(contact)
+        info = _contact_from_telethon(entity).to_dict()
+        info["bio"] = str(getattr(entity, "about", "") or "")
+        return info
 
     async def _add_contact(self, phone: str, first_name: str, last_name: str) -> dict[str, Any]:
         from telethon.tl.functions.contacts import ImportContactsRequest
@@ -525,16 +606,16 @@ class PersonalTelegram:
 
     async def _delete_contact(self, contact) -> None:
         from telethon.tl.functions.contacts import DeleteContactsRequest
-        entity = await self._resolve_entity(contact)
+        entity = await self._resolve_contact(contact)
         await self._client(DeleteContactsRequest(id=[entity]))
 
     async def _block_user(self, contact) -> None:
         from telethon.tl.functions.contacts import BlockRequest
-        await self._client(BlockRequest(id=await self._resolve_entity(contact)))
+        await self._client(BlockRequest(id=await self._resolve_contact(contact)))
 
     async def _unblock_user(self, contact) -> None:
         from telethon.tl.functions.contacts import UnblockRequest
-        await self._client(UnblockRequest(id=await self._resolve_entity(contact)))
+        await self._client(UnblockRequest(id=await self._resolve_contact(contact)))
 
     async def _join_channel(self, channel) -> None:
         from telethon.tl.functions.channels import JoinChannelRequest
@@ -585,35 +666,46 @@ class PersonalTelegram:
         except Exception as exc:
             raise TelegramError(f"چت {target!r} پیدا نشد: {exc}") from exc
 
-    async def _list_chats(self, limit: int, *, kind: str = "all", query: str = "", sort: str = "") -> list[Chat]:
+    async def _list_chats(
+        self, limit: int, *, kind: str = "all", query: str = "", sort: str = ""
+    ) -> list[Chat]:
+        """Read live dialogs and apply filters before the result limit.
+
+        Filtered requests deliberately do not pass ``limit`` to Telethon's
+        dialog iterator.  Otherwise ``limit=30, kind=private`` would only
+        inspect the first 30 mixed dialogs and could return far fewer than
+        30 private conversations.  No dialog/message cache is consulted.
+        """
+        requested = max(1, int(limit))
+        normalized_query = _normalize_text(query).lstrip("@")
+        filtered = kind != "all" or bool(normalized_query)
+        # unread sorting needs every matching dialog to produce a true global order.
+        iterator_limit = None if filtered or sort == "unread" else requested
         chats: list[Chat] = []
-        async for dialog in self._client.iter_dialogs(limit=max(1, limit)):
-            entity = dialog.entity
-            title = getattr(entity, "title", None) or " ".join(
-                p for p in (getattr(entity, "first_name", "") or "", getattr(entity, "last_name", "") or "") if p
-            ) or "?"
-            username = getattr(entity, "username", None)
-            type_name = type(entity).__name__.lower()
-            is_channel = type_name == "channel" and not bool(getattr(entity, "megagroup", False))
-            is_group = bool(getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False)
-                            or getattr(entity, "is_group", False) or type_name == "chat")
-            is_bot = bool(type_name == "user" and getattr(entity, "bot", False))
-            is_private = bool(type_name == "user" and not is_bot)
-            chat = Chat(id=int(dialog.id), title=str(title), username=username, is_group=is_group,
-                        is_channel=is_channel, is_bot=is_bot, is_private=is_private,
-                        is_forum=bool(getattr(entity, "forum", False)),
-                        verified=bool(getattr(entity, "verified", False)),
-                        pinned=bool(getattr(dialog, "pinned", False)),
-                        last_message=((dialog.message.message or "")[:140] if dialog.message is not None else None),
-                        unread_count=int(dialog.unread_count or 0))
-            if kind != "all" and not getattr(chat, f"is_{kind}"):
+
+        async for dialog in self._client.iter_dialogs(limit=iterator_limit):
+            chat = _chat_from_dialog(dialog)
+            if not _chat_matches_kind(chat, kind):
                 continue
-            if query and str(query).lower() not in f"{chat.title} {chat.username or ''}".lower():
-                continue
+            if normalized_query:
+                searchable = _normalize_text(f"{chat.title} {chat.username or ''}")
+                if normalized_query not in searchable:
+                    continue
             chats.append(chat)
+            # Dialogs arrive newest-first.  Once enough filtered results are
+            # collected no older result can displace them, except unread sort.
+            if sort != "unread" and len(chats) >= requested:
+                break
+
         if sort == "unread":
-            chats.sort(key=lambda item: item.unread_count, reverse=True)
-        return chats[:max(1, limit)]
+            chats.sort(
+                key=lambda item: (
+                    item.unread_count,
+                    item.last_message_date or datetime.min.replace(tzinfo=UTC),
+                ),
+                reverse=True,
+            )
+        return chats[:requested]
 
     async def _send_message(self, chat, text: str) -> Message:
         entity = await self._resolve_entity(chat)
@@ -651,28 +743,50 @@ class PersonalTelegram:
             "phone": getattr(me, "phone", ""),
         }
 
-    async def _search_contacts(self, query: str, limit: int) -> list[dict[str, Any]]:
-        q = str(query or "").strip()
-        if not q:
+    async def _search_contacts(self, query: str, limit: int) -> list[Contact]:
+        normalized_query = _normalize_text(query).lstrip("@")
+        query_phones = _phone_variants(query)
+        if not normalized_query and not query_phones:
             raise TelegramError("عبارت جست‌وجوی مخاطب خالی است")
-        results: list[dict[str, Any]] = []
-        async for user in self._client.iter_contacts(limit=max(1, limit)):
-            name = " ".join(
-                p for p in (getattr(user, "first_name", ""), getattr(user, "last_name", "")) if p
-            )
-            username = getattr(user, "username", "") or ""
-            phone = getattr(user, "phone", "") or ""
-            haystack = f"{name} {username} {phone}".lower()
-            if q.lower() in haystack:
-                results.append({
-                    "id": user.id,
-                    "name": name,
-                    "username": username,
-                    "phone": phone,
-                })
-                if len(results) >= max(1, limit):
-                    break
-        return results
+
+        matches: list[tuple[int, Contact]] = []
+        for contact in await self._fetch_contacts():
+            name = _normalize_text(contact.name)
+            username = _normalize_text(contact.username).lstrip("@")
+            phones = _phone_variants(contact.phone)
+            exact = normalized_query in {name, username} or bool(query_phones & phones)
+            partial = (
+                bool(normalized_query)
+                and (normalized_query in name or normalized_query in username)
+            ) or any(q in p or p in q for q in query_phones for p in phones)
+            if exact or partial:
+                matches.append((0 if exact else 1, contact))
+
+        matches.sort(key=lambda pair: (pair[0], _normalize_text(pair[1].name), pair[1].id))
+        return [contact for _, contact in matches[:max(1, limit)]]
+
+    async def _resolve_contact(self, target):
+        """Resolve a contact against a fresh Telegram contact snapshot."""
+        if isinstance(target, int) or str(target).strip().lstrip("-").isdigit():
+            return await self._client.get_entity(int(target))
+        query = _normalize_text(target).lstrip("@")
+        phone_query = _phone_variants(target)
+        exact = []
+        partial = []
+        for contact in await self._fetch_contacts():
+            values = {_normalize_text(contact.name), _normalize_text(contact.username).lstrip("@")}
+            phone_match = bool(phone_query & _phone_variants(contact.phone))
+            if query in values or phone_match:
+                exact.append(contact)
+            elif query and any(query in value for value in values if value):
+                partial.append(contact)
+        candidates = exact or partial
+        if not candidates:
+            raise TelegramError(f"مخاطب {target!r} پیدا نشد")
+        if len(candidates) > 1:
+            ids = "، ".join(str(item.id) for item in candidates[:5])
+            raise TelegramError(f"نام مخاطب «{target}» مبهم است؛ شناسه‌های مطابق: {ids}")
+        return await self._client.get_entity(candidates[0].id)
 
     async def _get_chat_history(self, chat, limit: int, offset_id: int) -> list[Message]:
         entity = await self._resolve_entity(chat)
@@ -785,6 +899,127 @@ class PersonalTelegram:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+_DIGIT_TRANSLATION = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+_TEXT_TRANSLATION = str.maketrans({"ي": "ی", "ى": "ی", "ك": "ک", "ة": "ه", "ۀ": "ه"})
+
+
+def _normalize_text(value: Any) -> str:
+    """Normalize Persian/Arabic text, digits, whitespace and zero-width marks."""
+    text = unicodedata.normalize("NFKC", str(value or "")).translate(_DIGIT_TRANSLATION)
+    text = text.translate(_TEXT_TRANSLATION).replace("\u200c", " ").replace("\u200f", " ")
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return " ".join(text.casefold().split())
+
+
+def _phone_variants(value: Any) -> set[str]:
+    normalized = _normalize_text(value)
+    # Do not interpret digits embedded in a person's name/username as a phone query.
+    if any(ch.isalpha() for ch in normalized):
+        return set()
+    digits = "".join(ch for ch in normalized if ch.isdigit())
+    if not digits:
+        return set()
+    variants = {digits}
+    if digits.startswith("00"):
+        variants.add(digits[2:])
+    if digits.startswith("09") and len(digits) == 11:
+        variants.add("98" + digits[1:])
+    if digits.startswith("98") and len(digits) == 12:
+        variants.add("0" + digits[2:])
+    return variants
+
+
+def _contact_from_telethon(user: Any) -> Contact:
+    status_obj = getattr(user, "status", None)
+    status_name = type(status_obj).__name__.removeprefix("UserStatus").lower() if status_obj else "unknown"
+    last_seen = getattr(status_obj, "was_online", None)
+    return Contact(
+        id=int(user.id),
+        first_name=str(getattr(user, "first_name", "") or ""),
+        last_name=str(getattr(user, "last_name", "") or ""),
+        username=str(getattr(user, "username", "") or ""),
+        phone=str(getattr(user, "phone", "") or ""),
+        is_contact=bool(getattr(user, "contact", True)),
+        is_mutual_contact=bool(getattr(user, "mutual_contact", False)),
+        is_bot=bool(getattr(user, "bot", False)),
+        verified=bool(getattr(user, "verified", False)),
+        deleted=bool(getattr(user, "deleted", False)),
+        status=status_name,
+        last_seen=last_seen,
+    )
+
+
+def _dialog_folder_id(dialog: Any) -> int | None:
+    value = getattr(dialog, "folder_id", None)
+    if value is None:
+        value = getattr(getattr(dialog, "dialog", None), "folder_id", None)
+    return int(value) if value is not None else None
+
+
+def _dialog_is_muted(dialog: Any) -> bool:
+    settings = getattr(dialog, "notify_settings", None)
+    if settings is None:
+        settings = getattr(getattr(dialog, "dialog", None), "notify_settings", None)
+    mute_until = getattr(settings, "mute_until", None)
+    if mute_until is None:
+        return False
+    if isinstance(mute_until, datetime):
+        now = datetime.now(mute_until.tzinfo or UTC)
+        return mute_until > now
+    return bool(mute_until)
+
+
+def _chat_from_dialog(dialog: Any) -> Chat:
+    entity = dialog.entity
+    title = getattr(entity, "title", None) or " ".join(
+        part for part in (
+            getattr(entity, "first_name", "") or "",
+            getattr(entity, "last_name", "") or "",
+        ) if part
+    ) or str(dialog.id)
+    type_name = type(entity).__name__.lower()
+    is_bot = bool(getattr(entity, "bot", False))
+    is_supergroup = bool(getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False))
+    is_channel_entity = type_name == "channel" or hasattr(entity, "broadcast")
+    is_channel = bool(is_channel_entity and not is_supergroup)
+    is_basic_group = bool(type_name == "chat" or getattr(entity, "is_group", False))
+    is_group = bool(is_basic_group or is_supergroup)
+    is_private = bool(not is_bot and not is_group and not is_channel)
+    message = getattr(dialog, "message", None)
+    message_text = getattr(message, "message", None) if message is not None else None
+    message_date = getattr(message, "date", None) or getattr(dialog, "date", None)
+    folder_id = _dialog_folder_id(dialog)
+    members = getattr(entity, "participants_count", None)
+    return Chat(
+        id=int(dialog.id),
+        title=str(title),
+        username=getattr(entity, "username", None),
+        is_group=is_group,
+        is_channel=is_channel,
+        is_bot=is_bot,
+        is_private=is_private,
+        is_supergroup=is_supergroup,
+        is_forum=bool(getattr(entity, "forum", False)),
+        verified=bool(getattr(entity, "verified", False)),
+        pinned=bool(getattr(dialog, "pinned", False)),
+        muted=_dialog_is_muted(dialog),
+        archived=folder_id == 1,
+        folder_id=folder_id,
+        members_count=int(members) if members is not None else None,
+        last_message=(str(message_text)[:140] if message_text else None),
+        last_message_date=message_date,
+        unread_count=int(getattr(dialog, "unread_count", 0) or 0),
+    )
+
+
+def _chat_matches_kind(chat: Chat, kind: str) -> bool:
+    if kind == "all":
+        return True
+    if kind == "group":
+        return chat.is_group
+    return bool(getattr(chat, f"is_{kind}", False))
 
 
 def _message_from_telethon(msg, *, chat_id: int) -> Message:

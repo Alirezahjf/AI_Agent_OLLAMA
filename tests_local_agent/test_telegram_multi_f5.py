@@ -252,7 +252,11 @@ def test_f5_tools_run_and_report(tmp_path: Path) -> None:
     handlers = _handlers_with_fakes(_two_account_settings(tmp_path, tmp_path))
     ctx = handlers.context
 
-    assert "bob" in run_action(handlers.registry, "telegram.search_contacts", {"query": "bo"}, ctx)
+    contact_result = run_action(
+        handlers.registry, "telegram.search_contacts", {"query": "bo"}, ctx
+    )
+    assert "bob" in contact_result
+    assert "id=5" in contact_result
     assert "hi" in run_action(handlers.registry, "telegram.get_chat_history", {"chat": "Alice"}, ctx)
     assert "ali" in run_action(handlers.registry, "telegram.get_profile", {"chat": "Alice"}, ctx)
     dl = run_action(handlers.registry, "telegram.download_media",
@@ -274,6 +278,19 @@ def test_f5_tools_run_and_report(tmp_path: Path) -> None:
                                     {"chat": "Alice", "msg_id": 2, "text": "پاسخ"}, ctx)
     assert "انتقال یافت" in run_action(handlers.registry, "telegram.forward_message",
                                        {"chat": "Bob", "from_chat": "Alice", "msg_id": 2}, ctx)
+
+
+def test_contact_search_can_target_a_non_active_account(tmp_path: Path) -> None:
+    handlers = _handlers_with_fakes(_two_account_settings(tmp_path, tmp_path))
+    result = run_action(
+        handlers.registry,
+        "telegram.search_contacts",
+        {"query": "bo", "account": "کار"},
+        handlers.context,
+    )
+    assert "bob" in result
+    assert handlers._telegram_accounts["کار"].calls == ["search_contacts:کار"]
+    assert handlers._telegram_accounts["اصلی"].calls == []
 
 
 def test_f5_risk_levels(tmp_path: Path) -> None:
