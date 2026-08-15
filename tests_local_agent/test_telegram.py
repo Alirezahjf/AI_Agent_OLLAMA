@@ -23,6 +23,7 @@ from local_agent.telegram.client import (
     _entity_summary,
     _get_full_entity,
     _message_from_telethon,
+    _translate_telegram_error,
 )
 
 # ---------------------------------------------------------------------------
@@ -106,6 +107,12 @@ class _FakeTelegramClient:
             _FakeUser(102, "Sara", "sara", "Ahmadi", "+989351111111"),
         ]
         self.contact_requests = 0
+        self.dialog_requests = 0
+        self.dialog_failures = 0
+        self.dialog_error: Exception = ConnectionError("temporary network failure")
+        self.send_calls = 0
+        self.send_error: Exception | None = None
+        self.download_error: Exception | None = None
 
     async def connect(self) -> None:
         self.connected = True
@@ -148,6 +155,10 @@ class _FakeTelegramClient:
         raise RuntimeError(f"cannot find {target}")
 
     async def iter_dialogs(self, limit=None):
+        self.dialog_requests += 1
+        if self.dialog_failures:
+            self.dialog_failures -= 1
+            raise self.dialog_error
         dialogs = self.dialogs if limit is None else self.dialogs[:limit]
         for dialog in dialogs:
             yield dialog
@@ -164,6 +175,9 @@ class _FakeTelegramClient:
         raise AssertionError(f"unexpected Telegram request: {type(request).__name__}")
 
     async def send_message(self, entity, text: str) -> _FakeMessage:
+        self.send_calls += 1
+        if self.send_error is not None:
+            raise self.send_error
         self.sent.append((entity, text))
         return _FakeMessage(99, text, out=True)
 
@@ -180,6 +194,8 @@ class _FakeTelegramClient:
             yield message
 
     async def download_media(self, message, file: str):
+        if self.download_error is not None:
+            raise self.download_error
         target_dir = Path(file)
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"message_{message.id}.bin"
@@ -659,6 +675,22 @@ def test_full_entity_requests_cover_users_groups_and_channels() -> None:
     assert requests == ["GetFullUserRequest", "GetFullChatRequest", "GetFullChannelRequest"]
 
 
+def test_batch_download_does_not_hide_network_failure(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    photo = _FakeMessage(30, "photo")
+    photo.media = object()
+    photo.photo = object()
+    patched_telethon.search_results = [photo]
+    patched_telethon.download_error = ConnectionError("secret endpoint")
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    with pytest.raises(TelegramError) as excinfo:
+        client.download_media_batch("Alice", tmp_path / "media")
+    assert excinfo.value.code == "network"
+    assert "secret endpoint" not in str(excinfo.value)
+
+
 def test_chat_pagination_archive_and_unread_filters_are_applied_live(
     patched_telethon: _FakeTelegramClient, tmp_path: Path
 ) -> None:
@@ -736,6 +768,90 @@ def test_batch_media_download_filters_types(
     )
     assert [path.name for path in paths] == ["message_20.bin"]
     assert paths[0].is_file()
+
+
+@pytest.mark.parametrize(
+    ("exception_name", "code"),
+    [
+        ("SessionRevokedError", "session_revoked"),
+        ("AuthKeyUnregisteredError", "session_revoked"),
+        ("UserDeactivatedBanError", "account_restricted"),
+        ("UserPrivacyRestrictedError", "privacy_restricted"),
+        ("ChatAdminRequiredError", "admin_required"),
+        ("ChatWriteForbiddenError", "write_forbidden"),
+        ("PeerIdInvalidError", "peer_invalid"),
+        ("UsernameNotOccupiedError", "peer_invalid"),
+        ("MessageIdInvalidError", "message_invalid"),
+        ("FileReferenceExpiredError", "media_invalid"),
+    ],
+)
+def test_telegram_error_matrix(exception_name: str, code: str) -> None:
+    exc = type(exception_name, (Exception,), {})("sensitive raw payload")
+    error = _translate_telegram_error(exc)
+    assert error.code == code
+    assert "sensitive raw payload" not in str(error)
+    assert error.to_dict()["code"] == code
+
+
+def test_flood_wait_network_timeout_and_unknown_errors_are_structured() -> None:
+    flood = type("FloodWaitError", (Exception,), {"seconds": 17})("raw")
+    flood_error = _translate_telegram_error(flood)
+    assert flood_error.code == "flood_wait"
+    assert flood_error.retry_after == 17
+    assert flood_error.retryable is False
+    assert _translate_telegram_error(ConnectionError("secret host")).code == "network"
+    assert _translate_telegram_error(TimeoutError()).code == "timeout"
+    unknown = _translate_telegram_error(Exception("secret-token"))
+    assert unknown.code == "telegram_error"
+    assert "secret-token" not in str(unknown)
+
+
+def test_live_reads_retry_one_transient_failure_only(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialog_failures = 1
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    assert client.list_chats(limit=10)
+    assert patched_telethon.dialog_requests == 2
+    assert client.last_error == "" and client.last_error_code == ""
+
+
+def test_flood_wait_is_not_retried_automatically(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialog_failures = 2
+    patched_telethon.dialog_error = type("FloodWaitError", (Exception,), {"seconds": 9})("raw")
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    with pytest.raises(TelegramError) as excinfo:
+        client.list_chats(limit=10)
+    assert excinfo.value.code == "flood_wait"
+    assert patched_telethon.dialog_requests == 1
+    assert client.last_error_code == "flood_wait"
+
+
+def test_destructive_send_is_never_automatically_retried(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.send_error = ConnectionError("temporary")
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    with pytest.raises(TelegramError) as excinfo:
+        client.send_message("Alice", "hello")
+    assert excinfo.value.code == "network"
+    assert patched_telethon.send_calls == 1
+
+
+def test_operation_timeout_is_cancelled_and_structured(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    with pytest.raises(TelegramError) as excinfo:
+        client._run(asyncio.sleep(0.05), timeout=0)
+    assert excinfo.value.code == "timeout"
+    assert excinfo.value.retryable is True
 
 
 # ---------------------------------------------------------------------------

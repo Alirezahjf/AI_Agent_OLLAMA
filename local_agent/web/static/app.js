@@ -624,7 +624,11 @@
         const response = await fetch(path, Object.assign({ headers: { "Content-Type": "application/json" } }, options || {}));
         if (!response.ok) {
           let detail = "HTTP " + response.status;
-          try { const body = await response.json(); detail = body.detail || body.message || detail; } catch (_) { /* plain response */ }
+          try {
+            const body = await response.json();
+            const payload = body.detail || body;
+            detail = (payload && (payload.message || payload.detail)) || (typeof payload === "string" ? payload : detail);
+          } catch (_) { /* plain response */ }
           throw new Error(detail);
         }
         return response.json();

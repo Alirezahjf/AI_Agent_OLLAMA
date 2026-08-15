@@ -486,6 +486,7 @@ class BridgeHandlers:
                     self._publish_telegram_state()
                 except Exception as exc:  # noqa: BLE001 - status is user-facing
                     client._last_error = "اتصال خودکار تلگرام ناموفق بود؛ فیلترشکن/VPN و اینترنت را بررسی کنید"
+                    client._last_error_code = "network"
                     logger.debug("telegram auto-connect failed for %s: %s", name, type(exc).__name__)
                     self._publish_telegram_state()
         for name, client in candidates:
@@ -511,7 +512,7 @@ class BridgeHandlers:
                     try:
                         client.disconnect()
                     except Exception as exc:  # noqa: BLE001 - best-effort teardown
-                        logger.debug("telegram disconnect failed: %s", exc)
+                        logger.debug("telegram disconnect failed: %s", type(exc).__name__)
 
         # Create missing enabled accounts.
         for name, acc in desired.items():
@@ -651,6 +652,7 @@ class BridgeHandlers:
             "connected_at": (getattr(client, "connected_at", None).isoformat()
                              if getattr(client, "connected_at", None) else None),
             "last_error": getattr(client, "last_error", "") if client else "",
+            "last_error_code": getattr(client, "last_error_code", "") if client else "",
             "has_credentials": bool(acc.api_id and acc.api_hash and acc.phone),
             "confirm_send": bool(acc.confirm_send),
         }
@@ -727,7 +729,8 @@ class BridgeHandlers:
         if not confirmed:
             raise AssistantError("حذف اکانت خطرناک است؛ برای تأیید confirmed=true بفرستید")
         tg = self.settings.telegram
-        account = tg.account(name)
+        if not any(account.name == name for account in tg.accounts):
+            raise AssistantError(f"اکانت تلگرام «{name}» وجود ندارد")
         session = self.settings.telegram_session_path_for(name)
         client = self._telegram_accounts.pop(name, None)
         if client is not None:
@@ -766,13 +769,13 @@ class BridgeHandlers:
         name, client = self._account_client(account)
         try:
             result = client.start_login()
-        except TelegramError as exc:
-            raise AssistantError(str(exc)) from exc
+        except TelegramError:
+            raise
         except Exception as exc:
             if _is_telegram_network_error(exc):
-                logger.warning("telegram start_login network failure: %s", exc)
+                logger.warning("telegram start_login network failure: %s", type(exc).__name__)
                 raise AssistantError(_TELEGRAM_NETWORK_HINT) from exc
-            logger.warning("telegram start_login failed: %s", exc)
+            logger.warning("telegram start_login failed: %s", type(exc).__name__)
             raise AssistantError(
                 "اتصال به سرور تلگرام ممکن نشد؛ اتصال اینترنت را بررسی کنید "
                 "(در صورت نیاز فیلترشکن) و دوباره تلاش کنید."
@@ -790,13 +793,13 @@ class BridgeHandlers:
             raise AssistantError("اتصال تلگرام شروع نشده است؛ دوباره دکمهٔ اتصال را بزنید")
         try:
             result = client.submit_code(code)
-        except TelegramError as exc:
-            raise AssistantError(str(exc)) from exc
+        except TelegramError:
+            raise
         except Exception as exc:
             if _is_telegram_network_error(exc):
-                logger.warning("telegram submit_code network failure: %s", exc)
+                logger.warning("telegram submit_code network failure: %s", type(exc).__name__)
                 raise AssistantError(_TELEGRAM_NETWORK_HINT) from exc
-            logger.warning("telegram submit_code failed: %s", exc)
+            logger.warning("telegram submit_code failed: %s", type(exc).__name__)
             raise AssistantError(
                 "ارسال کد به سرور تلگرام ناموفق بود؛ اتصال اینترنت را بررسی کنید."
             ) from exc
@@ -812,13 +815,13 @@ class BridgeHandlers:
             raise AssistantError("اتصال تلگرام شروع نشده است؛ دوباره دکمهٔ اتصال را بزنید")
         try:
             result = client.submit_password(password)
-        except TelegramError as exc:
-            raise AssistantError(str(exc)) from exc
+        except TelegramError:
+            raise
         except Exception as exc:
             if _is_telegram_network_error(exc):
-                logger.warning("telegram submit_password network failure: %s", exc)
+                logger.warning("telegram submit_password network failure: %s", type(exc).__name__)
                 raise AssistantError(_TELEGRAM_NETWORK_HINT) from exc
-            logger.warning("telegram submit_password failed: %s", exc)
+            logger.warning("telegram submit_password failed: %s", type(exc).__name__)
             raise AssistantError(
                 "ارسال رمز 2FA به سرور تلگرام ناموفق بود؛ اتصال اینترنت را بررسی کنید."
             ) from exc
@@ -836,13 +839,13 @@ class BridgeHandlers:
         name, client = self._account_client(account)
         try:
             message = client.connect(code_callback=code_callback, password_callback=password_callback)
-        except TelegramError as exc:
-            raise AssistantError(str(exc)) from exc
+        except TelegramError:
+            raise
         except Exception as exc:
             if _is_telegram_network_error(exc):
-                logger.warning("telegram connect network failure: %s", exc)
+                logger.warning("telegram connect network failure: %s", type(exc).__name__)
                 raise AssistantError(_TELEGRAM_NETWORK_HINT) from exc
-            logger.warning("telegram connect failed: %s", exc)
+            logger.warning("telegram connect failed: %s", type(exc).__name__)
             raise AssistantError(
                 "اتصال به سرور تلگرام ممکن نشد؛ اتصال اینترنت را بررسی کنید "
                 "(در صورت نیاز فیلترشکن) و دوباره تلاش کنید."
@@ -858,7 +861,7 @@ class BridgeHandlers:
             try:
                 client.disconnect()
             except Exception as exc:  # noqa: BLE001 - best-effort teardown
-                logger.debug("telegram disconnect failed: %s", exc)
+                logger.debug("telegram disconnect failed: %s", type(exc).__name__)
         self._publish_telegram_state()
         return self.telegram_status(name)
 

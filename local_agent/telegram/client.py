@@ -12,7 +12,9 @@ import json
 import os
 import re
 import threading
+import time
 import unicodedata
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,7 +27,24 @@ logger = get_logger("telegram")
 
 
 class TelegramError(AssistantError):
-    """A user-facing failure from the personal Telegram client."""
+    """Structured, safe and user-facing Telegram failure."""
+
+    def __init__(
+        self, message: str, *, code: str = "telegram_error", retryable: bool = False,
+        retry_after: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+        self.retry_after = retry_after
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": str(self),
+            "retryable": self.retryable,
+            "retry_after": self.retry_after,
+        }
 
 
 @dataclass
@@ -213,6 +232,7 @@ class PersonalTelegram:
         self._manual_disconnect = False
         self._connected_at: datetime | None = None
         self._last_error = ""
+        self._last_error_code = ""
         # Stepwise login state machine:
         #   disconnected -> await_code -> await_2fa -> connected
         self._login_state = "disconnected"
@@ -241,6 +261,10 @@ class PersonalTelegram:
         return self._last_error
 
     @property
+    def last_error_code(self) -> str:
+        return self._last_error_code
+
+    @property
     def manual_disconnect(self) -> bool:
         return self._manual_disconnect
 
@@ -255,6 +279,7 @@ class PersonalTelegram:
         """Begin login; a valid session skips the code step."""
         self._manual_disconnect = False
         self._last_error = ""
+        self._last_error_code = ""
         with self._lock:
             if self._connected:
                 return {"state": "connected", "message": "already connected"}
@@ -263,7 +288,7 @@ class PersonalTelegram:
             self._start_loop()
             assert self._loop is not None
             future = asyncio.run_coroutine_threadsafe(self._begin_login(), self._loop)
-            return future.result(timeout=180)
+            return self._await_future(future, timeout=180)
 
     def submit_code(self, code: str) -> dict[str, Any]:
         """Submit the SMS code received after :meth:`start_login`."""
@@ -276,7 +301,7 @@ class PersonalTelegram:
             future = asyncio.run_coroutine_threadsafe(
                 self._submit_code(str(code or "").strip()), self._loop
             )
-            return future.result(timeout=120)
+            return self._await_future(future, timeout=120)
 
     def submit_password(self, password: str) -> dict[str, Any]:
         """Submit the 2FA password when the code was accepted but 2FA is on."""
@@ -289,7 +314,7 @@ class PersonalTelegram:
             future = asyncio.run_coroutine_threadsafe(
                 self._submit_password(str(password)), self._loop
             )
-            return future.result(timeout=120)
+            return self._await_future(future, timeout=120)
 
     def cancel_login(self) -> None:
         """Abort an in-progress login and close the temporary session."""
@@ -300,7 +325,7 @@ class PersonalTelegram:
                 try:
                     future.result(timeout=15)
                 except Exception as exc:  # noqa: BLE001 - best-effort teardown
-                    logger.debug("login abort failed: %s", exc)
+                    logger.debug("login abort failed: %s", type(exc).__name__)
             self._login_state = "disconnected"
             self._login_ctx = {}
 
@@ -336,7 +361,7 @@ class PersonalTelegram:
             try:
                 future.result(timeout=15)
             except Exception as exc:  # noqa: BLE001 - best-effort teardown
-                logger.debug("disconnect failed: %s", exc)
+                logger.debug("disconnect failed: %s", type(exc).__name__)
             self._login_state = "disconnected"
             self._login_ctx = {}
 
@@ -349,18 +374,17 @@ class PersonalTelegram:
         kind = str(kind or "all").lower()
         if kind not in {"private", "group", "supergroup", "channel", "bot", "all"}:
             raise TelegramError(
-                "نوع چت باید private، group، supergroup، channel، bot یا all باشد"
+                "نوع چت باید private، group، supergroup، channel، bot یا all باشد",
+                code="invalid_input",
             )
         sort = str(sort or "").lower()
         if sort not in {"", "unread", "recent"}:
-            raise TelegramError("مرتب‌سازی باید recent یا unread باشد")
-        return self._run(
-            self._list_chats(
+            raise TelegramError("مرتب‌سازی باید recent یا unread باشد", code="invalid_input")
+        return self._run_read(lambda: self._list_chats(
                 max(1, int(limit or 30)), kind=kind, query=query, sort=sort,
                 offset=max(0, int(offset or 0)), archived=archived,
                 unread_only=bool(unread_only),
-            )
-        )
+            ))
 
     def send_message(self, chat: str | int, text: str) -> Message:
         if not isinstance(text, str) or not text:
@@ -370,37 +394,37 @@ class PersonalTelegram:
     def send_photo(self, chat: str | int, path: str | os.PathLike, caption: str = "") -> Message:
         target = Path(path).expanduser()
         if not target.is_file():
-            raise TelegramError(f"photo does not exist: {target}")
+            raise TelegramError(f"تصویر پیدا نشد: {target}", code="local_file_missing")
         return self._run(self._send_file(chat, target, caption=caption, is_photo=True))
 
     def send_file(self, chat: str | int, path: str | os.PathLike, caption: str = "") -> Message:
         target = Path(path).expanduser()
         if not target.is_file():
-            raise TelegramError(f"file does not exist: {target}")
+            raise TelegramError(f"فایل پیدا نشد: {target}", code="local_file_missing")
         return self._run(self._send_file(chat, target, caption=caption, is_photo=False))
 
     def search_messages(self, chat: str | int, query: str, limit: int = 30) -> list[Message]:
-        return self._run(self._search_messages(chat, query, limit))
+        return self._run_read(lambda: self._search_messages(chat, query, limit))
 
     def get_me(self) -> dict[str, Any]:
-        return self._run(self._get_me())
+        return self._run_read(self._get_me)
 
     def search_contacts(self, query: str, limit: int = 30) -> list[dict[str, Any]]:
-        return [item.to_dict() for item in self._run(
-            self._search_contacts(query, max(1, int(limit or 30)))
+        return [item.to_dict() for item in self._run_read(
+            lambda: self._search_contacts(query, max(1, int(limit or 30)))
         )]
 
     def get_chat_history(self, chat: str | int, limit: int = 30, offset_id: int = 0) -> list[Message]:
-        return self._run(self._get_chat_history(chat, limit, offset_id))
+        return self._run_read(lambda: self._get_chat_history(chat, limit, offset_id))
 
     def get_profile(self, chat: str | int, media_dir: Path) -> dict[str, Any]:
-        return self._run(self._get_profile(chat, media_dir))
+        return self._run_read(lambda: self._get_profile(chat, media_dir))
 
     def send_media(self, chat: str | int, path: str | os.PathLike, caption: str = "",
                    *, kind: str = "document") -> Message:
         target = Path(path).expanduser()
         if not target.is_file():
-            raise TelegramError(f"فایل پیدا نشد: {target}")
+            raise TelegramError(f"فایل پیدا نشد: {target}", code="local_file_missing")
         return self._run(self._send_media(chat, target, caption=caption, kind=kind))
 
     def send_location(self, chat: str | int, lat: float, lng: float) -> Message:
@@ -421,42 +445,42 @@ class PersonalTelegram:
         self._run(self._mark_read(chat))
 
     def resolve_username(self, username: str) -> dict[str, Any]:
-        return self._run(self._resolve_username(username))
+        return self._run_read(lambda: self._resolve_username(username))
 
     def resolve_target(self, target: str | int) -> dict[str, Any]:
         """Resolve an ID, username, phone or display name using live Telegram data."""
-        return self._run(self._resolve_target(target))
+        return self._run_read(lambda: self._resolve_target(target))
 
     def get_statistics(self) -> dict[str, Any]:
-        return self._run(self._get_statistics())
+        return self._run_read(self._get_statistics)
 
     def list_unread_chats(self, limit: int = 30) -> list[Chat]:
-        return self._run(self._list_unread_chats(max(1, int(limit or 30))))
+        return self._run_read(lambda: self._list_unread_chats(max(1, int(limit or 30))))
 
     def get_chat_statistics(self, chat: str | int, limit: int = 500) -> dict[str, Any]:
-        return self._run(self._get_chat_statistics(chat, max(1, min(int(limit or 500), 5000))))
+        return self._run_read(lambda: self._get_chat_statistics(chat, max(1, min(int(limit or 500), 5000))))
 
     def export_chat(
         self, chat: str | int, output_dir: Path, *, fmt: str = "json", limit: int = 1000
     ) -> Path:
         fmt = str(fmt or "json").lower()
         if fmt not in {"json", "txt"}:
-            raise TelegramError("فرمت خروجی باید json یا txt باشد")
-        return self._run(
-            self._export_chat(chat, output_dir, fmt=fmt, limit=max(1, min(int(limit), 5000)))
+            raise TelegramError("فرمت خروجی باید json یا txt باشد", code="invalid_input")
+        return self._run_read(
+            lambda: self._export_chat(chat, output_dir, fmt=fmt, limit=max(1, min(int(limit), 5000)))
         )
 
     def download_media_batch(
         self, chat: str | int, media_dir: Path, *, limit: int = 100,
         media_types: list[str] | None = None,
     ) -> list[Path]:
-        return self._run(self._download_media_batch(
+        return self._run_read(lambda: self._download_media_batch(
             chat, media_dir, limit=max(1, min(int(limit), 500)),
             media_types=media_types or [],
         ))
 
     def refresh_summary(self) -> dict[str, Any]:
-        return self._run(self._refresh_summary())
+        return self._run_read(self._refresh_summary)
 
     def delete_message(self, chat: str | int, msg_id: int) -> None:
         self._run(self._delete_message(chat, int(msg_id)))
@@ -465,8 +489,8 @@ class PersonalTelegram:
         return self._run(self._edit_message(chat, int(msg_id), text))
 
     def list_contacts(self, limit: int = 100) -> list[dict[str, Any]]:
-        return [item.to_dict() for item in self._run(
-            self._list_contacts(max(1, int(limit or 100)))
+        return [item.to_dict() for item in self._run_read(
+            lambda: self._list_contacts(max(1, int(limit or 100)))
         )]
 
     def get_contact_info(self, contact: str | int) -> dict[str, Any]:
@@ -528,13 +552,75 @@ class PersonalTelegram:
         ready_evt.wait(timeout=10)
         self._loop = loop_holder["loop"]
 
-    def _run(self, coro):
+    def _await_future(self, future, *, timeout: int):
+        try:
+            result = future.result(timeout=timeout)
+            self._last_error = ""
+            self._last_error_code = ""
+            return result
+        except FutureTimeoutError as exc:
+            future.cancel()
+            error = TelegramError(
+                "پاسخ تلگرام بیش از حد طول کشید؛ دوباره تلاش کنید",
+                code="timeout", retryable=True,
+            )
+            self._last_error = str(error)
+            self._last_error_code = error.code
+            raise error from exc
+        except Exception as exc:
+            error = _translate_telegram_error(exc)
+            self._last_error = str(error)
+            self._last_error_code = error.code
+            if error is exc:
+                raise
+            raise error from exc
+
+    def _run(self, coro, *, timeout: int = 120):
         if not self._connected:
             coro.close()  # avoid 'coroutine was never awaited' warnings
-            raise TelegramError("telegram client is not connected; call connect() first")
+            error = TelegramError(
+                "تلگرام شخصی متصل نیست؛ ابتدا اتصال اکانت را برقرار کنید",
+                code="not_connected",
+            )
+            self._last_error = str(error)
+            self._last_error_code = error.code
+            raise error
         assert self._loop is not None
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=120)
+        try:
+            result = future.result(timeout=timeout)
+            self._last_error = ""
+            self._last_error_code = ""
+            return result
+        except FutureTimeoutError as exc:
+            future.cancel()
+            error = TelegramError(
+                "پاسخ تلگرام بیش از حد طول کشید؛ دوباره تلاش کنید",
+                code="timeout", retryable=True,
+            )
+            self._last_error = str(error)
+            self._last_error_code = error.code
+            raise error from exc
+        except Exception as exc:
+            error = _translate_telegram_error(exc)
+            self._last_error = str(error)
+            self._last_error_code = error.code
+            if error is exc:
+                raise
+            raise error from exc
+
+    def _run_read(self, factory, *, retries: int = 1, timeout: int = 120):
+        """Run an idempotent live read with one bounded transient retry."""
+        attempt = 0
+        while True:
+            try:
+                return self._run(factory(), timeout=timeout)
+            except TelegramError as exc:
+                if attempt >= retries or not exc.retryable or exc.code == "flood_wait":
+                    raise
+                attempt += 1
+                logger.info("retrying Telegram read after transient %s (%s/%s)", exc.code, attempt, retries)
+                time.sleep(min(0.25 * attempt, 0.5))
 
     # -------------------------------------------------------- Async core
 
@@ -590,7 +676,7 @@ class PersonalTelegram:
                 }
             if "PhoneCodeInvalidError" in type(sign_in_exc).__name__:
                 raise TelegramError("کد واردشده صحیح نیست؛ دوباره تلاش کنید")
-            raise TelegramError(f"ورود ناموفق بود: {sign_in_exc}") from sign_in_exc
+            raise _translate_telegram_error(sign_in_exc) from sign_in_exc
         return await self._finish_login()
 
     async def _submit_password(self, password: str) -> dict[str, Any]:
@@ -604,7 +690,7 @@ class PersonalTelegram:
         except Exception as sign_in_exc:
             if "PasswordHashInvalidError" in type(sign_in_exc).__name__:
                 raise TelegramError("رمز 2FA صحیح نیست؛ دوباره تلاش کنید")
-            raise TelegramError(f"ورود با رمز 2FA ناموفق بود: {sign_in_exc}") from sign_in_exc
+            raise _translate_telegram_error(sign_in_exc) from sign_in_exc
         return await self._finish_login()
 
     async def _finish_login(self) -> dict[str, Any]:
@@ -623,7 +709,7 @@ class PersonalTelegram:
             try:
                 await self._client.disconnect()
             except Exception as exc:  # noqa: BLE001 - best-effort teardown
-                logger.debug("abort disconnect failed: %s", exc)
+                logger.debug("abort disconnect failed: %s", type(exc).__name__)
             self._client = None
             self._connected = False
 
@@ -649,10 +735,7 @@ class PersonalTelegram:
         """Read the current contact list from Telegram; no application cache is used."""
         from telethon.tl.functions.contacts import GetContactsRequest
 
-        try:
-            result = await self._client(GetContactsRequest(hash=0))
-        except Exception as exc:
-            raise TelegramError(f"دریافت مخاطبین از تلگرام ناموفق بود: {exc}") from exc
+        result = await self._client(GetContactsRequest(hash=0))
         users = list(getattr(result, "users", ()) or ())
         return [_contact_from_telethon(user) for user in users]
 
@@ -755,23 +838,38 @@ class PersonalTelegram:
             if len(matches) == 1:
                 return matches[0].entity
             if len(matches) > 1:
-                raise TelegramError(_ambiguous_target_message(cleaned, matches))
+                raise TelegramError(_ambiguous_target_message(cleaned, matches), code="target_ambiguous")
             try:
                 return await self._client.get_entity(cleaned)
             except Exception as exc:
-                raise TelegramError(f"شماره «{cleaned}» در تلگرام پیدا نشد: {exc}") from exc
+                error = _translate_telegram_error(exc)
+                if error.code not in {"peer_invalid", "rpc_error", "telegram_error"}:
+                    raise error from exc
+                raise TelegramError(
+                    f"شماره «{cleaned}» در تلگرام پیدا نشد", code="peer_invalid"
+                ) from exc
 
         if isinstance(target, int) or cleaned.lstrip("-").isdigit():
             try:
                 return await self._client.get_entity(int(cleaned))
             except Exception as exc:
-                raise TelegramError(f"شناسهٔ تلگرام {cleaned} پیدا نشد: {exc}") from exc
+                error = _translate_telegram_error(exc)
+                if error.code not in {"peer_invalid", "rpc_error", "telegram_error"}:
+                    raise error from exc
+                raise TelegramError(
+                    f"شناسهٔ تلگرام {cleaned} پیدا نشد", code="peer_invalid"
+                ) from exc
 
         if cleaned.startswith("@"):
             try:
                 return await self._client.get_entity(cleaned)
             except Exception as exc:
-                raise TelegramError(f"نام کاربری «{cleaned}» در تلگرام پیدا نشد: {exc}") from exc
+                error = _translate_telegram_error(exc)
+                if error.code not in {"peer_invalid", "rpc_error", "telegram_error"}:
+                    raise error from exc
+                raise TelegramError(
+                    f"نام کاربری «{cleaned}» در تلگرام پیدا نشد", code="peer_invalid"
+                ) from exc
 
         candidates: dict[tuple[str, int], tuple[int, _ResolvedCandidate]] = {}
 
@@ -813,14 +911,15 @@ class PersonalTelegram:
             best = [candidate for priority, candidate in candidates.values() if priority == best_priority]
             if len(best) == 1:
                 return best[0].entity
-            raise TelegramError(_ambiguous_target_message(cleaned, best))
+            raise TelegramError(_ambiguous_target_message(cleaned, best), code="target_ambiguous")
 
         # A public username may not be present in dialogs or contacts yet.
         try:
             return await self._client.get_entity(cleaned)
         except Exception as exc:
             raise TelegramError(
-                f"مقصد «{cleaned}» در چت‌ها، مخاطبین یا نام‌های کاربری تلگرام پیدا نشد"
+                f"مقصد «{cleaned}» در چت‌ها، مخاطبین یا نام‌های کاربری تلگرام پیدا نشد",
+                code="peer_invalid",
             ) from exc
 
     async def _resolve_target(self, target) -> dict[str, Any]:
@@ -960,7 +1059,10 @@ class PersonalTelegram:
             raise TelegramError(f"مخاطب {target!r} پیدا نشد")
         if len(candidates) > 1:
             ids = "، ".join(str(item.id) for item in candidates[:5])
-            raise TelegramError(f"نام مخاطب «{target}» مبهم است؛ شناسه‌های مطابق: {ids}")
+            raise TelegramError(
+                f"نام مخاطب «{target}» مبهم است؛ شناسه‌های مطابق: {ids}",
+                code="target_ambiguous",
+            )
         return await self._client.get_entity(candidates[0].id)
 
     async def _get_chat_history(self, chat, limit: int, offset_id: int) -> list[Message]:
@@ -999,7 +1101,7 @@ class PersonalTelegram:
                 if count is not None:
                     info["members_count"] = int(count)
         except Exception as exc:  # noqa: BLE001 - base profile remains useful
-            logger.debug("full Telegram profile unavailable: %s", exc)
+            logger.debug("full Telegram profile unavailable: %s", type(exc).__name__)
 
         photo_path = ""
         if getattr(entity, "photo", None) is not None:
@@ -1010,7 +1112,7 @@ class PersonalTelegram:
                 if filename.is_file():
                     photo_path = str(filename)
             except Exception as exc:  # noqa: BLE001 - best-effort
-                logger.debug("profile photo download failed: %s", exc)
+                logger.debug("profile photo download failed: %s", type(exc).__name__)
         info["photo_path"] = photo_path
         return info
 
@@ -1042,16 +1144,16 @@ class PersonalTelegram:
         entity = await self._resolve_entity(chat)
         messages = await self._client.get_messages(entity, ids=msg_id)
         if not messages:
-            raise TelegramError(f"پیامی با شناسهٔ {msg_id} پیدا نشد")
+            raise TelegramError(f"پیامی با شناسهٔ {msg_id} پیدا نشد", code="message_invalid")
         safe = Path(filename or f"{msg_id}").name
         media_dir.mkdir(parents=True, exist_ok=True)
         target = media_dir / safe
         try:
             out = await messages.download_media(file=str(target))
         except Exception as exc:
-            raise TelegramError(f"دانلود مدیا ناموفق بود: {exc}") from exc
+            raise _translate_telegram_error(exc) from exc
         if out is None:
-            raise TelegramError("این پیام مدیا ندارد")
+            raise TelegramError("این پیام مدیا ندارد", code="media_invalid")
         return Path(str(out))
 
     async def _reply_to(self, chat, msg_id: int, text: str) -> Message:
@@ -1163,8 +1265,13 @@ class PersonalTelegram:
                 continue
             try:
                 output = await self._client.download_media(message, file=str(target_dir))
-            except Exception as exc:  # noqa: BLE001 - continue with remaining media
-                logger.debug("batch media download failed for message %s: %s", message.id, exc)
+            except Exception as exc:
+                error = _translate_telegram_error(exc)
+                if error.code not in {"media_invalid", "message_invalid", "rpc_error"}:
+                    raise error from exc
+                logger.debug(
+                    "batch media download skipped message %s: %s", message.id, error.code
+                )
                 continue
             if output:
                 downloaded.append(Path(str(output)))
@@ -1186,6 +1293,94 @@ class PersonalTelegram:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _translate_telegram_error(exc: Exception) -> TelegramError:
+    if isinstance(exc, TelegramError):
+        return exc
+    name = type(exc).__name__
+    lowered = f"{name} {exc}".lower()
+    seconds = getattr(exc, "seconds", None)
+    if "floodwait" in lowered or "flood_wait" in lowered:
+        wait = int(seconds or 0) or None
+        suffix = f"؛ {wait} ثانیه دیگر دوباره تلاش کنید" if wait else ""
+        return TelegramError(
+            "تلگرام به‌دلیل تعداد زیاد درخواست‌ها موقتاً محدود کرده است" + suffix,
+            code="flood_wait", retryable=False, retry_after=wait,
+        )
+    if name in {"TimeoutError", "ServerError", "TimedOutError"} or "timed out" in lowered:
+        return TelegramError(
+            "پاسخ تلگرام به‌موقع دریافت نشد؛ اتصال را بررسی و دوباره تلاش کنید",
+            code="timeout", retryable=True,
+        )
+    if isinstance(exc, (ConnectionError, OSError)) or any(
+        token in lowered for token in (
+            "connection to telegram failed", "connection reset", "connection aborted",
+            "network is unreachable", "name resolution", "getaddrinfo", "temporarily unavailable",
+            "incompleteread", "server closed the connection", "server disconnected",
+        )
+    ):
+        return TelegramError(
+            "ارتباط با سرور تلگرام برقرار نشد؛ اینترنت و VPN/فیلترشکن را بررسی کنید",
+            code="network", retryable=True,
+        )
+    if any(token in name for token in ("SessionRevoked", "AuthKeyUnregistered", "AuthKeyInvalid")):
+        return TelegramError(
+            "سشن تلگرام باطل یا از دستگاه‌ها خارج شده است؛ اکانت را دوباره متصل کنید",
+            code="session_revoked",
+        )
+    if any(token in name for token in ("AuthKeyDuplicated", "Unauthorized")):
+        return TelegramError(
+            "مجوز این سشن تلگرام معتبر نیست یا دسترسی لازم وجود ندارد",
+            code="authorization_required",
+        )
+    if any(token in name for token in ("UserDeactivated", "UserBanned", "PhoneNumberBanned")):
+        return TelegramError(
+            "این حساب تلگرام غیرفعال یا محدود شده است",
+            code="account_restricted",
+        )
+    if "PrivacyRestricted" in name or "privacy" in lowered:
+        return TelegramError(
+            "تنظیمات حریم خصوصی کاربر اجازهٔ این عملیات را نمی‌دهد",
+            code="privacy_restricted",
+        )
+    if any(token in name for token in ("ChatAdminRequired", "AdminRankInvalid", "RightForbidden")):
+        return TelegramError(
+            "برای این عملیات دسترسی مدیر گروه یا کانال لازم است",
+            code="admin_required",
+        )
+    if any(token in name for token in (
+        "ChatWriteForbidden", "UserIsBlocked", "YouBlockedUser", "ChatRestricted",
+        "ChannelPrivate", "UserNotMutualContact", "UserNotParticipant",
+    )):
+        return TelegramError(
+            "ارسال یا دسترسی به این مقصد توسط تلگرام مجاز نیست",
+            code="write_forbidden",
+        )
+    if any(token in name for token in (
+        "PeerIdInvalid", "UserIdInvalid", "ChatIdInvalid", "ChannelInvalid",
+        "UsernameNotOccupied", "UsernameInvalid",
+    )):
+        return TelegramError(
+            "شناسه، نام کاربری یا مقصد تلگرام معتبر نیست یا دیگر وجود ندارد",
+            code="peer_invalid",
+        )
+    if any(token in name for token in ("MessageIdInvalid", "MessageNotModified", "MessageDeleteForbidden")):
+        return TelegramError(
+            "پیام موردنظر وجود ندارد یا انجام این عملیات روی آن مجاز نیست",
+            code="message_invalid",
+        )
+    if any(token in name for token in ("FileReferenceExpired", "FileIdInvalid", "MediaInvalid")):
+        return TelegramError(
+            "مرجع فایل یا رسانه منقضی یا نامعتبر شده است؛ اطلاعات را تازه کنید",
+            code="media_invalid", retryable=True,
+        )
+    if "rpcerror" in lowered or name.endswith("Error"):
+        return TelegramError(
+            f"عملیات تلگرام ناموفق بود ({name})",
+            code="rpc_error",
+        )
+    return TelegramError("عملیات تلگرام ناموفق بود", code="telegram_error")
 
 
 _DIGIT_TRANSLATION = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")

@@ -41,7 +41,7 @@ import threading
 import time
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any
+from typing import Any, NoReturn
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.exceptions import RequestValidationError, StarletteHTTPException
@@ -53,6 +53,7 @@ from ..bridge import BridgeClient
 from ..core.config import AssistantSettings
 from ..core.errors import AssistantError
 from ..core.logging_setup import get_logger, setup_logging
+from ..telegram.client import TelegramError
 from ..utils.paths import web_static_dir, web_templates_dir
 
 logger = get_logger("web")
@@ -267,6 +268,33 @@ def _connected_telegram_client(client: BridgeClient, account: str | None = None)
     return name, telegram
 
 
+def _raise_telegram_http_error(
+    exc: AssistantError, *, legacy_bad_request: bool = False
+) -> NoReturn:
+    if isinstance(exc, TelegramError):
+        statuses = {
+            "not_connected": 409,
+            "flood_wait": 429,
+            "timeout": 504,
+            "network": 503,
+            "session_revoked": 401,
+            "authorization_required": 403,
+            "account_restricted": 403,
+            "privacy_restricted": 403,
+            "admin_required": 403,
+            "write_forbidden": 403,
+            "peer_invalid": 404,
+            "message_invalid": 404,
+            "target_ambiguous": 409,
+            "media_invalid": 409,
+            "local_file_missing": 404,
+        }
+        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+        status = 400 if legacy_bad_request else statuses.get(exc.code, 400)
+        raise HTTPException(status, detail=exc.to_dict(), headers=headers) from exc
+    raise HTTPException(400, str(exc)) from exc
+
+
 def _coerce_telegram_field(key: str, raw: Any) -> Any:
     if key == "enabled" or key == "confirm_send":
         if isinstance(raw, bool):
@@ -324,7 +352,12 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def _http_exception(
         _request: Request, exc: StarletteHTTPException
     ) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc.detail)})
+        detail = exc.detail if isinstance(exc.detail, (dict, list, str, int, float, bool)) else str(exc.detail)
+        if isinstance(detail, dict) and "message" in detail:
+            content = {"detail": str(detail["message"]), "error": detail}
+        else:
+            content = {"detail": detail}
+        return JSONResponse(status_code=exc.status_code, content=content, headers=exc.headers)
 
     @app.exception_handler(Exception)
     async def _unhandled(_request: Request, exc: Exception) -> JSONResponse:
@@ -628,7 +661,7 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         try:
             return server.handlers.start_telegram_login(account)
         except AssistantError as exc:
-            raise HTTPException(400, str(exc))
+            _raise_telegram_http_error(exc, legacy_bad_request=True)
 
     @app.post("/api/telegram/verify")
     async def telegram_verify(req: TelegramVerifyRequest) -> dict[str, Any]:
@@ -647,7 +680,7 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                 return server.handlers.submit_telegram_password(req.password, req.account)
             raise HTTPException(400, "هیچ فرایند ورودی در جریان نیست؛ دکمهٔ اتصال تلگرام را بزنید")
         except AssistantError as exc:
-            raise HTTPException(400, str(exc))
+            _raise_telegram_http_error(exc, legacy_bad_request=True)
 
     @app.post("/api/telegram/disconnect")
     async def telegram_disconnect(req: TelegramConnectRequest | None = None) -> dict[str, Any]:
@@ -666,7 +699,7 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         try:
             return server.handlers.switch_telegram_account(str(req.name))
         except AssistantError as exc:
-            raise HTTPException(400, str(exc))
+            _raise_telegram_http_error(exc)
 
     @app.get("/api/telegram/accounts")
     async def telegram_accounts() -> dict[str, Any]:
@@ -687,7 +720,7 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                 str(req.name), bool(req.enabled)
             )
         except AssistantError as exc:
-            raise HTTPException(400, str(exc))
+            _raise_telegram_http_error(exc)
 
     @app.get("/api/telegram/chats")
     async def telegram_chats(
@@ -704,7 +737,7 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                 offset=page_offset, archived=archived, unread_only=unread_only,
             )
         except AssistantError as exc:
-            raise HTTPException(400, str(exc)) from exc
+            _raise_telegram_http_error(exc)
         has_more = len(items) > page_size
         items = items[:page_size]
         return {
@@ -727,7 +760,7 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
             else:
                 all_items = await asyncio.to_thread(telegram.list_contacts, fetch_limit)
         except AssistantError as exc:
-            raise HTTPException(400, str(exc)) from exc
+            _raise_telegram_http_error(exc)
         items = all_items[page_offset:page_offset + page_size]
         return {
             "account": name, "source": "live", "offset": page_offset,
@@ -738,7 +771,10 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
     @app.get("/api/telegram/stats")
     async def telegram_stats(account: str | None = None) -> dict[str, Any]:
         name, telegram = _connected_telegram_client(client, account)
-        data = await asyncio.to_thread(telegram.refresh_summary)
+        try:
+            data = await asyncio.to_thread(telegram.refresh_summary)
+        except AssistantError as exc:
+            _raise_telegram_http_error(exc)
         return {"account": name, **data}
 
     @app.get("/api/telegram/history")
@@ -753,7 +789,7 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                 max(1, min(limit, 200)), max(0, offset_id),
             )
         except AssistantError as exc:
-            raise HTTPException(400, str(exc)) from exc
+            _raise_telegram_http_error(exc)
         return {
             "account": name, "source": "live", "chat": resolved,
             "items": [item.to_dict() for item in items],
@@ -765,7 +801,7 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         try:
             resolved = await asyncio.to_thread(telegram.resolve_target, req.target)
         except AssistantError as exc:
-            raise HTTPException(400, str(exc)) from exc
+            _raise_telegram_http_error(exc)
         return {"account": name, "source": "live", **resolved}
 
     @app.post("/api/gmail/connect")

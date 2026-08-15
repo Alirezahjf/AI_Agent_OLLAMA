@@ -17,7 +17,7 @@ from local_agent.actions.registry import ActionContext, Risk
 from local_agent.bridge.api.handlers import BridgeHandlers
 from local_agent.core.config import AssistantSettings
 from local_agent.core.errors import ActionRefused, AssistantError
-from local_agent.telegram.client import Chat, Message
+from local_agent.telegram.client import Chat, Message, TelegramError
 
 
 class _FakeTelegram:
@@ -182,6 +182,22 @@ def test_live_statistics_unread_and_refresh_actions(
     assert "Alice" in run_action(handlers.registry, "telegram.list_unread_chats", {}, ctx)
     assert "2 مخاطب" in run_action(handlers.registry, "telegram.refresh", {}, ctx)
     assert fake.calls == ["get_statistics", "list_unread_chats", "refresh_summary"]
+
+
+def test_action_layer_preserves_structured_telegram_errors(
+    handlers: BridgeHandlers, ctx: ActionContext
+) -> None:
+    fake = _FakeTelegram()
+
+    def fail():
+        raise TelegramError("محدودیت تلگرام", code="flood_wait", retry_after=30)
+
+    fake.get_statistics = fail
+    ctx.extra["telegram"] = fake
+    with pytest.raises(TelegramError) as excinfo:
+        run_action(handlers.registry, "telegram.get_statistics", {}, ctx)
+    assert excinfo.value.code == "flood_wait"
+    assert excinfo.value.retry_after == 30
 
 
 def test_bulk_send_requires_confirmation_and_limits_targets(

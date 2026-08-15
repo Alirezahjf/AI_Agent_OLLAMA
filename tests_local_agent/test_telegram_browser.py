@@ -6,14 +6,17 @@ from datetime import UTC, datetime
 
 import requests
 
-from local_agent.telegram.client import Chat, Message
+from local_agent.telegram.client import Chat, Message, TelegramError
 
 
 class _LiveTelegram:
     is_connected = True
+    forced_error = None
 
     def list_chats(self, limit=50, kind="all", query="", sort="recent", *, offset=0,
                    archived=None, unread_only=False):
+        if self.forced_error is not None:
+            raise self.forced_error
         items = [
             Chat(
                 id=10, title="Alice", username="alice", is_group=False,
@@ -108,6 +111,32 @@ def test_telegram_browser_requires_connected_account(web_server) -> None:
     )
     assert response.status_code == 409
     assert "متصل نیست" in response.text
+
+
+def test_structured_telegram_http_errors_and_retry_header(web_server) -> None:
+    fake = _install_fake(web_server)
+    base = f"http://127.0.0.1:{web_server.port}/api/telegram/chats"
+
+    cases = [
+        (TelegramError("صبر کنید", code="flood_wait", retry_after=12), 429),
+        (TelegramError("شبکه قطع است", code="network", retryable=True), 503),
+        (TelegramError("سشن باطل است", code="session_revoked"), 401),
+        (TelegramError("حریم خصوصی", code="privacy_restricted"), 403),
+        (TelegramError("مقصد نیست", code="peer_invalid"), 404),
+        (TelegramError("چند نتیجه", code="target_ambiguous"), 409),
+    ]
+    for error, status in cases:
+        fake.forced_error = error
+        response = requests.get(base, timeout=5)
+        assert response.status_code == status
+        body = response.json()
+        detail = body["error"]
+        assert body["detail"] == str(error)  # backward-compatible human detail
+        assert detail["code"] == error.code
+        assert detail["message"] == str(error)
+        assert detail["retryable"] == error.retryable
+    fake.forced_error = cases[0][0]
+    assert requests.get(base, timeout=5).headers["Retry-After"] == "12"
 
 
 def test_telegram_browser_ui_contract() -> None:
