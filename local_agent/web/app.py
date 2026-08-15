@@ -132,6 +132,11 @@ class TelegramAccountToggleRequest(BaseModel):
     enabled: bool = False
 
 
+class TelegramResolveRequest(BaseModel):
+    target: str
+    account: str | None = None
+
+
 class ConfirmRequest(BaseModel):
     request_id: str
     approved: bool = False
@@ -247,6 +252,19 @@ def resolve_artifact_path(work_dir: Path, data_dir: Path, candidate: str) -> Pat
 def _server_of(client: BridgeClient) -> Any:
     backend = getattr(client, "_backend", None)
     return getattr(backend, "_server", None) if backend else None
+
+
+def _connected_telegram_client(client: BridgeClient, account: str | None = None) -> tuple[str, Any]:
+    server = _server_of(client)
+    if server is None:
+        raise HTTPException(503, "تلگرام به Bridge درون‌پردازه نیاز دارد")
+    try:
+        name, telegram = server.handlers._account_client(account)
+    except AssistantError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not telegram.is_connected:
+        raise HTTPException(409, f"اکانت تلگرام «{name}» متصل نیست")
+    return name, telegram
 
 
 def _coerce_telegram_field(key: str, raw: Any) -> Any:
@@ -670,6 +688,85 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
             )
         except AssistantError as exc:
             raise HTTPException(400, str(exc))
+
+    @app.get("/api/telegram/chats")
+    async def telegram_chats(
+        account: str | None = None, kind: str = "all", query: str = "",
+        sort: str = "recent", limit: int = 50, offset: int = 0,
+        archived: bool | None = None, unread_only: bool = False,
+    ) -> dict[str, Any]:
+        name, telegram = _connected_telegram_client(client, account)
+        page_size = max(1, min(limit, 200))
+        page_offset = max(0, offset)
+        try:
+            items = await asyncio.to_thread(
+                telegram.list_chats, page_size + 1, kind, query, sort,
+                offset=page_offset, archived=archived, unread_only=unread_only,
+            )
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        has_more = len(items) > page_size
+        items = items[:page_size]
+        return {
+            "account": name, "source": "live", "offset": page_offset,
+            "next_offset": page_offset + len(items), "has_more": has_more,
+            "items": [item.to_dict() for item in items],
+        }
+
+    @app.get("/api/telegram/contacts")
+    async def telegram_contacts(
+        account: str | None = None, query: str = "", limit: int = 100, offset: int = 0,
+    ) -> dict[str, Any]:
+        name, telegram = _connected_telegram_client(client, account)
+        page_size = max(1, min(limit, 500))
+        page_offset = max(0, offset)
+        fetch_limit = page_offset + page_size + 1
+        try:
+            if query.strip():
+                all_items = await asyncio.to_thread(telegram.search_contacts, query, fetch_limit)
+            else:
+                all_items = await asyncio.to_thread(telegram.list_contacts, fetch_limit)
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        items = all_items[page_offset:page_offset + page_size]
+        return {
+            "account": name, "source": "live", "offset": page_offset,
+            "next_offset": page_offset + len(items),
+            "has_more": len(all_items) > page_offset + page_size, "items": items,
+        }
+
+    @app.get("/api/telegram/stats")
+    async def telegram_stats(account: str | None = None) -> dict[str, Any]:
+        name, telegram = _connected_telegram_client(client, account)
+        data = await asyncio.to_thread(telegram.refresh_summary)
+        return {"account": name, **data}
+
+    @app.get("/api/telegram/history")
+    async def telegram_history(
+        target: str, account: str | None = None, limit: int = 50, offset_id: int = 0,
+    ) -> dict[str, Any]:
+        name, telegram = _connected_telegram_client(client, account)
+        try:
+            resolved = await asyncio.to_thread(telegram.resolve_target, target)
+            items = await asyncio.to_thread(
+                telegram.get_chat_history, str(resolved["id"]),
+                max(1, min(limit, 200)), max(0, offset_id),
+            )
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {
+            "account": name, "source": "live", "chat": resolved,
+            "items": [item.to_dict() for item in items],
+        }
+
+    @app.post("/api/telegram/resolve")
+    async def telegram_resolve(req: TelegramResolveRequest) -> dict[str, Any]:
+        name, telegram = _connected_telegram_client(client, req.account)
+        try:
+            resolved = await asyncio.to_thread(telegram.resolve_target, req.target)
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"account": name, "source": "live", **resolved}
 
     @app.post("/api/gmail/connect")
     async def gmail_connect() -> dict[str, Any]:

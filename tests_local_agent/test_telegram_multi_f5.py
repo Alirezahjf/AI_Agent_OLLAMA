@@ -39,7 +39,7 @@ class _FakeClient:
         return self.state
 
     # ---- F5 read / send -------------------------------------------------
-    def list_chats(self, limit: int = 30) -> list[Chat]:
+    def list_chats(self, limit: int = 30, **kwargs) -> list[Chat]:
         self.calls.append(f"list_chats:{self.name}")
         return [Chat(id=10, title="Alice", username="alice", is_group=False)]
 
@@ -236,7 +236,9 @@ def test_multi_account_actions_registered(tmp_path: Path) -> None:
         "telegram.list_accounts", "telegram.switch_account",
         "telegram.search_contacts", "telegram.get_chat_history", "telegram.get_profile",
         "telegram.download_media", "telegram.mark_read", "telegram.resolve_username",
-        "telegram.resolve_target",
+        "telegram.resolve_target", "telegram.get_statistics", "telegram.list_unread_chats",
+        "telegram.get_chat_statistics", "telegram.export_chat", "telegram.download_media_batch",
+        "telegram.refresh", "telegram.bulk_send", "telegram.bulk_forward",
         "telegram.send_video", "telegram.send_voice", "telegram.send_audio",
         "telegram.send_document", "telegram.send_sticker", "telegram.send_animation",
         "telegram.send_location", "telegram.reply_to", "telegram.forward_message",
@@ -299,11 +301,14 @@ def test_f5_risk_levels(tmp_path: Path) -> None:
     by_name = {a.name: a for a in handlers.registry.all()}
     for safe in ("telegram.search_contacts", "telegram.get_chat_history", "telegram.get_profile",
                  "telegram.download_media", "telegram.mark_read", "telegram.resolve_username",
-                 "telegram.list_accounts", "telegram.switch_account"):
+                 "telegram.list_accounts", "telegram.switch_account", "telegram.get_statistics",
+                 "telegram.list_unread_chats", "telegram.get_chat_statistics", "telegram.export_chat",
+                 "telegram.download_media_batch", "telegram.refresh"):
         assert by_name[safe].risk_level == Risk.SAFE, safe
     for dest in ("telegram.send_video", "telegram.send_voice", "telegram.send_audio",
                  "telegram.send_document", "telegram.send_sticker", "telegram.send_animation",
-                 "telegram.send_location", "telegram.reply_to", "telegram.forward_message"):
+                 "telegram.send_location", "telegram.reply_to", "telegram.forward_message",
+                 "telegram.bulk_send", "telegram.bulk_forward"):
         assert by_name[dest].risk_level == Risk.DESTRUCTIVE, dest
 
 

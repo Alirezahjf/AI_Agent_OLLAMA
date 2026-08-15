@@ -667,6 +667,7 @@
               <span x-show="telegramBusy" x-cloak>در حال اتصال…</span>
             </button>
             <button class="btn btn--ghost btn--sm" type="button" @click="disconnectTelegram()" x-show="telegramConnected" x-cloak>قطع اتصال</button>
+            <button class="btn btn--primary btn--sm" type="button" @click="openTelegramBrowser()" x-show="telegramConnected" x-cloak>📚 چت‌ها و مخاطبین</button>
             <span class="field__hint" x-text="telegramStateLabel"></span>
           </div>
           <div class="field">
@@ -810,6 +811,69 @@
         <button class="btn btn--ghost" @click="settingsOpen = false">انصراف</button>
         <button class="btn btn--primary" @click="saveSettings()">ذخیره</button>
       </footer>
+    </div>
+  </div>
+
+  <!-- ================= Telegram browser ================= -->
+  <div class="modal" x-show="telegramBrowserOpen" x-transition.opacity x-cloak @click.self="telegramBrowserOpen = false">
+    <div class="modal__card telegram-browser" role="dialog" aria-modal="true" aria-label="چت‌ها و مخاطبین تلگرام">
+      <header class="modal__head">
+        <div><h2>✈️ تلگرام شخصی</h2><small class="muted">داده‌ها در هر بار به‌روزرسانی مستقیماً از تلگرام خوانده می‌شوند.</small></div>
+        <button class="icon-btn" @click="telegramBrowserOpen = false" aria-label="بستن"><svg viewBox="0 0 24 24" class="icon"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </header>
+      <div class="modal__body telegram-browser__body">
+        <div class="telegram-stats" x-show="telegramStats">
+          <span>همه: <strong x-text="telegramStats.total_chats || 0"></strong></span>
+          <span>خصوصی: <strong x-text="telegramStats.private_chats || 0"></strong></span>
+          <span>مخاطب: <strong x-text="telegramStats.total_contacts || 0"></strong></span>
+          <span>ناخوانده: <strong x-text="telegramStats.total_unread || 0"></strong></span>
+        </div>
+        <div class="telegram-tabs">
+          <button class="btn btn--sm" :class="telegramTab === 'chats' ? 'btn--primary' : 'btn--ghost'" @click="telegramTab = 'chats'; loadTelegramBrowser()">گفتگوها</button>
+          <button class="btn btn--sm" :class="telegramTab === 'contacts' ? 'btn--primary' : 'btn--ghost'" @click="telegramTab = 'contacts'; loadTelegramBrowser()">مخاطبین</button>
+        </div>
+        <div class="telegram-toolbar">
+          <select x-model="telegramBrowserAccount" @change="loadTelegramBrowser()" aria-label="اکانت تلگرام">
+            <template x-for="acc in telegramAccounts" :key="acc.account"><option :value="acc.account" x-text="acc.account"></option></template>
+          </select>
+          <select x-show="telegramTab === 'chats'" x-model="telegramChatKind" @change="loadTelegramBrowser()" aria-label="نوع گفتگو">
+            <option value="all">همه</option><option value="private">خصوصی</option><option value="group">گروه‌ها</option>
+            <option value="supergroup">سوپرگروه</option><option value="channel">کانال</option><option value="bot">ربات</option>
+          </select>
+          <select x-show="telegramTab === 'chats'" x-model="telegramChatScope" @change="loadTelegramBrowser()" aria-label="پوشه و وضعیت گفتگو">
+            <option value="all">همه پوشه‌ها</option><option value="main">اصلی</option><option value="archive">بایگانی</option><option value="unread">ناخوانده</option>
+          </select>
+          <input x-model="telegramBrowserQuery" @keydown.enter.prevent="loadTelegramBrowser()" placeholder="جست‌وجوی نام، username یا شماره…" dir="auto">
+          <button class="btn btn--ghost btn--sm" @click="loadTelegramBrowser()" :disabled="telegramBrowserLoading">↻ تازه‌سازی زنده</button>
+        </div>
+        <p class="field__hint" x-show="telegramBrowserLoading">در حال دریافت مستقیم از تلگرام…</p>
+        <p class="notice" x-show="telegramBrowserError" x-text="telegramBrowserError"></p>
+        <div class="telegram-browser__grid">
+          <div class="telegram-list">
+            <template x-for="item in telegramBrowserItems" :key="(item.kind || 'contact') + '-' + item.id">
+              <button class="telegram-item" @click="telegramTab === 'chats' ? loadTelegramHistory(item) : null">
+                <span class="telegram-item__avatar" x-text="telegramItemIcon(item)"></span>
+                <span class="telegram-item__main"><strong x-text="item.title || item.name || '?'" dir="auto"></strong>
+                  <small dir="ltr" x-text="item.username ? '@' + item.username : 'id=' + item.id"></small>
+                  <small x-show="item.phone" dir="ltr" x-text="item.phone"></small></span>
+                <span class="telegram-item__meta"><b x-show="item.unread_count" x-text="item.unread_count"></b><small x-text="telegramKindLabel(item.kind)"></small></span>
+              </button>
+            </template>
+            <p class="muted" x-show="!telegramBrowserLoading && !telegramBrowserItems.length">موردی پیدا نشد.</p>
+            <button class="btn btn--ghost btn--sm telegram-load-more" x-show="telegramBrowserHasMore" @click="loadTelegramBrowser(true)" :disabled="telegramBrowserLoading">نمایش موارد بیشتر</button>
+          </div>
+          <div class="telegram-history" x-show="telegramSelectedChat">
+            <header><strong x-text="telegramSelectedChat && telegramSelectedChat.title"></strong><button class="icon-btn" @click="telegramSelectedChat = null">×</button></header>
+            <p class="field__hint" x-show="telegramHistoryLoading">در حال دریافت پیام‌های زنده…</p>
+            <template x-for="message in telegramHistory" :key="message.id">
+              <div class="telegram-message" :class="{'telegram-message--out': message.is_outgoing}">
+                <small><span x-text="message.sender"></span> · <span x-text="formatIsoTime(message.date)"></span> · <span x-text="'id=' + message.id"></span></small>
+                <p x-text="message.text || '[' + message.message_type + ']'" dir="auto"></p>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 

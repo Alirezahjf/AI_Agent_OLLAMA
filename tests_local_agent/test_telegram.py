@@ -179,6 +179,13 @@ class _FakeTelegramClient:
         for message in self.search_results[:limit]:
             yield message
 
+    async def download_media(self, message, file: str):
+        target_dir = Path(file)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / f"message_{message.id}.bin"
+        target.write_bytes(b"media")
+        return str(target)
+
 
 class _FakeTelegramClient2FA(_FakeTelegramClient):
     """Same fake, but the account has 2FA enabled."""
@@ -650,6 +657,85 @@ def test_full_entity_requests_cover_users_groups_and_channels() -> None:
     assert asyncio.run(_get_full_entity(requester, group)).about == "full"
     assert asyncio.run(_get_full_entity(requester, channel)).about == "full"
     assert requests == ["GetFullUserRequest", "GetFullChatRequest", "GetFullChannelRequest"]
+
+
+def test_chat_pagination_archive_and_unread_filters_are_applied_live(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialogs = [
+        _FakeDialog(_FakeEntity(100 + i, f"Person {i}"), unread=i, folder_id=1 if i % 2 else None)
+        for i in range(6)
+    ]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    page = client.list_chats(limit=2, kind="private", offset=2)
+    assert [chat.title for chat in page] == ["Person 2", "Person 3"]
+    archived = client.list_chats(limit=10, archived=True)
+    assert [chat.title for chat in archived] == ["Person 1", "Person 3", "Person 5"]
+    unread = client.list_chats(limit=10, unread_only=True)
+    assert all(chat.unread_count > 0 for chat in unread)
+
+
+def test_live_statistics_unread_and_refresh(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialogs = [
+        _FakeDialog(_FakeEntity(1, "Private"), unread=3),
+        _FakeDialog(_FakeEntity(2, "Group", is_group=True), unread=0),
+        _FakeDialog(_FakeUser(3, "Bot", bot=True), unread=1),
+    ]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    stats = client.get_statistics()
+    assert stats["total_chats"] == 3
+    assert stats["private_chats"] == 1 and stats["bot_chats"] == 1
+    assert stats["unread_chats"] == 2 and stats["total_unread"] == 4
+    assert [chat.unread_count for chat in client.list_unread_chats()] == [3, 1]
+    refreshed = client.refresh_summary()
+    assert refreshed["total_contacts"] == 2
+    assert refreshed["source"] == "live"
+
+
+def test_chat_statistics_and_export_are_rich_and_live(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    first = _FakeMessage(10, "hello", out=False)
+    first.sender_id = 50
+    second = _FakeMessage(11, "photo", out=True)
+    second.sender_id = 1
+    second.media = object()
+    second.photo = object()
+    patched_telethon.search_results = [first, second]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    stats = client.get_chat_statistics("Alice", 100)
+    assert stats["sampled_messages"] == 2
+    assert stats["message_types"] == {"photo": 1, "text": 1}
+    assert stats["incoming"] == 1 and stats["outgoing"] == 1
+
+    output = client.export_chat("Alice", tmp_path / "exports", fmt="json", limit=100)
+    payload = __import__("json").loads(output.read_text(encoding="utf-8"))
+    assert payload["message_count"] == 2
+    assert payload["messages"][1]["message_type"] == "photo"
+
+
+def test_batch_media_download_filters_types(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    photo = _FakeMessage(20, "photo")
+    photo.media = object()
+    photo.photo = object()
+    document = _FakeMessage(21, "doc")
+    document.media = object()
+    document.document = object()
+    patched_telethon.search_results = [photo, document, _FakeMessage(22, "text")]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    paths = client.download_media_batch(
+        "Alice", tmp_path / "media", limit=100, media_types=["photo"]
+    )
+    assert [path.name for path in paths] == ["message_20.bin"]
+    assert paths[0].is_file()
 
 
 # ---------------------------------------------------------------------------

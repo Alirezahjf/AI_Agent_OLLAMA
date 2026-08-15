@@ -74,6 +74,9 @@ def register_telegram(registry: ActionRegistry, context: ActionContext) -> None:
             "kind": {"type": "string", "enum": ["all", "private", "group", "supergroup", "channel", "bot"], "description": "نوع چت؛ group شامل گروه عادی و سوپرگروه است"},
             "query": {"type": "string", "description": "جست‌وجوی زنده در نام یا نام کاربری همهٔ گفتگوها"},
             "sort": {"type": "string", "enum": ["", "recent", "unread"], "description": "مرتب‌سازی اختیاری"},
+            "offset": {"type": "integer", "description": "شروع صفحهٔ بعد پس از این تعداد نتیجه"},
+            "archived": {"type": "boolean", "description": "فقط بایگانی=true یا فقط غیربایگانی=false"},
+            "unread_only": {"type": "boolean", "description": "فقط چت‌های ناخوانده"},
             "account": {"type": "string", "description": "نام اکانت (پیش‌فرض: اکانت فعال)"},
         },
     )(list_chats)
@@ -194,6 +197,43 @@ def register_telegram(registry: ActionRegistry, context: ActionContext) -> None:
         required=("target",),
     )(resolve_target)
 
+    registry.decorator(
+        name="telegram.get_statistics",
+        description="آمار زندهٔ تعداد چت‌ها بر اساس نوع، چت‌های ناخوانده و مجموع پیام‌های ناخوانده. SAFE.",
+        parameters={"account": {"type": "string"}},
+    )(get_statistics)
+    registry.decorator(
+        name="telegram.list_unread_chats",
+        description="فهرست زندهٔ چت‌های دارای پیام ناخوانده، مرتب‌شده بر اساس تعداد ناخوانده. SAFE.",
+        parameters={"limit": {"type": "integer"}, "account": {"type": "string"}},
+    )(list_unread_chats)
+    registry.decorator(
+        name="telegram.get_chat_statistics",
+        description="آمار زندهٔ پیام‌های یک چت: نوع رسانه، ورودی/خروجی و فرستندگان پرتکرار. SAFE.",
+        parameters={"chat": {"type": "string"}, "limit": {"type": "integer"}, "account": {"type": "string"}},
+        required=("chat",),
+    )(get_chat_statistics)
+    registry.decorator(
+        name="telegram.export_chat",
+        description="خروجی زندهٔ تاریخچهٔ چت در فایل JSON یا TXT داخل پوشهٔ داده. SAFE.",
+        parameters={"chat": {"type": "string"}, "format": {"type": "string", "enum": ["json", "txt"]},
+                    "limit": {"type": "integer"}, "account": {"type": "string"}},
+        required=("chat",),
+    )(export_chat)
+    registry.decorator(
+        name="telegram.download_media_batch",
+        description="دانلود گروهی رسانه‌های تازهٔ یک چت با فیلتر نوع رسانه. SAFE.",
+        parameters={"chat": {"type": "string"}, "limit": {"type": "integer"},
+                    "media_types": {"type": "array", "items": {"type": "string"}},
+                    "account": {"type": "string"}},
+        required=("chat",),
+    )(download_media_batch)
+    registry.decorator(
+        name="telegram.refresh",
+        description="دریافت مجدد و زندهٔ آمار چت‌ها و تعداد مخاطبین، بدون کش برنامه. SAFE.",
+        parameters={"account": {"type": "string"}},
+    )(refresh_telegram)
+
     # ---- Destructive / sending -----------------------------------------
     _register_send(
         registry, "telegram.send_message", confirm_send,
@@ -298,6 +338,21 @@ def register_telegram(registry: ActionRegistry, context: ActionContext) -> None:
         required=("chat", "from_chat", "msg_id"),
         context=context,
     )(forward_message)
+
+    _register_send(
+        registry, "telegram.bulk_send", confirm_send,
+        "ارسال یک پیام یکسان به چند مقصد (حداکثر ۲۰ مقصد) با گزارش جداگانه. DESTRUCTIVE.",
+        {"targets": {"type": "array", "items": {"type": "string"}},
+         "text": {"type": "string"}},
+        required=("targets", "text"), context=context,
+    )(bulk_send)
+    _register_send(
+        registry, "telegram.bulk_forward", confirm_send,
+        "فوروارد یک پیام به چند مقصد (حداکثر ۲۰ مقصد) با گزارش جداگانه. DESTRUCTIVE.",
+        {"from_chat": {"type": "string"}, "targets": {"type": "array", "items": {"type": "string"}},
+         "msg_id": {"type": "integer"}},
+        required=("from_chat", "targets", "msg_id"), context=context,
+    )(bulk_forward)
 
     # قابلیت‌های مدیریتی فراتر از ربات مرجع
     management_descriptions = {
@@ -550,13 +605,14 @@ def switch_account(*, name: str, context: ActionContext) -> str:
 
 @risk(Risk.SAFE)
 def list_chats(*, limit: int = 30, kind: str = "all", query: str = "",
-               sort: str = "", account: str | None = None, context: ActionContext) -> str:
-    client = _client(context, account)
-    if kind == "all" and not query and not sort:
-        chats = client.list_chats(limit=max(1, int(limit or 30)))
-    else:
-        chats = client.list_chats(limit=max(1, int(limit or 30)), kind=kind,
-                                  query=query, sort=sort)
+               sort: str = "", offset: int = 0, archived: bool | None = None,
+               unread_only: bool = False, account: str | None = None,
+               context: ActionContext) -> str:
+    chats = _client(context, account).list_chats(
+        limit=max(1, int(limit or 30)), kind=kind, query=query, sort=sort,
+        offset=max(0, int(offset or 0)), archived=archived,
+        unread_only=bool(unread_only),
+    )
     return _format_chats(chats)
 
 
@@ -661,6 +717,73 @@ def resolve_target(*, target: str, account: str | None = None, context: ActionCo
     return f"مقصد «{target}» به‌صورت یکتا پیدا شد: {info['name']} [{', '.join(details)}]"
 
 
+@risk(Risk.SAFE)
+def get_statistics(*, account: str | None = None, context: ActionContext) -> str:
+    data = _client(context, account).get_statistics()
+    return (
+        "آمار زندهٔ تلگرام:\n"
+        f"  کل چت‌ها: {data['total_chats']}\n"
+        f"  خصوصی: {data['private_chats']} | ربات: {data['bot_chats']} | "
+        f"گروه: {data['group_chats']} | سوپرگروه: {data['supergroup_chats']} | "
+        f"کانال: {data['channel_chats']}\n"
+        f"  چت ناخوانده: {data['unread_chats']} | مجموع ناخوانده: {data['total_unread']}"
+    )
+
+
+@risk(Risk.SAFE)
+def list_unread_chats(*, limit: int = 30, account: str | None = None, context: ActionContext) -> str:
+    chats = _client(context, account).list_unread_chats(max(1, int(limit or 30)))
+    return _format_chats(chats)
+
+
+@risk(Risk.SAFE)
+def get_chat_statistics(*, chat: str, limit: int = 500,
+                        account: str | None = None, context: ActionContext) -> str:
+    data = _client(context, account).get_chat_statistics(chat, max(1, int(limit or 500)))
+    type_text = "، ".join(f"{kind}: {count}" for kind, count in data["message_types"].items()) or "—"
+    senders = "، ".join(
+        f"{item['sender_id']}: {item['messages']}" for item in data["top_senders"]
+    ) or "—"
+    return (
+        f"آمار زندهٔ «{data['chat']['name']}» (id={data['chat']['id']}):\n"
+        f"  پیام بررسی‌شده: {data['sampled_messages']} | ورودی: {data['incoming']} | خروجی: {data['outgoing']}\n"
+        f"  نوع‌ها: {type_text}\n  فرستندگان پرتکرار: {senders}"
+    )
+
+
+@risk(Risk.SAFE)
+def export_chat(*, chat: str, format: str = "json", limit: int = 1000,
+                account: str | None = None, context: ActionContext) -> str:
+    output = context.runtime.settings.data_dir / "exports"
+    path = _client(context, account).export_chat(
+        chat, output, fmt=format, limit=max(1, int(limit or 1000))
+    )
+    return f"✅ خروجی زندهٔ چت ساخته شد: {path}"
+
+
+@risk(Risk.SAFE)
+def download_media_batch(*, chat: str, limit: int = 100,
+                         media_types: list[str] | None = None,
+                         account: str | None = None, context: ActionContext) -> str:
+    paths = _client(context, account).download_media_batch(
+        chat, _media_dir(context), limit=max(1, int(limit or 100)),
+        media_types=media_types or [],
+    )
+    if not paths:
+        return "رسانه‌ای مطابق فیلتر یافت نشد."
+    return f"✅ {len(paths)} رسانه دانلود شد:\n" + "\n".join(f"  • {path}" for path in paths)
+
+
+@risk(Risk.SAFE)
+def refresh_telegram(*, account: str | None = None, context: ActionContext) -> str:
+    data = _client(context, account).refresh_summary()
+    return (
+        f"✅ دادهٔ زنده تازه شد: {data['total_chats']} چت، "
+        f"{data['total_contacts']} مخاطب، {data['total_unread']} پیام ناخوانده "
+        f"({data['refreshed_at']})"
+    )
+
+
 @risk(Risk.DESTRUCTIVE)
 def send_message(*, chat: str, text: str, account: str | None = None, context: ActionContext) -> str:
     if not isinstance(text, str) or not text.strip():
@@ -744,6 +867,46 @@ def forward_message(*, chat: str, from_chat: str, msg_id: int,
                     account: str | None = None, context: ActionContext) -> str:
     msg = _client(context, account).forward_message(chat, from_chat, int(msg_id))
     return f"✅ پیام {msg_id} از «{from_chat}» به «{chat}» انتقال یافت (id={msg.id})"
+
+def _validated_bulk_targets(targets: list[str]) -> list[str]:
+    cleaned = [str(target).strip() for target in targets if str(target).strip()]
+    cleaned = list(dict.fromkeys(cleaned))
+    if not cleaned:
+        raise AssistantError("حداقل یک مقصد لازم است")
+    if len(cleaned) > 20:
+        raise AssistantError("عملیات گروهی در هر اجرا حداکثر ۲۰ مقصد می‌پذیرد")
+    return cleaned
+
+
+@risk(Risk.DESTRUCTIVE)
+def bulk_send(*, targets: list[str], text: str, account: str | None = None,
+              context: ActionContext) -> str:
+    if not str(text).strip():
+        raise AssistantError("متن پیام خالی است")
+    client = _client(context, account)
+    results = []
+    for target in _validated_bulk_targets(targets):
+        try:
+            message = client.send_message(target, text)
+            results.append(f"  ✅ {target} (id={message.id})")
+        except Exception as exc:  # noqa: BLE001 - report every target independently
+            results.append(f"  ❌ {target}: {exc}")
+    return "گزارش ارسال گروهی:\n" + "\n".join(results)
+
+
+@risk(Risk.DESTRUCTIVE)
+def bulk_forward(*, from_chat: str, targets: list[str], msg_id: int,
+                 account: str | None = None, context: ActionContext) -> str:
+    client = _client(context, account)
+    results = []
+    for target in _validated_bulk_targets(targets):
+        try:
+            message = client.forward_message(target, from_chat, int(msg_id))
+            results.append(f"  ✅ {target} (id={message.id})")
+        except Exception as exc:  # noqa: BLE001 - report every target independently
+            results.append(f"  ❌ {target}: {exc}")
+    return "گزارش فوروارد گروهی:\n" + "\n".join(results)
+
 
 @risk(Risk.DESTRUCTIVE)
 def delete_message(*, chat: str, msg_id: int, account: str | None = None, context: ActionContext) -> str:

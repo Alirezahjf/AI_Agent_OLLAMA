@@ -31,7 +31,7 @@ class _FakeTelegram:
     def is_connected(self) -> bool:
         return self._connected
 
-    def list_chats(self, limit: int = 30) -> list[Chat]:
+    def list_chats(self, limit: int = 30, **kwargs) -> list[Chat]:
         self.calls.append("list_chats")
         return [Chat(id=10, title="Alice", username="alice", is_group=False)]
 
@@ -50,6 +50,19 @@ class _FakeTelegram:
             "id": 10, "raw_id": 10, "name": "Alice", "username": "alice",
             "phone": "+100", "kind": "private",
         }
+
+    def get_statistics(self) -> dict[str, Any]:
+        self.calls.append("get_statistics")
+        return {"total_chats": 4, "private_chats": 1, "bot_chats": 1, "group_chats": 1,
+                "supergroup_chats": 0, "channel_chats": 1, "unread_chats": 2, "total_unread": 5}
+
+    def list_unread_chats(self, limit=30):
+        self.calls.append("list_unread_chats")
+        return [Chat(id=10, title="Alice", username="alice", is_group=False, unread_count=5)]
+
+    def refresh_summary(self):
+        self.calls.append("refresh_summary")
+        return {"total_chats": 4, "total_contacts": 2, "total_unread": 5, "refreshed_at": "now"}
 
     def send_message(self, chat, text: str) -> Message:
         self.calls.append("send_message")
@@ -85,6 +98,14 @@ def test_telegram_actions_are_registered(handlers: BridgeHandlers) -> None:
         "telegram.search_messages",
         "telegram.get_me",
         "telegram.resolve_target",
+        "telegram.get_statistics",
+        "telegram.list_unread_chats",
+        "telegram.get_chat_statistics",
+        "telegram.export_chat",
+        "telegram.download_media_batch",
+        "telegram.refresh",
+        "telegram.bulk_send",
+        "telegram.bulk_forward",
         "telegram.send_message",
         "telegram.send_photo",
         "telegram.send_file",
@@ -98,7 +119,10 @@ def test_telegram_actions_report_risk_levels(handlers: BridgeHandlers) -> None:
     assert by_name["telegram.search_messages"].risk_level == Risk.SAFE
     assert by_name["telegram.get_me"].risk_level == Risk.SAFE
     assert by_name["telegram.resolve_target"].risk_level == Risk.SAFE
-    for name in ("telegram.send_message", "telegram.send_photo", "telegram.send_file"):
+    for name in ("telegram.get_statistics", "telegram.list_unread_chats", "telegram.refresh"):
+        assert by_name[name].risk_level == Risk.SAFE
+    for name in ("telegram.send_message", "telegram.send_photo", "telegram.send_file",
+                 "telegram.bulk_send", "telegram.bulk_forward"):
         assert by_name[name].risk_level == Risk.DESTRUCTIVE, name
 
 
@@ -147,6 +171,41 @@ def test_resolve_target_action_returns_stable_identity(
     assert "@alice" in result
     assert "نوع=private" in result
     assert fake.calls == ["resolve_target"]
+
+
+def test_live_statistics_unread_and_refresh_actions(
+    handlers: BridgeHandlers, ctx: ActionContext
+) -> None:
+    fake = _FakeTelegram()
+    ctx.extra["telegram"] = fake
+    assert "کل چت‌ها: 4" in run_action(handlers.registry, "telegram.get_statistics", {}, ctx)
+    assert "Alice" in run_action(handlers.registry, "telegram.list_unread_chats", {}, ctx)
+    assert "2 مخاطب" in run_action(handlers.registry, "telegram.refresh", {}, ctx)
+    assert fake.calls == ["get_statistics", "list_unread_chats", "refresh_summary"]
+
+
+def test_bulk_send_requires_confirmation_and_limits_targets(
+    handlers: BridgeHandlers, ctx: ActionContext
+) -> None:
+    fake = _FakeTelegram()
+    ctx.extra["telegram"] = fake
+    handlers.gate.auto_deny()
+    with pytest.raises(ActionRefused):
+        run_action(
+            handlers.registry, "telegram.bulk_send",
+            {"targets": ["Alice", "Bob"], "text": "hello"}, ctx,
+        )
+    handlers.gate.auto_approve()
+    result = run_action(
+        handlers.registry, "telegram.bulk_send",
+        {"targets": ["Alice", "Bob"], "text": "hello"}, ctx,
+    )
+    assert result.count("✅") == 2
+    with pytest.raises(AssistantError, match="۲۰"):
+        run_action(
+            handlers.registry, "telegram.bulk_send",
+            {"targets": [str(i) for i in range(21)], "text": "hello"}, ctx,
+        )
 
 
 def test_send_message_is_refused_without_approval(handlers: BridgeHandlers, ctx: ActionContext) -> None:

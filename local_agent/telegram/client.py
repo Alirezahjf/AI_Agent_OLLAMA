@@ -8,7 +8,9 @@ A separate ``connect()`` step is required before any other method.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 import threading
 import unicodedata
 from dataclasses import dataclass, field
@@ -340,7 +342,10 @@ class PersonalTelegram:
 
     # ----------------------------------------------------------- Actions
 
-    def list_chats(self, limit: int = 30, kind: str = "all", query: str = "", sort: str = "") -> list[Chat]:
+    def list_chats(
+        self, limit: int = 30, kind: str = "all", query: str = "", sort: str = "",
+        *, offset: int = 0, archived: bool | None = None, unread_only: bool = False,
+    ) -> list[Chat]:
         kind = str(kind or "all").lower()
         if kind not in {"private", "group", "supergroup", "channel", "bot", "all"}:
             raise TelegramError(
@@ -350,7 +355,11 @@ class PersonalTelegram:
         if sort not in {"", "unread", "recent"}:
             raise TelegramError("مرتب‌سازی باید recent یا unread باشد")
         return self._run(
-            self._list_chats(max(1, int(limit or 30)), kind=kind, query=query, sort=sort)
+            self._list_chats(
+                max(1, int(limit or 30)), kind=kind, query=query, sort=sort,
+                offset=max(0, int(offset or 0)), archived=archived,
+                unread_only=bool(unread_only),
+            )
         )
 
     def send_message(self, chat: str | int, text: str) -> Message:
@@ -417,6 +426,37 @@ class PersonalTelegram:
     def resolve_target(self, target: str | int) -> dict[str, Any]:
         """Resolve an ID, username, phone or display name using live Telegram data."""
         return self._run(self._resolve_target(target))
+
+    def get_statistics(self) -> dict[str, Any]:
+        return self._run(self._get_statistics())
+
+    def list_unread_chats(self, limit: int = 30) -> list[Chat]:
+        return self._run(self._list_unread_chats(max(1, int(limit or 30))))
+
+    def get_chat_statistics(self, chat: str | int, limit: int = 500) -> dict[str, Any]:
+        return self._run(self._get_chat_statistics(chat, max(1, min(int(limit or 500), 5000))))
+
+    def export_chat(
+        self, chat: str | int, output_dir: Path, *, fmt: str = "json", limit: int = 1000
+    ) -> Path:
+        fmt = str(fmt or "json").lower()
+        if fmt not in {"json", "txt"}:
+            raise TelegramError("فرمت خروجی باید json یا txt باشد")
+        return self._run(
+            self._export_chat(chat, output_dir, fmt=fmt, limit=max(1, min(int(limit), 5000)))
+        )
+
+    def download_media_batch(
+        self, chat: str | int, media_dir: Path, *, limit: int = 100,
+        media_types: list[str] | None = None,
+    ) -> list[Path]:
+        return self._run(self._download_media_batch(
+            chat, media_dir, limit=max(1, min(int(limit), 500)),
+            media_types=media_types or [],
+        ))
+
+    def refresh_summary(self) -> dict[str, Any]:
+        return self._run(self._refresh_summary())
 
     def delete_message(self, chat: str | int, msg_id: int) -> None:
         self._run(self._delete_message(chat, int(msg_id)))
@@ -788,7 +828,8 @@ class PersonalTelegram:
         return _entity_summary(entity)
 
     async def _list_chats(
-        self, limit: int, *, kind: str = "all", query: str = "", sort: str = ""
+        self, limit: int, *, kind: str = "all", query: str = "", sort: str = "",
+        offset: int = 0, archived: bool | None = None, unread_only: bool = False,
     ) -> list[Chat]:
         """Read live dialogs and apply filters before the result limit.
 
@@ -799,10 +840,14 @@ class PersonalTelegram:
         """
         requested = max(1, int(limit))
         normalized_query = _normalize_text(query).lstrip("@")
-        filtered = kind != "all" or bool(normalized_query)
+        filtered = (
+            kind != "all" or bool(normalized_query) or offset > 0
+            or archived is not None or unread_only
+        )
         # unread sorting needs every matching dialog to produce a true global order.
         iterator_limit = None if filtered or sort == "unread" else requested
         chats: list[Chat] = []
+        matched = 0
 
         async for dialog in self._client.iter_dialogs(limit=iterator_limit):
             chat = _chat_from_dialog(dialog)
@@ -812,8 +857,16 @@ class PersonalTelegram:
                 searchable = _normalize_text(f"{chat.title} {chat.username or ''}")
                 if normalized_query not in searchable:
                     continue
+            if archived is not None and chat.archived is not archived:
+                continue
+            if unread_only and chat.unread_count <= 0:
+                continue
+            if sort != "unread" and matched < offset:
+                matched += 1
+                continue
             chats.append(chat)
-            # Dialogs arrive newest-first.  Once enough filtered results are
+            matched += 1
+            # Dialogs arrive newest-first. Once enough filtered results are
             # collected no older result can displace them, except unread sort.
             if sort != "unread" and len(chats) >= requested:
                 break
@@ -826,6 +879,7 @@ class PersonalTelegram:
                 ),
                 reverse=True,
             )
+            return chats[offset:offset + requested]
         return chats[:requested]
 
     async def _send_message(self, chat, text: str) -> Message:
@@ -1015,6 +1069,112 @@ class PersonalTelegram:
         entity = await self._resolve_entity(chat)
         await self._client.send_read_acknowledge(entity)
 
+    async def _get_statistics(self) -> dict[str, Any]:
+        counts = {"private": 0, "group": 0, "supergroup": 0, "channel": 0, "bot": 0}
+        total = unread_chats = total_unread = 0
+        async for dialog in self._client.iter_dialogs(limit=None):
+            chat = _chat_from_dialog(dialog)
+            total += 1
+            counts[chat.kind] = counts.get(chat.kind, 0) + 1
+            total_unread += chat.unread_count
+            if chat.unread_count:
+                unread_chats += 1
+        return {
+            "total_chats": total,
+            **{f"{kind}_chats": value for kind, value in counts.items()},
+            "unread_chats": unread_chats,
+            "total_unread": total_unread,
+            "source": "live",
+        }
+
+    async def _list_unread_chats(self, limit: int) -> list[Chat]:
+        chats = []
+        async for dialog in self._client.iter_dialogs(limit=None):
+            chat = _chat_from_dialog(dialog)
+            if chat.unread_count > 0:
+                chats.append(chat)
+        chats.sort(key=lambda item: (item.unread_count, _datetime_key(item.last_message_date)), reverse=True)
+        return chats[:limit]
+
+    async def _get_chat_statistics(self, chat, limit: int) -> dict[str, Any]:
+        entity = await self._resolve_entity(chat)
+        types: dict[str, int] = {}
+        senders: dict[int, int] = {}
+        total = outgoing = 0
+        async for raw in self._client.iter_messages(entity, limit=limit):
+            message = _message_from_telethon(raw, chat_id=_marked_peer_id(entity))
+            total += 1
+            outgoing += int(message.is_outgoing)
+            types[message.message_type] = types.get(message.message_type, 0) + 1
+            if message.sender_id is not None:
+                senders[message.sender_id] = senders.get(message.sender_id, 0) + 1
+        return {
+            "chat": _entity_summary(entity),
+            "sampled_messages": total,
+            "outgoing": outgoing,
+            "incoming": total - outgoing,
+            "message_types": dict(sorted(types.items())),
+            "top_senders": [
+                {"sender_id": sender_id, "messages": count}
+                for sender_id, count in sorted(senders.items(), key=lambda item: item[1], reverse=True)[:10]
+            ],
+            "source": "live",
+        }
+
+    async def _export_chat(self, chat, output_dir: Path, *, fmt: str, limit: int) -> Path:
+        entity = await self._resolve_entity(chat)
+        chat_info = _entity_summary(entity)
+        messages = []
+        async for raw in self._client.iter_messages(entity, limit=limit):
+            messages.append(_message_from_telethon(raw, chat_id=chat_info["id"]))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = re.sub(r"[^\w .-]+", "_", chat_info["name"], flags=re.UNICODE).strip(" ._") or str(chat_info["raw_id"])
+        stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        target = output_dir / f"telegram_{safe_name}_{stamp}.{fmt}"
+        if fmt == "json":
+            payload = {
+                "chat": chat_info,
+                "exported_at": datetime.now(UTC).isoformat(),
+                "message_count": len(messages),
+                "messages": [message.to_dict() for message in messages],
+            }
+            target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        else:
+            lines = [f"چت: {chat_info['name']} (id={chat_info['id']})", ""]
+            for message in messages:
+                lines.append(
+                    f"[{message.date.isoformat()}] id={message.id} {message.sender}: "
+                    f"{message.text or '[' + message.message_type + ']'}"
+                )
+            target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return target
+
+    async def _download_media_batch(
+        self, chat, media_dir: Path, *, limit: int, media_types: list[str]
+    ) -> list[Path]:
+        entity = await self._resolve_entity(chat)
+        allowed = {str(item).lower() for item in media_types if str(item).strip()}
+        target_dir = media_dir / f"telegram_{abs(_marked_peer_id(entity))}"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        downloaded = []
+        async for message in self._client.iter_messages(entity, limit=limit):
+            kind = _message_type(message)
+            if getattr(message, "media", None) is None or (allowed and kind not in allowed):
+                continue
+            try:
+                output = await self._client.download_media(message, file=str(target_dir))
+            except Exception as exc:  # noqa: BLE001 - continue with remaining media
+                logger.debug("batch media download failed for message %s: %s", message.id, exc)
+                continue
+            if output:
+                downloaded.append(Path(str(output)))
+        return downloaded
+
+    async def _refresh_summary(self) -> dict[str, Any]:
+        statistics = await self._get_statistics()
+        contacts = await self._fetch_contacts()
+        return {**statistics, "total_contacts": len(contacts), "refreshed_at": datetime.now(UTC).isoformat()}
+
     async def _resolve_username(self, username: str) -> dict[str, Any]:
         cleaned = str(username or "").strip().lstrip("@")
         if not cleaned:
@@ -1150,6 +1310,14 @@ def _chat_matches_kind(chat: Chat, kind: str) -> bool:
     if kind == "group":
         return chat.is_group
     return bool(getattr(chat, f"is_{kind}", False))
+
+
+def _datetime_key(value: datetime | None) -> float:
+    if value is None:
+        return 0.0
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.timestamp()
 
 
 _SAVED_MESSAGES_ALIASES = {
