@@ -7,6 +7,7 @@ TelegramClient to avoid needing a real account.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,11 @@ telethon = pytest.importorskip("telethon")
 from local_agent.telegram.client import (
     PersonalTelegram,
     TelegramError,
+    _chat_from_dialog,
+    _entity_summary,
+    _get_full_entity,
+    _message_from_telethon,
+    _translate_telegram_error,
 )
 
 # ---------------------------------------------------------------------------
@@ -26,21 +32,33 @@ from local_agent.telegram.client import (
 
 
 class _FakeUser:
-    def __init__(self, id: int, first_name: str, username: str = "me", last_name: str = "") -> None:
+    def __init__(self, id: int, first_name: str, username: str = "me", last_name: str = "",
+                 phone: str = "+10000000000", *, bot: bool = False) -> None:
         self.id = id
         self.first_name = first_name
         self.username = username
         self.last_name = last_name
-        self.phone = "+10000000000"
+        self.phone = phone
+        self.bot = bot
+        self.contact = True
+        self.mutual_contact = False
+        self.verified = False
+        self.deleted = False
+        self.status = None
 
 
 class _FakeDialog:
-    def __init__(self, entity, message=None, unread: int = 0) -> None:
+    def __init__(self, entity, message=None, unread: int = 0, *, folder_id=None,
+                 pinned: bool = False) -> None:
         self.entity = entity
         self.id = getattr(entity, "id", 0)
         self.message = message
         self.unread_count = unread
         self.name = getattr(entity, "title", None) or getattr(entity, "first_name", "?")
+        self.folder_id = folder_id
+        self.pinned = pinned
+        self.notify_settings = None
+        self.date = getattr(message, "date", None)
 
 
 class _FakeEntity:
@@ -84,6 +102,17 @@ class _FakeTelegramClient:
         self.sent: list[tuple[Any, str]] = []
         self.uploaded: list[tuple[Any, str]] = []
         self.password_prompted = False
+        self.contacts = [
+            _FakeUser(101, "علی", "ali", "رضایی", "+989121234567"),
+            _FakeUser(102, "Sara", "sara", "Ahmadi", "+989351111111"),
+        ]
+        self.contact_requests = 0
+        self.dialog_requests = 0
+        self.dialog_failures = 0
+        self.dialog_error: Exception = ConnectionError("temporary network failure")
+        self.send_calls = 0
+        self.send_error: Exception | None = None
+        self.download_error: Exception | None = None
 
     async def connect(self) -> None:
         self.connected = True
@@ -110,16 +139,45 @@ class _FakeTelegramClient:
             for d in self.dialogs:
                 if d.id == target:
                     return d.entity
+            for contact in self.contacts:
+                if contact.id == target:
+                    return contact
+        cleaned = str(target).lstrip("@").lower()
         for d in self.dialogs:
-            if d.entity.title == str(target) or d.entity.username == str(target):
+            title = getattr(d.entity, "title", None) or getattr(d.entity, "first_name", "")
+            username = getattr(d.entity, "username", "") or ""
+            phone = getattr(d.entity, "phone", "") or ""
+            if cleaned in {str(title).lower(), str(username).lower(), str(phone).lower()}:
                 return d.entity
+        for contact in self.contacts:
+            if cleaned in {contact.username.lower(), contact.phone.lower()}:
+                return contact
         raise RuntimeError(f"cannot find {target}")
 
-    async def iter_dialogs(self, limit: int):
-        for dialog in self.dialogs[:limit]:
+    async def iter_dialogs(self, limit=None):
+        self.dialog_requests += 1
+        if self.dialog_failures:
+            self.dialog_failures -= 1
+            raise self.dialog_error
+        dialogs = self.dialogs if limit is None else self.dialogs[:limit]
+        for dialog in dialogs:
             yield dialog
 
+    async def contacts_request(self, request):
+        if type(request).__name__ == "GetContactsRequest":
+            self.contact_requests += 1
+            return type("ContactsResult", (), {"users": list(self.contacts)})()
+        if type(request).__name__ == "GetFullUserRequest":
+            return type(
+                "FullUserResult", (),
+                {"full_user": type("FullUser", (), {"about": "زندگی‌نامهٔ زنده"})()},
+            )()
+        raise AssertionError(f"unexpected Telegram request: {type(request).__name__}")
+
     async def send_message(self, entity, text: str) -> _FakeMessage:
+        self.send_calls += 1
+        if self.send_error is not None:
+            raise self.send_error
         self.sent.append((entity, text))
         return _FakeMessage(99, text, out=True)
 
@@ -134,6 +192,15 @@ class _FakeTelegramClient:
     async def iter_messages(self, entity, search: str | None = None, limit: int = 30):
         for message in self.search_results[:limit]:
             yield message
+
+    async def download_media(self, message, file: str):
+        if self.download_error is not None:
+            raise self.download_error
+        target_dir = Path(file)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / f"message_{message.id}.bin"
+        target.write_bytes(b"media")
+        return str(target)
 
 
 class _FakeTelegramClient2FA(_FakeTelegramClient):
@@ -164,6 +231,9 @@ def _patch_telethon(monkeypatch: pytest.MonkeyPatch, fake: _FakeTelegramClient) 
                 attr = getattr(fake, name)
                 if callable(attr):
                     setattr(self, name, attr.__get__(fake, type(fake)))
+
+        async def __call__(self, request):
+            return await self._fake.contacts_request(request)
 
     telethon_module = sys.modules.get("telethon") or telethon
     monkeypatch.setattr(telethon_module, "TelegramClient", _FakeTelegramClientClass)
@@ -311,6 +381,477 @@ def test_search_messages_returns_results(patched_telethon: _FakeTelegramClient, 
     messages = client.search_messages("Alice", "hit", limit=10)
     assert len(messages) == 2
     assert messages[0].text == "first hit"
+
+
+def test_contacts_use_live_get_contacts_request(patched_telethon: _FakeTelegramClient, tmp_path: Path) -> None:
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+
+    first = client.list_contacts(limit=100)
+    assert {row["id"] for row in first} == {101, 102}
+    assert first[0].keys() >= {"id", "name", "username", "phone", "is_contact", "is_mutual_contact"}
+
+    # A second call must hit Telegram again, not return an application cache.
+    patched_telethon.contacts.append(_FakeUser(103, "New", "new_user"))
+    second = client.list_contacts(limit=100)
+    assert {row["id"] for row in second} == {101, 102, 103}
+    assert patched_telethon.contact_requests == 2
+
+
+def test_contact_search_normalizes_persian_username_and_phone(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+
+    assert client.search_contacts("علي رضايي")[0]["id"] == 101
+    assert client.search_contacts("@ALI")[0]["id"] == 101
+    assert client.search_contacts("09121234567")[0]["id"] == 101
+    assert patched_telethon.contact_requests == 3
+
+
+def test_private_filter_applies_before_limit_and_reads_live_dialogs(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    groups = [_FakeDialog(_FakeEntity(1000 + i, f"Group {i}", is_group=True)) for i in range(40)]
+    privates = [_FakeDialog(_FakeEntity(2000 + i, f"Person {i}")) for i in range(5)]
+    patched_telethon.dialogs = groups + privates
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+
+    result = client.list_chats(limit=3, kind="private")
+    assert [chat.title for chat in result] == ["Person 0", "Person 1", "Person 2"]
+    assert all(chat.is_private and chat.kind == "private" for chat in result)
+
+    # Every call reads the current Telegram dialogs, so new activity is visible.
+    patched_telethon.dialogs.insert(0, _FakeDialog(_FakeEntity(3000, "Newest Person")))
+    assert client.list_chats(limit=1, kind="private")[0].title == "Newest Person"
+
+
+def test_chat_query_searches_beyond_initial_limit(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialogs = [
+        _FakeDialog(_FakeEntity(i, f"گروه {i}", is_group=True)) for i in range(50)
+    ] + [_FakeDialog(_FakeEntity(999, "توسعه\u200cدهندگان پایتون", username="PythonDevs"))]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+
+    by_name = client.list_chats(limit=5, kind="private", query="توسعه دهندگان")
+    by_username = client.list_chats(limit=5, query="@pythondevs")
+    assert [chat.id for chat in by_name] == [999]
+    assert [chat.id for chat in by_username] == [999]
+
+
+def test_chat_classification_and_live_metadata(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    supergroup = _FakeEntity(10, "Super", is_group=False)
+    supergroup.megagroup = True
+    channel = _FakeEntity(20, "News")
+    channel.broadcast = True
+    bot = _FakeUser(30, "Helper", "helper_bot", bot=True)
+    patched_telethon.dialogs = [
+        _FakeDialog(supergroup, _FakeMessage(1, "sg"), unread=2),
+        _FakeDialog(channel, _FakeMessage(2, "news"), folder_id=1, pinned=True),
+        _FakeDialog(bot, _FakeMessage(3, "bot")),
+    ]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+
+    assert client.list_chats(kind="supergroup")[0].kind == "supergroup"
+    channel_result = client.list_chats(kind="channel")[0]
+    assert channel_result.archived and channel_result.pinned
+    assert channel_result.last_message_date is not None
+    assert client.list_chats(kind="bot")[0].kind == "bot"
+    # group is intentionally inclusive of supergroups for backward compatibility.
+    assert client.list_chats(kind="group")[0].title == "Super"
+
+
+def test_unread_sort_scans_all_matching_dialogs(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialogs = [
+        _FakeDialog(_FakeEntity(i, f"Person {i}"), unread=i) for i in range(1, 8)
+    ]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    result = client.list_chats(limit=3, kind="private", sort="unread")
+    assert [chat.unread_count for chat in result] == [7, 6, 5]
+
+
+def test_resolver_supports_id_username_phone_name_and_saved_messages(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    alice = patched_telethon.dialogs[0].entity
+    alice.username = "alice_user"
+    alice.phone = "+989121111111"
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+
+    assert client.resolve_target("10")["name"] == "Alice"
+    assert client.resolve_target("@alice_user")["raw_id"] == 10
+    assert client.resolve_target("09121111111")["raw_id"] == 10
+    assert client.resolve_target("+989121111111")["raw_id"] == 10
+    assert client.resolve_target("Alice")["raw_id"] == 10
+    assert client.resolve_target("خودم")["raw_id"] == 1
+    assert client.resolve_target("پیام های ذخیره شده")["raw_id"] == 1
+
+
+def test_resolver_normalizes_persian_and_refreshes_live_dialogs(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialogs = [
+        _FakeDialog(_FakeEntity(88, "توسعه\u200cدهندگان كاربردی")),
+    ]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    assert client.resolve_target("توسعه دهندگان کاربردی")["raw_id"] == 88
+
+    # Resolver scans current dialogs each time; no old result snapshot is reused.
+    patched_telethon.dialogs.insert(0, _FakeDialog(_FakeEntity(99, "گفتگوی همین لحظه")))
+    assert client.resolve_target("گفتگوی همین لحظه")["raw_id"] == 99
+
+
+def test_resolver_prefers_exact_username_over_same_display_title(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    by_title = _FakeEntity(11, "unique_target")
+    by_username = _FakeEntity(12, "Other", username="unique_target")
+    patched_telethon.dialogs = [_FakeDialog(by_title), _FakeDialog(by_username)]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    assert client.resolve_target("unique_target")["raw_id"] == 12
+
+
+def test_resolver_rejects_ambiguous_display_names(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialogs = [
+        _FakeDialog(_FakeEntity(71, "علی رضایی")),
+        _FakeDialog(_FakeEntity(72, "علی رضایی")),
+    ]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    with pytest.raises(TelegramError) as excinfo:
+        client.resolve_target("علی رضایی")
+    message = str(excinfo.value)
+    assert "مبهم" in message
+    assert "71" in message and "72" in message
+
+
+def test_resolver_accepts_one_unique_partial_match(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialogs = [
+        _FakeDialog(_FakeEntity(81, "گروه تخصصی پایتون تهران", is_group=True)),
+        _FakeDialog(_FakeEntity(82, "گفتگوی جاوا", is_group=True)),
+    ]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    assert client.resolve_target("پایتون تهران")["raw_id"] == 81
+
+
+def test_resolver_rejects_ambiguous_partial_match(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialogs = [
+        _FakeDialog(_FakeEntity(91, "تیم توسعه آلفا", is_group=True)),
+        _FakeDialog(_FakeEntity(92, "تیم توسعه بتا", is_group=True)),
+    ]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    with pytest.raises(TelegramError, match="مبهم"):
+        client.resolve_target("تیم توسعه")
+
+
+def test_profile_reads_full_user_about_live(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    person = _FakeUser(501, "Full", "full_user", "Person")
+    patched_telethon.dialogs = [_FakeDialog(person)]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    profile = client.get_profile("Full Person", tmp_path / "media")
+    assert profile["kind"] == "private"
+    assert profile["bio"] == "زندگی‌نامهٔ زنده"
+    assert profile["id"] == 501
+
+
+def test_rich_message_metadata_and_media_types() -> None:
+    msg = _FakeMessage(44, "caption", sender="alice", out=False)
+    msg.sender_id = 123
+    msg.reply_to = type("Reply", (), {"reply_to_msg_id": 40})()
+    msg.forwards = 7
+    msg.views = 99
+    msg.media = object()
+    msg.photo = object()
+    result = _message_from_telethon(msg, chat_id=900)
+    assert result.to_dict() == {
+        "id": 44,
+        "chat_id": 900,
+        "sender_id": 123,
+        "sender": "alice",
+        "text": "caption",
+        "date": "2024-01-01T12:00:00+00:00",
+        "is_outgoing": False,
+        "message_type": "photo",
+        "reply_to_msg_id": 40,
+        "forwards": 7,
+        "views": 99,
+        "has_media": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("attribute", "expected"),
+    [
+        ("sticker", "sticker"), ("gif", "gif"), ("voice", "voice"),
+        ("video_note", "video_note"), ("video", "video"), ("audio", "audio"),
+        ("document", "document"), ("geo", "location"), ("contact", "contact"),
+        ("poll", "poll"),
+    ],
+)
+def test_rich_message_detects_supported_media_types(attribute: str, expected: str) -> None:
+    msg = _FakeMessage(1, "")
+    msg.media = object()
+    setattr(msg, attribute, object())
+    assert _message_from_telethon(msg, chat_id=1).message_type == expected
+
+
+def test_real_telethon_entities_have_stable_kinds_and_marked_ids() -> None:
+    from telethon.tl import types
+
+    user = types.User(id=7, access_hash=1, first_name="Alice", username="alice")
+    group = types.Chat(
+        id=8, title="Group", photo=types.ChatPhotoEmpty(), participants_count=12,
+        date=datetime(2024, 1, 1, tzinfo=UTC), version=1,
+    )
+    channel = types.Channel(
+        id=9, title="Channel", photo=types.ChatPhotoEmpty(),
+        date=datetime(2024, 1, 1, tzinfo=UTC), broadcast=True,
+        megagroup=False, access_hash=2,
+    )
+    supergroup = types.Channel(
+        id=10, title="Supergroup", photo=types.ChatPhotoEmpty(),
+        date=datetime(2024, 1, 1, tzinfo=UTC), broadcast=False,
+        megagroup=True, access_hash=3,
+    )
+
+    assert _entity_summary(user)["kind"] == "private"
+    assert _entity_summary(group)["id"] == -8
+    assert _entity_summary(group)["kind"] == "group"
+    assert _entity_summary(channel)["id"] == -1000000000009
+    assert _entity_summary(channel)["kind"] == "channel"
+    assert _entity_summary(supergroup)["kind"] == "supergroup"
+    chat = _chat_from_dialog(_FakeDialog(supergroup, _FakeMessage(1, "live")))
+    assert chat.kind == "supergroup"
+    assert chat.to_dict()["last_message_date"] == "2024-01-01T12:00:00+00:00"
+
+
+def test_full_entity_requests_cover_users_groups_and_channels() -> None:
+    from telethon.tl import types
+
+    requests = []
+
+    async def requester(request):
+        requests.append(type(request).__name__)
+        attribute = "full_user" if type(request).__name__ == "GetFullUserRequest" else "full_chat"
+        return type("FullResult", (), {attribute: type("Full", (), {"about": "full"})()})()
+
+    user = types.User(id=1, access_hash=1, first_name="User")
+    group = types.Chat(
+        id=2, title="Group", photo=types.ChatPhotoEmpty(), participants_count=2,
+        date=datetime(2024, 1, 1, tzinfo=UTC), version=1,
+    )
+    channel = types.Channel(
+        id=3, title="Channel", photo=types.ChatPhotoEmpty(),
+        date=datetime(2024, 1, 1, tzinfo=UTC), broadcast=True,
+        megagroup=False, access_hash=3,
+    )
+    assert asyncio.run(_get_full_entity(requester, user)).about == "full"
+    assert asyncio.run(_get_full_entity(requester, group)).about == "full"
+    assert asyncio.run(_get_full_entity(requester, channel)).about == "full"
+    assert requests == ["GetFullUserRequest", "GetFullChatRequest", "GetFullChannelRequest"]
+
+
+def test_batch_download_does_not_hide_network_failure(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    photo = _FakeMessage(30, "photo")
+    photo.media = object()
+    photo.photo = object()
+    patched_telethon.search_results = [photo]
+    patched_telethon.download_error = ConnectionError("secret endpoint")
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    with pytest.raises(TelegramError) as excinfo:
+        client.download_media_batch("Alice", tmp_path / "media")
+    assert excinfo.value.code == "network"
+    assert "secret endpoint" not in str(excinfo.value)
+
+
+def test_chat_pagination_archive_and_unread_filters_are_applied_live(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialogs = [
+        _FakeDialog(_FakeEntity(100 + i, f"Person {i}"), unread=i, folder_id=1 if i % 2 else None)
+        for i in range(6)
+    ]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    page = client.list_chats(limit=2, kind="private", offset=2)
+    assert [chat.title for chat in page] == ["Person 2", "Person 3"]
+    archived = client.list_chats(limit=10, archived=True)
+    assert [chat.title for chat in archived] == ["Person 1", "Person 3", "Person 5"]
+    unread = client.list_chats(limit=10, unread_only=True)
+    assert all(chat.unread_count > 0 for chat in unread)
+
+
+def test_live_statistics_unread_and_refresh(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialogs = [
+        _FakeDialog(_FakeEntity(1, "Private"), unread=3),
+        _FakeDialog(_FakeEntity(2, "Group", is_group=True), unread=0),
+        _FakeDialog(_FakeUser(3, "Bot", bot=True), unread=1),
+    ]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    stats = client.get_statistics()
+    assert stats["total_chats"] == 3
+    assert stats["private_chats"] == 1 and stats["bot_chats"] == 1
+    assert stats["unread_chats"] == 2 and stats["total_unread"] == 4
+    assert [chat.unread_count for chat in client.list_unread_chats()] == [3, 1]
+    refreshed = client.refresh_summary()
+    assert refreshed["total_contacts"] == 2
+    assert refreshed["source"] == "live"
+
+
+def test_chat_statistics_and_export_are_rich_and_live(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    first = _FakeMessage(10, "hello", out=False)
+    first.sender_id = 50
+    second = _FakeMessage(11, "photo", out=True)
+    second.sender_id = 1
+    second.media = object()
+    second.photo = object()
+    patched_telethon.search_results = [first, second]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    stats = client.get_chat_statistics("Alice", 100)
+    assert stats["sampled_messages"] == 2
+    assert stats["message_types"] == {"photo": 1, "text": 1}
+    assert stats["incoming"] == 1 and stats["outgoing"] == 1
+
+    output = client.export_chat("Alice", tmp_path / "exports", fmt="json", limit=100)
+    payload = __import__("json").loads(output.read_text(encoding="utf-8"))
+    assert payload["message_count"] == 2
+    assert payload["messages"][1]["message_type"] == "photo"
+
+
+def test_batch_media_download_filters_types(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    photo = _FakeMessage(20, "photo")
+    photo.media = object()
+    photo.photo = object()
+    document = _FakeMessage(21, "doc")
+    document.media = object()
+    document.document = object()
+    patched_telethon.search_results = [photo, document, _FakeMessage(22, "text")]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    paths = client.download_media_batch(
+        "Alice", tmp_path / "media", limit=100, media_types=["photo"]
+    )
+    assert [path.name for path in paths] == ["message_20.bin"]
+    assert paths[0].is_file()
+
+
+@pytest.mark.parametrize(
+    ("exception_name", "code"),
+    [
+        ("SessionRevokedError", "session_revoked"),
+        ("AuthKeyUnregisteredError", "session_revoked"),
+        ("UserDeactivatedBanError", "account_restricted"),
+        ("UserPrivacyRestrictedError", "privacy_restricted"),
+        ("ChatAdminRequiredError", "admin_required"),
+        ("ChatWriteForbiddenError", "write_forbidden"),
+        ("PeerIdInvalidError", "peer_invalid"),
+        ("UsernameNotOccupiedError", "peer_invalid"),
+        ("MessageIdInvalidError", "message_invalid"),
+        ("FileReferenceExpiredError", "media_invalid"),
+    ],
+)
+def test_telegram_error_matrix(exception_name: str, code: str) -> None:
+    exc = type(exception_name, (Exception,), {})("sensitive raw payload")
+    error = _translate_telegram_error(exc)
+    assert error.code == code
+    assert "sensitive raw payload" not in str(error)
+    assert error.to_dict()["code"] == code
+
+
+def test_flood_wait_network_timeout_and_unknown_errors_are_structured() -> None:
+    flood = type("FloodWaitError", (Exception,), {"seconds": 17})("raw")
+    flood_error = _translate_telegram_error(flood)
+    assert flood_error.code == "flood_wait"
+    assert flood_error.retry_after == 17
+    assert flood_error.retryable is False
+    assert _translate_telegram_error(ConnectionError("secret host")).code == "network"
+    assert _translate_telegram_error(TimeoutError()).code == "timeout"
+    unknown = _translate_telegram_error(Exception("secret-token"))
+    assert unknown.code == "telegram_error"
+    assert "secret-token" not in str(unknown)
+
+
+def test_live_reads_retry_one_transient_failure_only(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialog_failures = 1
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    assert client.list_chats(limit=10)
+    assert patched_telethon.dialog_requests == 2
+    assert client.last_error == "" and client.last_error_code == ""
+
+
+def test_flood_wait_is_not_retried_automatically(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialog_failures = 2
+    patched_telethon.dialog_error = type("FloodWaitError", (Exception,), {"seconds": 9})("raw")
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    with pytest.raises(TelegramError) as excinfo:
+        client.list_chats(limit=10)
+    assert excinfo.value.code == "flood_wait"
+    assert patched_telethon.dialog_requests == 1
+    assert client.last_error_code == "flood_wait"
+
+
+def test_destructive_send_is_never_automatically_retried(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.send_error = ConnectionError("temporary")
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    with pytest.raises(TelegramError) as excinfo:
+        client.send_message("Alice", "hello")
+    assert excinfo.value.code == "network"
+    assert patched_telethon.send_calls == 1
+
+
+def test_operation_timeout_is_cancelled_and_structured(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    with pytest.raises(TelegramError) as excinfo:
+        client._run(asyncio.sleep(0.05), timeout=0)
+    assert excinfo.value.code == "timeout"
+    assert excinfo.value.retryable is True
 
 
 # ---------------------------------------------------------------------------

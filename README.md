@@ -24,6 +24,21 @@
 
 برای مستندات کامل ایجنت محلی، فایل [`local_agent/README.md`](local_agent/README.md) را ببینید.
 
+### ✈️ تلگرام شخصی حرفه‌ای در اپ محلی
+
+بخش اکانت شخصی تلگرام (`local_agent/telegram`) با حفظ معماری Telethon و چنداکانتی ارتقا یافته است:
+
+- **دادهٔ زنده و بدون cache برنامه:** فهرست چت‌ها، چت‌های خصوصی، مخاطبین، unread و آخرین پیام در هر فراخوانی مستقیماً از Telegram خوانده می‌شوند.
+- **مخاطبین سازگار با Telethon:** دریافت با `GetContactsRequest(hash=0)`؛ جست‌وجوی نام، username و شماره با نرمال‌سازی فارسی و قالب‌های `09`/`+98`.
+- **فیلتر و صفحه‌بندی صحیح:** private/group/supergroup/channel/bot، پوشه اصلی/Archive، unread، query، offset و «نمایش موارد بیشتر» بعد از اعمال فیلتر.
+- **Resolver امن:** پشتیبانی از marked ID، `@username`، شماره، نام مخاطب، عنوان چت و Saved Messages؛ مقصد هم‌نام هرگز خودکار انتخاب نمی‌شود.
+- **مدل‌های غنی:** اطلاعات دقیق Chat، Contact و Message شامل نوع رسانه، sender ID، reply ID، views، forwards، pin، mute، forum و folder.
+- **ابزارهای تکمیلی:** آمار زنده، آمار هر چت، export به JSON/TXT، دانلود گروهی رسانه و ارسال/فوروارد گروهی تأییدشده با سقف ۲۰ مقصد.
+- **رابط مستقیم Web/Desktop و CLI:** مرور چت‌ها، مخاطبین و تاریخچه، انتخاب اکانت، جست‌وجو و تازه‌سازی زنده؛ دستورات `/telegram chats|contacts|stats|resolve`.
+- **خطاهای ساختاریافته و امن:** Network، Timeout، FloodWait، Session Revoked، Privacy، Admin، Peer/Message Invalid و مقصد مبهم؛ فقط readهای idempotent یک retry محدود دارند و عملیات مخرب هرگز خودکار تکرار نمی‌شوند.
+
+قرارداد کامل قابلیت‌ها، API، امنیت، خطاها و سیاست دادهٔ زنده در [`docs/TELEGRAM_UPGRADE_FA.md`](docs/TELEGRAM_UPGRADE_FA.md) ثبت شده است.
+
 > **امنیت قبل از اتوماسیون:** این برنامه روی فایل‌ها و فرمان‌های واقعی کار می‌کند. هیچ LLM—even بهترین مدل ابری—جایگزین تأیید انسان و محیط ایزوله نیست. برای کار جدی آن را در یک VM یا container بدون secret و با یک workspace mount‌شده اجرا کنید.
 
 ## پشتیبانی کامل از بله کنار تلگرام

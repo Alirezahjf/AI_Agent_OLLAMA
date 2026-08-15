@@ -24,6 +24,8 @@ class _FakeClient:
         self._connected = connected
         self.login_state = state
         self.calls: list[str] = []
+        self.last_error = ""
+        self.last_error_code = ""
 
     @property
     def is_connected(self) -> bool:
@@ -149,11 +151,28 @@ def test_telegram_status_shows_per_account_enabled(tmp_path: Path) -> None:
     assert status["state"] == "disabled"
 
 
+def test_telegram_status_exposes_safe_error_code(tmp_path: Path) -> None:
+    handlers = BridgeHandlers.build(_settings_with_disabled_account(tmp_path))
+    fake = _FakeClient()
+    fake.last_error = "ارتباط برقرار نشد"
+    fake.last_error_code = "network"
+    handlers._telegram_accounts["اصلی"] = fake
+    status = handlers.telegram_status("اصلی")
+    assert status["last_error"] == "ارتباط برقرار نشد"
+    assert status["last_error_code"] == "network"
+
+
 def test_switch_unknown_account_still_raises(tmp_path: Path) -> None:
     handlers = BridgeHandlers.build(_settings_with_disabled_account(tmp_path))
     with pytest.raises(Exception) as exc:
         handlers.switch_telegram_account("وجودندارد")
     assert "وجود ندارد" in str(exc.value)
+
+
+def test_remove_unknown_account_is_rejected_before_touching_session(tmp_path: Path) -> None:
+    handlers = BridgeHandlers.build(_settings_with_disabled_account(tmp_path))
+    with pytest.raises(Exception, match="وجود ندارد"):
+        handlers.remove_telegram_account("ghost", confirmed=True)
 
 
 def test_accounts_status_never_leaks_secrets(tmp_path: Path) -> None:

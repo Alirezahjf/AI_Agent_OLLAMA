@@ -48,7 +48,7 @@ Available commands (type /<command> or just chat normally):
   /reset              clear conversation history (shared across frontends)
   /undo               pop the last user message and resend
   /screenshot         capture the primary screen now
-  /telegram           connect / status for the personal Telegram client
+  /telegram           اکانت، چت/مخاطب زنده، آمار و resolve تلگرام شخصی
   /send NAME TEXT     (telegram) quick send without going through the agent
   /history            show the last 20 conversation messages
   /purge              پاک‌سازی کامل داده‌ها/تنظیمات ایجنت و لغو اجرای خودکار
@@ -347,7 +347,7 @@ class _REPL:
         self.renderer.info(f"screenshot saved: {target}  ({image.width}x{image.height})")
 
     def _cmd_telegram(self, args: list[str]) -> None:
-        """/telegram list | use <name> | connect [name] | status [name] | disconnect [name] | chats"""
+        """Telegram account, live chats/contacts, statistics and resolver commands."""
         sub = args[0] if args else "status"
         handlers = self._bridge_handlers()
         if handlers is None:
@@ -363,7 +363,15 @@ class _REPL:
                 result = handlers.disconnect_telegram(name)
                 self.renderer.info(f"تلگرام قطع شد (account={result.get('account')})")
             elif sub == "chats":
-                self._telegram_chats(handlers, name)
+                kind = args[1] if len(args) > 1 and args[1] in {"all", "private", "group", "supergroup", "channel", "bot"} else "all"
+                query_start = 2 if len(args) > 1 and args[1] == kind else 1
+                self._telegram_chats(handlers, kind=kind, query=" ".join(args[query_start:]))
+            elif sub == "contacts":
+                self._telegram_contacts(handlers, " ".join(args[1:]))
+            elif sub == "stats":
+                self._telegram_stats(handlers)
+            elif sub == "resolve":
+                self._telegram_resolve(handlers, " ".join(args[1:]))
             elif sub == "list":
                 self._telegram_list(handlers)
             elif sub == "use":
@@ -374,7 +382,7 @@ class _REPL:
                 self.renderer.info(f"اکانت فعال: {result.get('active_account')}")
             else:
                 self.renderer.warn(
-                    "usage: /telegram list | use <name> | connect [name] | status [name] | disconnect [name] | chats"
+                    "usage: /telegram list | use NAME | connect [NAME] | status [NAME] | disconnect [NAME] | chats [KIND] [QUERY] | contacts [QUERY] | stats | resolve TARGET"
                 )
         except AssistantError as exc:
             self.renderer.warn(str(exc))
@@ -422,23 +430,62 @@ class _REPL:
             return
         self.renderer.info(f"✅ {result.get('message', 'connected')}")
 
-    def _telegram_chats(self, handlers: Any, name: str | None = None) -> None:
-        if name:
-            client = handlers._telegram_accounts.get(name)
-        else:
-            client = handlers.telegram
+    def _connected_telegram(self, handlers: Any) -> Any | None:
+        client = handlers.telegram
         if client is None or not client.is_connected:
             self.renderer.warn("تلگرام وصل نیست؛ اول /telegram connect")
+            return None
+        return client
+
+    def _telegram_chats(self, handlers: Any, *, kind: str = "all", query: str = "") -> None:
+        client = self._connected_telegram(handlers)
+        if client is None:
             return
         try:
-            chats = client.list_chats(limit=30)
+            chats = client.list_chats(limit=50, kind=kind, query=query)
         except Exception as exc:  # noqa: BLE001
             self.renderer.warn(f"گرفتن لیست گفتگوها ناموفق بود: {exc}")
             return
-        self.renderer.section("گفتگوهای اخیر")
+        self.renderer.section(f"گفتگوهای زنده ({kind})")
         for chat in chats:
-            group = " [گروه]" if chat.is_group else ""
-            self.renderer.info(f"  • {chat.title} (id={chat.id}){group}")
+            username = f" @{chat.username}" if chat.username else ""
+            unread = f" unread={chat.unread_count}" if chat.unread_count else ""
+            self.renderer.info(f"  • {chat.title} [{chat.kind}] (id={chat.id}){username}{unread}")
+
+    def _telegram_contacts(self, handlers: Any, query: str) -> None:
+        client = self._connected_telegram(handlers)
+        if client is None:
+            return
+        rows = client.search_contacts(query, 100) if query.strip() else client.list_contacts(100)
+        self.renderer.section("مخاطبین زنده")
+        for row in rows:
+            username = f" @{row['username']}" if row.get("username") else ""
+            phone = f" {row['phone']}" if row.get("phone") else ""
+            self.renderer.info(f"  • {row.get('name') or '?'} (id={row['id']}){username}{phone}")
+
+    def _telegram_stats(self, handlers: Any) -> None:
+        client = self._connected_telegram(handlers)
+        if client is None:
+            return
+        data = client.refresh_summary()
+        self.renderer.section("آمار زندهٔ تلگرام")
+        self.renderer.info(
+            f"  chats={data['total_chats']} contacts={data['total_contacts']} "
+            f"unread_chats={data['unread_chats']} unread={data['total_unread']}"
+        )
+
+    def _telegram_resolve(self, handlers: Any, target: str) -> None:
+        if not target.strip():
+            self.renderer.warn("usage: /telegram resolve <name | @username | phone | id>")
+            return
+        client = self._connected_telegram(handlers)
+        if client is None:
+            return
+        info = client.resolve_target(target)
+        self.renderer.info(
+            f"  {info['name']} [{info['kind']}] id={info['id']}"
+            + (f" @{info['username']}" if info.get("username") else "")
+        )
 
     def _cmd_send(self, args: list[str]) -> None:
         if len(args) < 2:

@@ -234,6 +234,21 @@
       activeTelegramAccount: "",
       telegramTargetAccount: "",
       switchingTelegram: false,
+      telegramBrowserOpen: false,
+      telegramBrowserLoading: false,
+      telegramBrowserError: "",
+      telegramBrowserAccount: "",
+      telegramBrowserQuery: "",
+      telegramChatKind: "all",
+      telegramChatScope: "all",
+      telegramTab: "chats",
+      telegramBrowserOffset: 0,
+      telegramBrowserHasMore: false,
+      telegramBrowserItems: [],
+      telegramStats: null,
+      telegramSelectedChat: null,
+      telegramHistory: [],
+      telegramHistoryLoading: false,
       gmailConnected: false,
       gmailBusy: false,
 
@@ -607,7 +622,15 @@
 
       async api(path, options) {
         const response = await fetch(path, Object.assign({ headers: { "Content-Type": "application/json" } }, options || {}));
-        if (!response.ok) throw new Error("HTTP " + response.status);
+        if (!response.ok) {
+          let detail = "HTTP " + response.status;
+          try {
+            const body = await response.json();
+            const payload = body.detail || body;
+            detail = (payload && (payload.message || payload.detail)) || (typeof payload === "string" ? payload : detail);
+          } catch (_) { /* plain response */ }
+          throw new Error(detail);
+        }
         return response.json();
       },
 
@@ -784,6 +807,74 @@
           this.toast("info", "ℹ️", "تلگرام قطع شد");
         } catch (_) {
           this.toast("bad", "❌", "قطع اتصال تلگرام ناموفق بود");
+        }
+      },
+
+      async openTelegramBrowser() {
+        this.telegramBrowserOpen = true;
+        this.telegramBrowserAccount = this.activeTelegramAccount || (this.telegramAccounts[0] && this.telegramAccounts[0].account) || "";
+        this.telegramSelectedChat = null;
+        await this.loadTelegramBrowser();
+      },
+
+      telegramKindLabel(kind) {
+        return { private: "خصوصی", bot: "ربات", group: "گروه", supergroup: "سوپرگروه", channel: "کانال" }[kind] || "";
+      },
+
+      telegramItemIcon(item) {
+        return { private: "👤", bot: "🤖", group: "👥", supergroup: "👥", channel: "📣" }[item.kind] || "👤";
+      },
+
+      async loadTelegramBrowser(append) {
+        if (this.connection === "offline") return;
+        const loadMore = Boolean(append);
+        if (!loadMore) this.telegramBrowserOffset = 0;
+        this.telegramBrowserLoading = true;
+        this.telegramBrowserError = "";
+        if (!loadMore) {
+          this.telegramSelectedChat = null;
+          this.telegramHistory = [];
+        }
+        const account = this.telegramBrowserAccount ? "&account=" + encodeURIComponent(this.telegramBrowserAccount) : "";
+        const query = "&query=" + encodeURIComponent(this.telegramBrowserQuery || "");
+        const offset = "&offset=" + this.telegramBrowserOffset;
+        let scope = "";
+        if (this.telegramTab === "chats" && this.telegramChatScope === "unread") scope = "&unread_only=true";
+        if (this.telegramTab === "chats" && this.telegramChatScope === "archive") scope = "&archived=true";
+        if (this.telegramTab === "chats" && this.telegramChatScope === "main") scope = "&archived=false";
+        try {
+          const path = this.telegramTab === "contacts"
+            ? "/api/telegram/contacts?limit=100" + account + query + offset
+            : "/api/telegram/chats?limit=50&sort=recent&kind=" + encodeURIComponent(this.telegramChatKind) + account + query + offset + scope;
+          const [result, stats] = await Promise.all([
+            this.api(path),
+            this.api("/api/telegram/stats?" + (this.telegramBrowserAccount ? "account=" + encodeURIComponent(this.telegramBrowserAccount) : "")),
+          ]);
+          const incoming = result.items || [];
+          this.telegramBrowserItems = loadMore ? this.telegramBrowserItems.concat(incoming) : incoming;
+          this.telegramBrowserOffset = result.next_offset || this.telegramBrowserItems.length;
+          this.telegramBrowserHasMore = Boolean(result.has_more);
+          this.telegramStats = stats || null;
+        } catch (err) {
+          if (!loadMore) this.telegramBrowserItems = [];
+          this.telegramBrowserError = err.message || "دریافت اطلاعات تلگرام ناموفق بود";
+        } finally {
+          this.telegramBrowserLoading = false;
+        }
+      },
+
+      async loadTelegramHistory(chat) {
+        this.telegramSelectedChat = chat;
+        this.telegramHistory = [];
+        this.telegramHistoryLoading = true;
+        try {
+          const account = this.telegramBrowserAccount ? "&account=" + encodeURIComponent(this.telegramBrowserAccount) : "";
+          const result = await this.api("/api/telegram/history?limit=50&target=" + encodeURIComponent(chat.id) + account);
+          this.telegramHistory = result.items || [];
+        } catch (err) {
+          this.telegramBrowserError = err.message || "دریافت تاریخچه ناموفق بود";
+        } finally {
+          this.telegramHistoryLoading = false;
         }
       },
 
