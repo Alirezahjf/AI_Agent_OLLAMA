@@ -236,6 +236,7 @@ def test_multi_account_actions_registered(tmp_path: Path) -> None:
         "telegram.list_accounts", "telegram.switch_account",
         "telegram.search_contacts", "telegram.get_chat_history", "telegram.get_profile",
         "telegram.download_media", "telegram.mark_read", "telegram.resolve_username",
+        "telegram.resolve_target",
         "telegram.send_video", "telegram.send_voice", "telegram.send_audio",
         "telegram.send_document", "telegram.send_sticker", "telegram.send_animation",
         "telegram.send_location", "telegram.reply_to", "telegram.forward_message",

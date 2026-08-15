@@ -44,6 +44,13 @@ class _FakeTelegram:
         self.calls.append("get_me")
         return {"id": 1, "first_name": "Test", "last_name": "", "username": "tester", "phone": "+100000"}
 
+    def resolve_target(self, target) -> dict[str, Any]:
+        self.calls.append("resolve_target")
+        return {
+            "id": 10, "raw_id": 10, "name": "Alice", "username": "alice",
+            "phone": "+100", "kind": "private",
+        }
+
     def send_message(self, chat, text: str) -> Message:
         self.calls.append("send_message")
 
@@ -77,6 +84,7 @@ def test_telegram_actions_are_registered(handlers: BridgeHandlers) -> None:
         "telegram.list_chats",
         "telegram.search_messages",
         "telegram.get_me",
+        "telegram.resolve_target",
         "telegram.send_message",
         "telegram.send_photo",
         "telegram.send_file",
@@ -89,6 +97,7 @@ def test_telegram_actions_report_risk_levels(handlers: BridgeHandlers) -> None:
     assert by_name["telegram.list_chats"].risk_level == Risk.SAFE
     assert by_name["telegram.search_messages"].risk_level == Risk.SAFE
     assert by_name["telegram.get_me"].risk_level == Risk.SAFE
+    assert by_name["telegram.resolve_target"].risk_level == Risk.SAFE
     for name in ("telegram.send_message", "telegram.send_photo", "telegram.send_file"):
         assert by_name[name].risk_level == Risk.DESTRUCTIVE, name
 
@@ -124,6 +133,20 @@ def test_search_messages_returns_hits(handlers: BridgeHandlers, ctx: ActionConte
     ctx.extra["telegram"] = _FakeTelegram()
     result = run_action(handlers.registry, "telegram.search_messages", {"chat": "Alice", "query": "hit"}, ctx)
     assert "hit" in result
+    assert "id=1" in result
+    assert "نوع=text" in result
+
+
+def test_resolve_target_action_returns_stable_identity(
+    handlers: BridgeHandlers, ctx: ActionContext
+) -> None:
+    fake = _FakeTelegram()
+    ctx.extra["telegram"] = fake
+    result = run_action(handlers.registry, "telegram.resolve_target", {"target": "Alice"}, ctx)
+    assert "id=10" in result
+    assert "@alice" in result
+    assert "نوع=private" in result
+    assert fake.calls == ["resolve_target"]
 
 
 def test_send_message_is_refused_without_approval(handlers: BridgeHandlers, ctx: ActionContext) -> None:

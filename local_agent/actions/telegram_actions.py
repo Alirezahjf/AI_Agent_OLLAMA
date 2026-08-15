@@ -10,7 +10,7 @@ Risk levels follow the README contract:
 
 * read-only tools (``list_chats``, ``search_messages``, ``get_me``,
   ``list_contacts``, ``search_contacts``, ``get_chat_history``, ``get_profile``,
-  ``download_media``, ``mark_read``, ``resolve_username``,
+  ``download_media``, ``mark_read``, ``resolve_username``, ``resolve_target``,
   ``list_accounts``, ``switch_account``) — Safe
 * sending tools (``send_message``, ``send_photo``, ``send_file``,
   ``send_video/voice/audio/document/sticker/animation``,
@@ -180,6 +180,19 @@ def register_telegram(registry: ActionRegistry, context: ActionContext) -> None:
         },
         required=("username",),
     )(resolve_username)
+
+    registry.decorator(
+        name="telegram.resolve_target",
+        description=(
+            "پیدا کردن امن و زندهٔ مقصد تلگرام با شناسه، @username، شماره، نام مخاطب "
+            "یا عنوان چت. نتیجهٔ مبهم خودکار انتخاب نمی‌شود و گزینه‌ها با شناسه برمی‌گردند. SAFE."
+        ),
+        parameters={
+            "target": {"type": "string", "description": "شناسه، نام، @username یا شماره"},
+            "account": {"type": "string", "description": "نام اکانت (پیش‌فرض: اکانت فعال)"},
+        },
+        required=("target",),
+    )(resolve_target)
 
     # ---- Destructive / sending -----------------------------------------
     _register_send(
@@ -431,6 +444,16 @@ def _format_chats(chats: list[Any]) -> str:
             details.append("بی‌صدا")
         if getattr(chat, "archived", False):
             details.append("بایگانی")
+        if getattr(chat, "is_forum", False):
+            details.append("انجمن")
+        if getattr(chat, "verified", False):
+            details.append("تأییدشده")
+        members = getattr(chat, "members_count", None)
+        if members is not None:
+            details.append(f"اعضا: {members}")
+        last_date = getattr(chat, "last_message_date", None)
+        if last_date is not None:
+            details.append(f"آخرین فعالیت: {last_date:%Y-%m-%d %H:%M}")
         lines.append(f"  • {chat.title} [{', '.join(details)}]")
     head = f"تعداد {len(chats)} گفتگو (دادهٔ زندهٔ تلگرام):\n"
     return head + "\n".join(lines) if lines else "هیچ گفتگویی یافت نشد؛ در این فهرست گفتگویی نیست."
@@ -440,7 +463,21 @@ def _format_messages(messages: list[Any]) -> str:
     lines = []
     for msg in messages:
         direction = "من" if msg.is_outgoing else msg.sender
-        lines.append(f"  [{msg.date:%Y-%m-%d %H:%M}] {direction}: {msg.text[:200]}")
+        sender_id = getattr(msg, "sender_id", None)
+        sender_detail = f"، sender_id={sender_id}" if sender_id is not None else ""
+        message_type = getattr(msg, "message_type", "text")
+        reply_id = getattr(msg, "reply_to_msg_id", None)
+        reply_detail = f"، پاسخ‌به={reply_id}" if reply_id is not None else ""
+        stats = []
+        if getattr(msg, "views", 0):
+            stats.append(f"بازدید={msg.views}")
+        if getattr(msg, "forwards", 0):
+            stats.append(f"فوروارد={msg.forwards}")
+        stats_detail = f"، {', '.join(stats)}" if stats else ""
+        lines.append(
+            f"  [{msg.date:%Y-%m-%d %H:%M}] id={msg.id}، نوع={message_type}"
+            f"{reply_detail}{stats_detail} — {direction}{sender_detail}: {msg.text[:200]}"
+        )
     return "\n".join(lines) if lines else "پیامی یافت نشد."
 
 
@@ -573,13 +610,16 @@ def get_chat_history(*, chat: str, limit: int = 30, offset_id: int = 0,
 def get_profile(*, chat: str, account: str | None = None, context: ActionContext) -> str:
     info = _client(context, account).get_profile(chat, _media_dir(context))
     lines = [
+        f"  شناسه: {info['id']}",
         f"  نام: {info['name']}",
         f"  نام کاربری: @{info['username']}" if info["username"] else "",
         f"  شماره: {info['phone']}" if info.get("phone") else "",
-        f"  بیو: {info['bio']}" if info.get("bio") else "",
+        f"  بیو/توضیحات: {info['bio']}" if info.get("bio") else "",
+        f"  تعداد اعضا: {info['members_count']}" if info.get("members_count") is not None else "",
         f"  عکس پروفایل: {info['photo_path']}" if info.get("photo_path") else "",
     ]
-    kind = "گروه" if info["is_group"] else "کاربر"
+    labels = {"private": "کاربر", "bot": "ربات", "group": "گروه", "supergroup": "سوپرگروه", "channel": "کانال"}
+    kind = labels.get(info.get("kind", ""), "مقصد تلگرام")
     return f"پروفایل «{chat}» ({kind}):\n" + "\n".join(p for p in lines if p)
 
 
@@ -601,9 +641,24 @@ def mark_read(*, chat: str, account: str | None = None, context: ActionContext) 
 @risk(Risk.SAFE)
 def resolve_username(*, username: str, account: str | None = None, context: ActionContext) -> str:
     info = _client(context, account).resolve_username(username)
-    kind = "گروه" if info["is_group"] else "کاربر"
+    labels = {
+        "private": "کاربر", "bot": "ربات", "group": "گروه",
+        "supergroup": "سوپرگروه", "channel": "کانال",
+    }
+    kind = labels.get(info.get("kind"), "گروه" if info.get("is_group") else "کاربر")
     return (f"«{username}» ({kind}): {info['name']}"
             + (f" (id={info['id']})" if info.get("id") else ""))
+
+
+@risk(Risk.SAFE)
+def resolve_target(*, target: str, account: str | None = None, context: ActionContext) -> str:
+    info = _client(context, account).resolve_target(target)
+    details = [f"نوع={info['kind']}", f"id={info['id']}"]
+    if info.get("username"):
+        details.append(f"@{str(info['username']).lstrip('@')}")
+    if info.get("phone"):
+        details.append(str(info["phone"]))
+    return f"مقصد «{target}» به‌صورت یکتا پیدا شد: {info['name']} [{', '.join(details)}]"
 
 
 @risk(Risk.DESTRUCTIVE)

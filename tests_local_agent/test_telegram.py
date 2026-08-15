@@ -7,6 +7,7 @@ TelegramClient to avoid needing a real account.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,10 @@ telethon = pytest.importorskip("telethon")
 from local_agent.telegram.client import (
     PersonalTelegram,
     TelegramError,
+    _chat_from_dialog,
+    _entity_summary,
+    _get_full_entity,
+    _message_from_telethon,
 )
 
 # ---------------------------------------------------------------------------
@@ -127,9 +132,19 @@ class _FakeTelegramClient:
             for d in self.dialogs:
                 if d.id == target:
                     return d.entity
+            for contact in self.contacts:
+                if contact.id == target:
+                    return contact
+        cleaned = str(target).lstrip("@").lower()
         for d in self.dialogs:
-            if d.entity.title == str(target) or d.entity.username == str(target):
+            title = getattr(d.entity, "title", None) or getattr(d.entity, "first_name", "")
+            username = getattr(d.entity, "username", "") or ""
+            phone = getattr(d.entity, "phone", "") or ""
+            if cleaned in {str(title).lower(), str(username).lower(), str(phone).lower()}:
                 return d.entity
+        for contact in self.contacts:
+            if cleaned in {contact.username.lower(), contact.phone.lower()}:
+                return contact
         raise RuntimeError(f"cannot find {target}")
 
     async def iter_dialogs(self, limit=None):
@@ -138,8 +153,15 @@ class _FakeTelegramClient:
             yield dialog
 
     async def contacts_request(self, request):
-        self.contact_requests += 1
-        return type("ContactsResult", (), {"users": list(self.contacts)})()
+        if type(request).__name__ == "GetContactsRequest":
+            self.contact_requests += 1
+            return type("ContactsResult", (), {"users": list(self.contacts)})()
+        if type(request).__name__ == "GetFullUserRequest":
+            return type(
+                "FullUserResult", (),
+                {"full_user": type("FullUser", (), {"about": "زندگی‌نامهٔ زنده"})()},
+            )()
+        raise AssertionError(f"unexpected Telegram request: {type(request).__name__}")
 
     async def send_message(self, entity, text: str) -> _FakeMessage:
         self.sent.append((entity, text))
@@ -433,6 +455,201 @@ def test_unread_sort_scans_all_matching_dialogs(
     client.connect(code_callback=lambda: "12345")
     result = client.list_chats(limit=3, kind="private", sort="unread")
     assert [chat.unread_count for chat in result] == [7, 6, 5]
+
+
+def test_resolver_supports_id_username_phone_name_and_saved_messages(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    alice = patched_telethon.dialogs[0].entity
+    alice.username = "alice_user"
+    alice.phone = "+989121111111"
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+
+    assert client.resolve_target("10")["name"] == "Alice"
+    assert client.resolve_target("@alice_user")["raw_id"] == 10
+    assert client.resolve_target("09121111111")["raw_id"] == 10
+    assert client.resolve_target("+989121111111")["raw_id"] == 10
+    assert client.resolve_target("Alice")["raw_id"] == 10
+    assert client.resolve_target("خودم")["raw_id"] == 1
+    assert client.resolve_target("پیام های ذخیره شده")["raw_id"] == 1
+
+
+def test_resolver_normalizes_persian_and_refreshes_live_dialogs(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialogs = [
+        _FakeDialog(_FakeEntity(88, "توسعه\u200cدهندگان كاربردی")),
+    ]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    assert client.resolve_target("توسعه دهندگان کاربردی")["raw_id"] == 88
+
+    # Resolver scans current dialogs each time; no old result snapshot is reused.
+    patched_telethon.dialogs.insert(0, _FakeDialog(_FakeEntity(99, "گفتگوی همین لحظه")))
+    assert client.resolve_target("گفتگوی همین لحظه")["raw_id"] == 99
+
+
+def test_resolver_prefers_exact_username_over_same_display_title(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    by_title = _FakeEntity(11, "unique_target")
+    by_username = _FakeEntity(12, "Other", username="unique_target")
+    patched_telethon.dialogs = [_FakeDialog(by_title), _FakeDialog(by_username)]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    assert client.resolve_target("unique_target")["raw_id"] == 12
+
+
+def test_resolver_rejects_ambiguous_display_names(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialogs = [
+        _FakeDialog(_FakeEntity(71, "علی رضایی")),
+        _FakeDialog(_FakeEntity(72, "علی رضایی")),
+    ]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    with pytest.raises(TelegramError) as excinfo:
+        client.resolve_target("علی رضایی")
+    message = str(excinfo.value)
+    assert "مبهم" in message
+    assert "71" in message and "72" in message
+
+
+def test_resolver_accepts_one_unique_partial_match(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialogs = [
+        _FakeDialog(_FakeEntity(81, "گروه تخصصی پایتون تهران", is_group=True)),
+        _FakeDialog(_FakeEntity(82, "گفتگوی جاوا", is_group=True)),
+    ]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    assert client.resolve_target("پایتون تهران")["raw_id"] == 81
+
+
+def test_resolver_rejects_ambiguous_partial_match(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    patched_telethon.dialogs = [
+        _FakeDialog(_FakeEntity(91, "تیم توسعه آلفا", is_group=True)),
+        _FakeDialog(_FakeEntity(92, "تیم توسعه بتا", is_group=True)),
+    ]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    with pytest.raises(TelegramError, match="مبهم"):
+        client.resolve_target("تیم توسعه")
+
+
+def test_profile_reads_full_user_about_live(
+    patched_telethon: _FakeTelegramClient, tmp_path: Path
+) -> None:
+    person = _FakeUser(501, "Full", "full_user", "Person")
+    patched_telethon.dialogs = [_FakeDialog(person)]
+    client = PersonalTelegram(api_id=1, api_hash="hash", phone="+1", session_path=tmp_path / "tg.session")
+    client.connect(code_callback=lambda: "12345")
+    profile = client.get_profile("Full Person", tmp_path / "media")
+    assert profile["kind"] == "private"
+    assert profile["bio"] == "زندگی‌نامهٔ زنده"
+    assert profile["id"] == 501
+
+
+def test_rich_message_metadata_and_media_types() -> None:
+    msg = _FakeMessage(44, "caption", sender="alice", out=False)
+    msg.sender_id = 123
+    msg.reply_to = type("Reply", (), {"reply_to_msg_id": 40})()
+    msg.forwards = 7
+    msg.views = 99
+    msg.media = object()
+    msg.photo = object()
+    result = _message_from_telethon(msg, chat_id=900)
+    assert result.to_dict() == {
+        "id": 44,
+        "chat_id": 900,
+        "sender_id": 123,
+        "sender": "alice",
+        "text": "caption",
+        "date": "2024-01-01T12:00:00+00:00",
+        "is_outgoing": False,
+        "message_type": "photo",
+        "reply_to_msg_id": 40,
+        "forwards": 7,
+        "views": 99,
+        "has_media": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("attribute", "expected"),
+    [
+        ("sticker", "sticker"), ("gif", "gif"), ("voice", "voice"),
+        ("video_note", "video_note"), ("video", "video"), ("audio", "audio"),
+        ("document", "document"), ("geo", "location"), ("contact", "contact"),
+        ("poll", "poll"),
+    ],
+)
+def test_rich_message_detects_supported_media_types(attribute: str, expected: str) -> None:
+    msg = _FakeMessage(1, "")
+    msg.media = object()
+    setattr(msg, attribute, object())
+    assert _message_from_telethon(msg, chat_id=1).message_type == expected
+
+
+def test_real_telethon_entities_have_stable_kinds_and_marked_ids() -> None:
+    from telethon.tl import types
+
+    user = types.User(id=7, access_hash=1, first_name="Alice", username="alice")
+    group = types.Chat(
+        id=8, title="Group", photo=types.ChatPhotoEmpty(), participants_count=12,
+        date=datetime(2024, 1, 1, tzinfo=UTC), version=1,
+    )
+    channel = types.Channel(
+        id=9, title="Channel", photo=types.ChatPhotoEmpty(),
+        date=datetime(2024, 1, 1, tzinfo=UTC), broadcast=True,
+        megagroup=False, access_hash=2,
+    )
+    supergroup = types.Channel(
+        id=10, title="Supergroup", photo=types.ChatPhotoEmpty(),
+        date=datetime(2024, 1, 1, tzinfo=UTC), broadcast=False,
+        megagroup=True, access_hash=3,
+    )
+
+    assert _entity_summary(user)["kind"] == "private"
+    assert _entity_summary(group)["id"] == -8
+    assert _entity_summary(group)["kind"] == "group"
+    assert _entity_summary(channel)["id"] == -1000000000009
+    assert _entity_summary(channel)["kind"] == "channel"
+    assert _entity_summary(supergroup)["kind"] == "supergroup"
+    chat = _chat_from_dialog(_FakeDialog(supergroup, _FakeMessage(1, "live")))
+    assert chat.kind == "supergroup"
+    assert chat.to_dict()["last_message_date"] == "2024-01-01T12:00:00+00:00"
+
+
+def test_full_entity_requests_cover_users_groups_and_channels() -> None:
+    from telethon.tl import types
+
+    requests = []
+
+    async def requester(request):
+        requests.append(type(request).__name__)
+        attribute = "full_user" if type(request).__name__ == "GetFullUserRequest" else "full_chat"
+        return type("FullResult", (), {attribute: type("Full", (), {"about": "full"})()})()
+
+    user = types.User(id=1, access_hash=1, first_name="User")
+    group = types.Chat(
+        id=2, title="Group", photo=types.ChatPhotoEmpty(), participants_count=2,
+        date=datetime(2024, 1, 1, tzinfo=UTC), version=1,
+    )
+    channel = types.Channel(
+        id=3, title="Channel", photo=types.ChatPhotoEmpty(),
+        date=datetime(2024, 1, 1, tzinfo=UTC), broadcast=True,
+        megagroup=False, access_hash=3,
+    )
+    assert asyncio.run(_get_full_entity(requester, user)).about == "full"
+    assert asyncio.run(_get_full_entity(requester, group)).about == "full"
+    assert asyncio.run(_get_full_entity(requester, channel)).about == "full"
+    assert requests == ["GetFullUserRequest", "GetFullChatRequest", "GetFullChannelRequest"]
 
 
 # ---------------------------------------------------------------------------

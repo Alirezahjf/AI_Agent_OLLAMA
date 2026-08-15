@@ -11,7 +11,7 @@ import asyncio
 import os
 import threading
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -48,6 +48,8 @@ class Chat:
     folder_id: int | None = None
     members_count: int | None = None
     last_message_date: datetime | None = None
+    phone: str | None = None
+    deleted: bool = False
 
     @property
     def kind(self) -> str:
@@ -79,6 +81,8 @@ class Chat:
             "archived": self.archived,
             "folder_id": self.folder_id,
             "members_count": self.members_count,
+            "phone": self.phone,
+            "deleted": self.deleted,
             "last_message": self.last_message,
             "last_message_date": (
                 self.last_message_date.isoformat() if self.last_message_date else None
@@ -103,6 +107,7 @@ class Contact:
     deleted: bool = False
     status: str = "unknown"
     last_seen: datetime | None = None
+    entity: Any = field(default=None, repr=False, compare=False)
 
     @property
     def name(self) -> str:
@@ -127,8 +132,18 @@ class Contact:
 
 
 @dataclass
+class _ResolvedCandidate:
+    entity: Any
+    id: int
+    title: str
+    username: str
+    kind: str
+    source: str
+
+
+@dataclass
 class Message:
-    """A single message returned by the personal client."""
+    """A rich message summary returned by the personal client."""
 
     id: int
     chat_id: int
@@ -136,15 +151,27 @@ class Message:
     text: str
     date: datetime
     is_outgoing: bool
+    sender_id: int | None = None
+    message_type: str = "text"
+    reply_to_msg_id: int | None = None
+    forwards: int = 0
+    views: int = 0
+    has_media: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "chat_id": self.chat_id,
+            "sender_id": self.sender_id,
             "sender": self.sender,
             "text": self.text,
             "date": self.date.isoformat(),
             "is_outgoing": self.is_outgoing,
+            "message_type": self.message_type,
+            "reply_to_msg_id": self.reply_to_msg_id,
+            "forwards": self.forwards,
+            "views": self.views,
+            "has_media": self.has_media,
         }
 
 
@@ -387,6 +414,10 @@ class PersonalTelegram:
     def resolve_username(self, username: str) -> dict[str, Any]:
         return self._run(self._resolve_username(username))
 
+    def resolve_target(self, target: str | int) -> dict[str, Any]:
+        """Resolve an ID, username, phone or display name using live Telegram data."""
+        return self._run(self._resolve_target(target))
+
     def delete_message(self, chat: str | int, msg_id: int) -> None:
         self._run(self._delete_message(chat, int(msg_id)))
 
@@ -572,7 +603,7 @@ class PersonalTelegram:
     async def _edit_message(self, chat, msg_id: int, text: str) -> Message:
         entity = await self._resolve_entity(chat)
         result = await self._client.edit_message(entity, msg_id, text)
-        return _message_from_telethon(result, chat_id=getattr(entity, "id", 0))
+        return _message_from_telethon(result, chat_id=_marked_peer_id(entity))
 
     async def _fetch_contacts(self) -> list[Contact]:
         """Read the current contact list from Telegram; no application cache is used."""
@@ -652,19 +683,109 @@ class PersonalTelegram:
         await self._client(UpdateStatusRequest(offline=not online))
 
     async def _resolve_entity(self, target):
-        """Resolve a chat target; special-cases the user's own «Saved Messages»."""
-        if isinstance(target, int):
-            return await self._client.get_entity(target)
+        """Resolve a target safely from fresh dialogs and contacts.
+
+        Numeric peer IDs, explicit usernames and phone numbers are handled
+        directly.  Display-name matching scans Telegram live on every call,
+        ranks exact matches before partial ones and never silently chooses an
+        ambiguous recipient.
+        """
         cleaned = str(target).strip()
         if not cleaned:
-            raise TelegramError("نام چت خالی است")
-        lowered = cleaned.lower().replace(" ", "")
-        if lowered in {"saved", "savedmessages", "خودم", "ذخیره‌شده"}:
+            raise TelegramError("نام یا شناسهٔ چت خالی است")
+        normalized = _normalize_text(cleaned)
+        compact = normalized.replace(" ", "")
+        if compact in _SAVED_MESSAGES_ALIASES:
             return await self._client.get_me()
+
+        if _looks_like_phone(cleaned):
+            phone_candidates: dict[tuple[str, int], _ResolvedCandidate] = {}
+            query_phones = _phone_variants(cleaned)
+            async for dialog in self._client.iter_dialogs(limit=None):
+                entity_phone = _phone_variants(getattr(dialog.entity, "phone", ""))
+                if query_phones & entity_phone:
+                    chat = _chat_from_dialog(dialog)
+                    candidate = _candidate_from_dialog(dialog, chat)
+                    phone_candidates[_entity_key(candidate.entity)] = candidate
+            for contact in await self._fetch_contacts():
+                if query_phones & _phone_variants(contact.phone):
+                    candidate = _candidate_from_contact(contact)
+                    phone_candidates[_entity_key(candidate.entity)] = candidate
+            matches = list(phone_candidates.values())
+            if len(matches) == 1:
+                return matches[0].entity
+            if len(matches) > 1:
+                raise TelegramError(_ambiguous_target_message(cleaned, matches))
+            try:
+                return await self._client.get_entity(cleaned)
+            except Exception as exc:
+                raise TelegramError(f"شماره «{cleaned}» در تلگرام پیدا نشد: {exc}") from exc
+
+        if isinstance(target, int) or cleaned.lstrip("-").isdigit():
+            try:
+                return await self._client.get_entity(int(cleaned))
+            except Exception as exc:
+                raise TelegramError(f"شناسهٔ تلگرام {cleaned} پیدا نشد: {exc}") from exc
+
+        if cleaned.startswith("@"):
+            try:
+                return await self._client.get_entity(cleaned)
+            except Exception as exc:
+                raise TelegramError(f"نام کاربری «{cleaned}» در تلگرام پیدا نشد: {exc}") from exc
+
+        candidates: dict[tuple[str, int], tuple[int, _ResolvedCandidate]] = {}
+
+        def add_candidate(priority: int, candidate: _ResolvedCandidate) -> None:
+            key = _entity_key(candidate.entity)
+            current = candidates.get(key)
+            if current is None or priority < current[0]:
+                candidates[key] = (priority, candidate)
+
+        async for dialog in self._client.iter_dialogs(limit=None):
+            chat = _chat_from_dialog(dialog)
+            title = _normalize_text(chat.title)
+            username = _normalize_text(chat.username).lstrip("@")
+            candidate = _candidate_from_dialog(dialog, chat)
+            if username and normalized == username:
+                add_candidate(0, candidate)
+            elif normalized == title:
+                add_candidate(1, candidate)
+            elif username and normalized in username:
+                add_candidate(2, candidate)
+            elif normalized in title:
+                add_candidate(3, candidate)
+
+        for contact in await self._fetch_contacts():
+            name = _normalize_text(contact.name)
+            username = _normalize_text(contact.username).lstrip("@")
+            candidate = _candidate_from_contact(contact)
+            if username and normalized == username:
+                add_candidate(0, candidate)
+            elif normalized == name:
+                add_candidate(1, candidate)
+            elif username and normalized in username:
+                add_candidate(2, candidate)
+            elif normalized in name:
+                add_candidate(3, candidate)
+
+        if candidates:
+            best_priority = min(priority for priority, _ in candidates.values())
+            best = [candidate for priority, candidate in candidates.values() if priority == best_priority]
+            if len(best) == 1:
+                return best[0].entity
+            raise TelegramError(_ambiguous_target_message(cleaned, best))
+
+        # A public username may not be present in dialogs or contacts yet.
         try:
             return await self._client.get_entity(cleaned)
         except Exception as exc:
-            raise TelegramError(f"چت {target!r} پیدا نشد: {exc}") from exc
+            raise TelegramError(
+                f"مقصد «{cleaned}» در چت‌ها، مخاطبین یا نام‌های کاربری تلگرام پیدا نشد"
+            ) from exc
+
+    async def _resolve_target(self, target) -> dict[str, Any]:
+        entity = await self._resolve_entity(target)
+        return _entity_summary(entity)
 
     async def _list_chats(
         self, limit: int, *, kind: str = "all", query: str = "", sort: str = ""
@@ -710,7 +831,7 @@ class PersonalTelegram:
     async def _send_message(self, chat, text: str) -> Message:
         entity = await self._resolve_entity(chat)
         result = await self._client.send_message(entity, text)
-        return _message_from_telethon(result, chat_id=getattr(entity, "id", 0))
+        return _message_from_telethon(result, chat_id=_marked_peer_id(entity))
 
     async def _send_file(self, chat, path: Path, *, caption: str, is_photo: bool) -> Message:
         entity = await self._resolve_entity(chat)
@@ -723,11 +844,11 @@ class PersonalTelegram:
             result = await self._client.send_file(
                 entity, file, caption=caption or "", force_document=True
             )
-        return _message_from_telethon(result, chat_id=getattr(entity, "id", 0))
+        return _message_from_telethon(result, chat_id=_marked_peer_id(entity))
 
     async def _search_messages(self, chat, query: str, limit: int) -> list[Message]:
         entity = await self._resolve_entity(chat)
-        chat_id = getattr(entity, "id", 0)
+        chat_id = _marked_peer_id(entity)
         results: list[Message] = []
         async for msg in self._client.iter_messages(entity, search=query, limit=max(1, limit)):
             results.append(_message_from_telethon(msg, chat_id=chat_id))
@@ -790,7 +911,7 @@ class PersonalTelegram:
 
     async def _get_chat_history(self, chat, limit: int, offset_id: int) -> list[Message]:
         entity = await self._resolve_entity(chat)
-        chat_id = getattr(entity, "id", 0)
+        chat_id = _marked_peer_id(entity)
         kwargs: dict[str, Any] = {"limit": max(1, limit)}
         if offset_id:
             kwargs["offset_id"] = int(offset_id)
@@ -801,24 +922,36 @@ class PersonalTelegram:
 
     async def _get_profile(self, chat, media_dir: Path) -> dict[str, Any]:
         entity = await self._resolve_entity(chat)
+        summary = _entity_summary(entity)
         info: dict[str, Any] = {
-            "id": entity.id,
-            "name": getattr(entity, "title", None) or " ".join(
-                p for p in (getattr(entity, "first_name", ""), getattr(entity, "last_name", "")) if p
-            ) or "?",
-            "username": getattr(entity, "username", "") or "",
-            "is_group": bool(getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False)
-                             or getattr(entity, "is_group", False)),
+            "id": summary["id"],
+            "name": summary["name"],
+            "username": summary["username"],
+            "phone": summary.get("phone", ""),
+            "kind": summary["kind"],
+            "is_group": summary["kind"] in {"group", "supergroup"},
+            "is_channel": summary["kind"] == "channel",
+            "is_bot": summary["kind"] == "bot",
+            "verified": bool(getattr(entity, "verified", False)),
+            "deleted": bool(getattr(entity, "deleted", False)),
+            "bio": "",
+            "members_count": getattr(entity, "participants_count", None),
         }
-        if not info["is_group"]:
-            info["phone"] = getattr(entity, "phone", "") or ""
-            about = await self._client.get_entity(entity)
-            info["bio"] = getattr(about, "about", "") or ""
+        try:
+            full = await _get_full_entity(self._client, entity)
+            if full is not None:
+                info["bio"] = str(getattr(full, "about", "") or "")
+                count = getattr(full, "participants_count", None)
+                if count is not None:
+                    info["members_count"] = int(count)
+        except Exception as exc:  # noqa: BLE001 - base profile remains useful
+            logger.debug("full Telegram profile unavailable: %s", exc)
+
         photo_path = ""
         if getattr(entity, "photo", None) is not None:
             try:
                 media_dir.mkdir(parents=True, exist_ok=True)
-                filename = media_dir / f"profile_{entity.id}.jpg"
+                filename = media_dir / f"profile_{getattr(entity, 'id', 'unknown')}.jpg"
                 await self._client.download_profile_photo(entity, file=str(filename))
                 if filename.is_file():
                     photo_path = str(filename)
@@ -841,7 +974,7 @@ class PersonalTelegram:
         # ``audio``/``video``/``sticker``/``animation`` let telethon infer the
         # type from the file content.
         result = await self._client.send_file(entity, str(path), **kwargs)
-        return _message_from_telethon(result, chat_id=getattr(entity, "id", 0))
+        return _message_from_telethon(result, chat_id=_marked_peer_id(entity))
 
     async def _send_location(self, chat, lat: float, lng: float) -> Message:
         entity = await self._resolve_entity(chat)
@@ -849,7 +982,7 @@ class PersonalTelegram:
 
         geo = InputGeoPoint(lat=lat, long=lng)
         result = await self._client.send_file(entity, geo)
-        return _message_from_telethon(result, chat_id=getattr(entity, "id", 0))
+        return _message_from_telethon(result, chat_id=_marked_peer_id(entity))
 
     async def _download_media(self, chat, msg_id: int, filename: str, media_dir: Path) -> Path:
         entity = await self._resolve_entity(chat)
@@ -870,13 +1003,13 @@ class PersonalTelegram:
     async def _reply_to(self, chat, msg_id: int, text: str) -> Message:
         entity = await self._resolve_entity(chat)
         result = await self._client.send_message(entity, text, reply_to=msg_id)
-        return _message_from_telethon(result, chat_id=getattr(entity, "id", 0))
+        return _message_from_telethon(result, chat_id=_marked_peer_id(entity))
 
     async def _forward_message(self, chat, from_chat, msg_id: int) -> Message:
         target = await self._resolve_entity(chat)
         source = await self._resolve_entity(from_chat)
         result = await self._client.forward_messages(target, msg_id, source)
-        return _message_from_telethon(result, chat_id=getattr(target, "id", 0))
+        return _message_from_telethon(result, chat_id=_marked_peer_id(target))
 
     async def _mark_read(self, chat) -> None:
         entity = await self._resolve_entity(chat)
@@ -887,15 +1020,9 @@ class PersonalTelegram:
         if not cleaned:
             raise TelegramError("نام کاربری خالی است")
         entity = await self._client.get_entity(cleaned)
-        return {
-            "id": entity.id,
-            "name": getattr(entity, "title", None) or " ".join(
-                p for p in (getattr(entity, "first_name", ""), getattr(entity, "last_name", "")) if p
-            ) or "?",
-            "username": getattr(entity, "username", "") or "",
-            "is_group": bool(getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False)
-                             or getattr(entity, "is_group", False)),
-        }
+        summary = _entity_summary(entity)
+        summary["is_group"] = summary["kind"] in {"group", "supergroup"}
+        return summary
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -948,6 +1075,7 @@ def _contact_from_telethon(user: Any) -> Contact:
         deleted=bool(getattr(user, "deleted", False)),
         status=status_name,
         last_seen=last_seen,
+        entity=user,
     )
 
 
@@ -1008,6 +1136,8 @@ def _chat_from_dialog(dialog: Any) -> Chat:
         archived=folder_id == 1,
         folder_id=folder_id,
         members_count=int(members) if members is not None else None,
+        phone=str(getattr(entity, "phone", "") or "") or None,
+        deleted=bool(getattr(entity, "deleted", False)),
         last_message=(str(message_text)[:140] if message_text else None),
         last_message_date=message_date,
         unread_count=int(getattr(dialog, "unread_count", 0) or 0),
@@ -1022,16 +1152,176 @@ def _chat_matches_kind(chat: Chat, kind: str) -> bool:
     return bool(getattr(chat, f"is_{kind}", False))
 
 
+_SAVED_MESSAGES_ALIASES = {
+    "saved",
+    "savedmessages",
+    "savedmessage",
+    "پیامهایذخیرهشده",
+    "پیامذخیرهشده",
+    "ذخیرهشده",
+    "خودم",
+}
+
+
+def _looks_like_phone(value: Any) -> bool:
+    text = _normalize_text(value)
+    digits = "".join(ch for ch in text if ch.isdigit())
+    starts_like_phone = (
+        str(value).strip().startswith("+")
+        or digits.startswith("0")
+        or (digits.startswith("98") and len(digits) == 12)
+    )
+    return len(digits) >= 7 and starts_like_phone and not any(ch.isalpha() for ch in text)
+
+
+def _entity_key(entity: Any) -> tuple[str, int]:
+    return (type(entity).__name__.lower(), int(getattr(entity, "id", 0)))
+
+
+def _marked_peer_id(entity: Any) -> int:
+    try:
+        from telethon import utils
+
+        return int(utils.get_peer_id(entity))
+    except Exception:  # noqa: BLE001 - test doubles and unusual entities
+        entity_id = int(getattr(entity, "id", 0))
+        type_name = type(entity).__name__.lower()
+        is_channel = type_name == "channel" or hasattr(entity, "broadcast")
+        if is_channel:
+            return -(1_000_000_000_000 + entity_id)
+        if type_name == "chat":
+            return -entity_id
+        return entity_id
+
+
+def _entity_kind(entity: Any) -> str:
+    if bool(getattr(entity, "bot", False)):
+        return "bot"
+    if bool(getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False)):
+        return "supergroup"
+    type_name = type(entity).__name__.lower()
+    if type_name == "channel" or hasattr(entity, "broadcast"):
+        return "channel"
+    if type_name == "chat" or bool(getattr(entity, "is_group", False)):
+        return "group"
+    return "private"
+
+
+def _entity_title(entity: Any) -> str:
+    return str(getattr(entity, "title", None) or " ".join(
+        part for part in (
+            getattr(entity, "first_name", "") or "",
+            getattr(entity, "last_name", "") or "",
+        ) if part
+    ) or getattr(entity, "username", None) or getattr(entity, "id", "?"))
+
+
+def _entity_summary(entity: Any) -> dict[str, Any]:
+    return {
+        "id": _marked_peer_id(entity),
+        "raw_id": int(getattr(entity, "id", 0)),
+        "name": _entity_title(entity),
+        "username": str(getattr(entity, "username", "") or ""),
+        "phone": str(getattr(entity, "phone", "") or ""),
+        "kind": _entity_kind(entity),
+        "is_bot": bool(getattr(entity, "bot", False)),
+        "verified": bool(getattr(entity, "verified", False)),
+        "deleted": bool(getattr(entity, "deleted", False)),
+    }
+
+
+def _candidate_from_dialog(dialog: Any, chat: Chat) -> _ResolvedCandidate:
+    return _ResolvedCandidate(
+        entity=dialog.entity,
+        id=chat.id,
+        title=chat.title,
+        username=str(chat.username or ""),
+        kind=chat.kind,
+        source="chat",
+    )
+
+
+def _candidate_from_contact(contact: Contact) -> _ResolvedCandidate:
+    return _ResolvedCandidate(
+        entity=contact.entity,
+        id=contact.id,
+        title=contact.name or str(contact.id),
+        username=contact.username,
+        kind="bot" if contact.is_bot else "private",
+        source="contact",
+    )
+
+
+def _ambiguous_target_message(target: str, candidates: list[_ResolvedCandidate]) -> str:
+    rendered = []
+    for item in sorted(candidates, key=lambda candidate: (candidate.title, candidate.id))[:8]:
+        username = f", @{item.username.lstrip('@')}" if item.username else ""
+        rendered.append(f"{item.title} (id={item.id}, نوع={item.kind}{username})")
+    return (
+        f"مقصد «{target}» مبهم است و خودکار انتخاب نشد. "
+        f"یکی از شناسه‌ها یا نام‌های کاربری دقیق را استفاده کنید: {'؛ '.join(rendered)}"
+    )
+
+
+async def _get_full_entity(client: Any, entity: Any) -> Any | None:
+    type_name = type(entity).__name__.lower()
+    if type_name == "user" or (hasattr(entity, "first_name") and not hasattr(entity, "title")):
+        from telethon.tl.functions.users import GetFullUserRequest
+
+        result = await client(GetFullUserRequest(entity))
+        return getattr(result, "full_user", None)
+    if type_name == "channel" or hasattr(entity, "broadcast"):
+        from telethon.tl.functions.channels import GetFullChannelRequest
+
+        result = await client(GetFullChannelRequest(entity))
+        return getattr(result, "full_chat", None)
+    if type_name == "chat" or bool(getattr(entity, "is_group", False)):
+        from telethon.tl.functions.messages import GetFullChatRequest
+
+        result = await client(GetFullChatRequest(int(entity.id)))
+        return getattr(result, "full_chat", None)
+    return None
+
+
+def _message_type(msg: Any) -> str:
+    for attribute, kind in (
+        ("poll", "poll"),
+        ("geo", "location"),
+        ("contact", "contact"),
+        ("photo", "photo"),
+        ("sticker", "sticker"),
+        ("gif", "gif"),
+        ("voice", "voice"),
+        ("video_note", "video_note"),
+        ("video", "video"),
+        ("audio", "audio"),
+        ("document", "document"),
+    ):
+        if getattr(msg, attribute, None) is not None:
+            return kind
+    return "other" if getattr(msg, "media", None) is not None else "text"
+
+
 def _message_from_telethon(msg, *, chat_id: int) -> Message:
-    sender = "کانال" if getattr(msg, "sender", None) is None else "?"
-    if getattr(msg, "sender", None) is not None:
-        sender_obj = msg.sender
-        sender = getattr(sender_obj, "username", None) or getattr(sender_obj, "first_name", None) or "?"
+    sender_obj = getattr(msg, "sender", None)
+    sender = "کانال" if sender_obj is None else (
+        getattr(sender_obj, "username", None)
+        or getattr(sender_obj, "first_name", None)
+        or "?"
+    )
+    reply = getattr(msg, "reply_to", None)
+    reply_id = getattr(reply, "reply_to_msg_id", None) or getattr(msg, "reply_to_msg_id", None)
     return Message(
         id=int(msg.id),
-        chat_id=chat_id,
+        chat_id=int(chat_id),
+        sender_id=getattr(msg, "sender_id", None),
         sender=str(sender),
-        text=str(msg.message or ""),
+        text=str(getattr(msg, "message", "") or ""),
         date=msg.date,
         is_outgoing=bool(getattr(msg, "out", False)),
+        message_type=_message_type(msg),
+        reply_to_msg_id=int(reply_id) if reply_id is not None else None,
+        forwards=int(getattr(msg, "forwards", 0) or 0),
+        views=int(getattr(msg, "views", 0) or 0),
+        has_media=getattr(msg, "media", None) is not None,
     )
