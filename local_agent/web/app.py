@@ -32,20 +32,25 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
+import hmac
+import ipaddress
 import json
 import mimetypes
 import os
 import re
+import secrets
 import sys
 import threading
 import time
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, NoReturn
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.exceptions import RequestValidationError, StarletteHTTPException
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -63,6 +68,182 @@ TEMPLATES = web_templates_dir()
 STATIC = web_static_dir()
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_GITHUB_RELEASE_ASSET_BYTES = 256 * 1024 * 1024
+MAX_GITHUB_JSON_BODY_BYTES = 2 * 1024 * 1024
+MAX_GITHUB_SENSITIVE_BODY_BYTES = 96 * 1024
+_GITHUB_SENSITIVE_OPERATIONS = frozenset(
+    {
+        "actions_secret_set",
+        "organization_actions_secret_set",
+        "environment_actions_secret_set",
+        "codespace_secret_set",
+        "webhook_create",
+        "webhook_update",
+    }
+)
+
+
+class _GitHubJSONBodyLimitMiddleware:
+    """Bound every ordinary GitHub POST body before FastAPI buffers JSON.
+
+    ``Content-Length`` is only an early-rejection hint: a client can omit it,
+    use chunked transfer encoding, or send more bytes than declared. Wrapping
+    ASGI ``receive`` keeps the limit effective in all of those cases.
+    """
+
+    def __init__(self, app: Any, *, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        path = scope.get("path", "")
+        protected = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path.startswith("/api/github/")
+            and path not in {"/api/github/release-asset", "/api/github/sensitive"}
+        )
+        if not protected:
+            await self.app(scope, receive, send)
+            return
+
+        length_values = [
+            value
+            for name, value in scope.get("headers", ())
+            if name.lower() == b"content-length"
+        ]
+        if len(length_values) > 1:
+            await self._reject(
+                scope,
+                receive,
+                send,
+                "Content-Length تکراری یا مبهم است",
+                status_code=400,
+            )
+            return
+        declared: int | None = None
+        if length_values:
+            raw_length = length_values[0]
+            if not isinstance(raw_length, bytes) or not re.fullmatch(rb"[0-9]+", raw_length):
+                await self._reject(
+                    scope,
+                    receive,
+                    send,
+                    "Content-Length نامعتبر است",
+                    status_code=400,
+                )
+                return
+            try:
+                declared = int(raw_length)
+            except (TypeError, ValueError):
+                await self._reject(
+                    scope,
+                    receive,
+                    send,
+                    "Content-Length نامعتبر است",
+                    status_code=400,
+                )
+                return
+            if declared > self.max_bytes:
+                await self._reject(scope, receive, send, "بدنهٔ درخواست GitHub بیش از ۲ مگابایت است")
+                return
+
+        consumed = 0
+        exceeded = False
+        invalid_length = False
+
+        async def bounded_receive() -> dict[str, Any]:
+            nonlocal consumed, exceeded, invalid_length
+            message = await receive()
+            if message.get("type") == "http.request":
+                consumed += len(message.get("body", b""))
+                if consumed > self.max_bytes:
+                    exceeded = True
+                    raise _GitHubBodyTooLarge
+                if (
+                    not message.get("more_body", False)
+                    and declared is not None
+                    and consumed != declared
+                ):
+                    invalid_length = True
+                    raise _GitHubBodyLengthMismatch
+            return message
+
+        try:
+            await self.app(scope, bounded_receive, send)
+        except _GitHubBodyTooLarge:
+            if not exceeded:  # pragma: no cover - defensive invariant
+                raise
+            await self._reject(
+                scope,
+                receive,
+                send,
+                "بدنهٔ درخواست GitHub بیش از ۲ مگابایت است",
+            )
+        except _GitHubBodyLengthMismatch:
+            if not invalid_length:  # pragma: no cover - defensive invariant
+                raise
+            await self._reject(
+                scope,
+                receive,
+                send,
+                "Content-Length با اندازهٔ واقعی بدنه یکسان نیست",
+                status_code=400,
+            )
+
+    @staticmethod
+    async def _reject(
+        scope: dict[str, Any],
+        receive: Any,
+        send: Any,
+        detail: str,
+        *,
+        status_code: int = 413,
+    ) -> None:
+        response = JSONResponse(
+            status_code=status_code,
+            content={"detail": detail},
+            headers={"Cache-Control": "no-store"},
+        )
+        await response(scope, receive, send)
+
+
+class _GitHubBodyTooLarge(Exception):
+    """Internal control flow used by the bounded ASGI receive wrapper."""
+
+
+class _GitHubBodyLengthMismatch(Exception):
+    """Declared body length did not match the complete ASGI request stream."""
+
+
+def _github_declared_content_length(request: Request, *, subject: str, maximum: int) -> int | None:
+    """Parse one canonical Content-Length value from the raw ASGI headers."""
+    values = [
+        value
+        for name, value in request.scope.get("headers", ())
+        if name.lower() == b"content-length"
+    ]
+    if len(values) > 1:
+        raise HTTPException(400, f"Content-Length {subject} تکراری یا مبهم است")
+    if not values:
+        return None
+    raw = values[0]
+    if not isinstance(raw, bytes) or not re.fullmatch(rb"[0-9]+", raw):
+        raise HTTPException(400, f"Content-Length {subject} نامعتبر است")
+    try:
+        declared = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, f"Content-Length {subject} نامعتبر است") from exc
+    if declared > maximum:
+        raise HTTPException(413, f"اندازهٔ اعلام‌شدهٔ {subject} بیش از سقف امن است")
+    return declared
+
+
+def _clear_bytearray(value: bytearray, *, overwrite: bool = False) -> None:
+    """Release a temporary buffer, optionally overwriting small sensitive data first."""
+    if overwrite:
+        value[:] = b"\x00" * len(value)
+    value.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +275,13 @@ class SettingsRequest(BaseModel):
     # are applied (blank secret fields keep their stored value).
     telegram: dict[str, Any] | None = None
     gmail: dict[str, Any] | None = None
+    github: dict[str, Any] | None = None
+
+
+class GitHubOperationRequest(BaseModel):
+    operation: str
+    params: dict[str, Any] = {}
+    confirm: bool = False
 
 
 class UploadRequest(BaseModel):
@@ -319,6 +507,90 @@ def _coerce_gmail_field(key: str, raw: Any) -> Any:
     return str(raw).strip()
 
 
+def _github_service(client: BridgeClient) -> Any:
+    server = _server_of(client)
+    service = server.handlers.context.extra.get("github") if server is not None else None
+    if service is None:
+        raise HTTPException(503, "GitHub به Bridge درون‌پردازه نیاز دارد")
+    return service
+
+
+def _canonical_origin(value: str) -> str:
+    """Return a comparable HTTP(S) origin, or an empty string if malformed."""
+    try:
+        parsed = urlsplit(value.strip())
+        if (
+            parsed.scheme.lower() not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            return ""
+        scheme = parsed.scheme.lower()
+        port = parsed.port
+        host = parsed.hostname.lower()
+        if ":" in host:
+            host = f"[{host}]"
+        if port and port != (443 if scheme == "https" else 80):
+            host = f"{host}:{port}"
+        return f"{scheme}://{host}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _external_origin(request: Request) -> str:
+    # Trust only the ASGI scope. Uvicorn applies Forwarded/X-Forwarded-* only
+    # when the direct peer is in its trusted-proxy allow-list. Reading those
+    # headers here would let an arbitrary client spoof HTTPS and weaken Secure
+    # cookie and OAuth callback decisions.
+    host = request.headers.get("host", request.url.netloc).split(",")[0].strip()
+    return _canonical_origin(f"{request.url.scheme}://{host}") or _canonical_origin(
+        str(request.base_url)
+    )
+
+
+def _websocket_external_origin(websocket: WebSocket) -> str:
+    scheme = "https" if websocket.url.scheme == "wss" else "http"
+    host = websocket.headers.get("host", websocket.url.netloc).split(",")[0].strip()
+    return _canonical_origin(f"{scheme}://{host}")
+
+
+def _is_loopback_bind(host: str) -> bool:
+    value = host.strip().removeprefix("[").removesuffix("]")
+    if value.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
+def _valid_web_access_token(token: Any) -> bool:
+    return (
+        isinstance(token, str)
+        and 32 <= len(token) <= 512
+        and token == token.strip()
+        and not any(ord(character) < 0x21 or ord(character) == 0x7F for character in token)
+    )
+
+
+def _signed_session(raw: str, secret: bytes) -> str:
+    signature = hmac.new(secret, raw.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{raw}.{signature}"
+
+
+def _verified_session(value: str, secret: bytes) -> str:
+    try:
+        raw, signature = value.rsplit(".", 1)
+    except ValueError:
+        return ""
+    expected = hmac.new(secret, raw.encode("ascii"), hashlib.sha256).hexdigest()
+    return raw if hmac.compare_digest(signature, expected) else ""
+
+
 # ---------------------------------------------------------------------------
 # Global exception handling
 # ---------------------------------------------------------------------------
@@ -335,9 +607,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     """
 
     @app.exception_handler(RequestValidationError)
-    async def _validation_error(
-        _request: Request, exc: RequestValidationError
-    ) -> JSONResponse:
+    async def _validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
         messages: list[str] = []
         for error in exc.errors()[:5]:
             loc = ".".join(str(part) for part in error.get("loc", ()) if part != "body")
@@ -349,10 +619,12 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(StarletteHTTPException)
-    async def _http_exception(
-        _request: Request, exc: StarletteHTTPException
-    ) -> JSONResponse:
-        detail = exc.detail if isinstance(exc.detail, (dict, list, str, int, float, bool)) else str(exc.detail)
+    async def _http_exception(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        detail = (
+            exc.detail
+            if isinstance(exc.detail, (dict, list, str, int, float, bool))
+            else str(exc.detail)
+        )
         if isinstance(detail, dict) and "message" in detail:
             content = {"detail": str(detail["message"]), "error": detail}
         else:
@@ -373,13 +645,166 @@ def register_exception_handlers(app: FastAPI) -> None:
 # ---------------------------------------------------------------------------
 
 
-def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
+def create_app(
+    client: BridgeClient,
+    settings: AssistantSettings,
+    *,
+    remote_access_token: str = "",
+) -> FastAPI:
+    if remote_access_token and not _valid_web_access_token(remote_access_token):
+        raise AssistantError("توکن دسترسی Web باید ۳۲ تا ۵۱۲ نویسهٔ غیرکنترلی داشته باشد")
     app = FastAPI(title="Local Windows Assistant", version="2.0")
     register_exception_handlers(app)
+    app.add_middleware(
+        _GitHubJSONBodyLimitMiddleware,
+        max_bytes=MAX_GITHUB_JSON_BODY_BYTES,
+    )
+    github_web_secret = secrets.token_bytes(32)
+    remote_auth_enabled = bool(remote_access_token)
+    remote_cookie_value = secrets.token_urlsafe(32)
+    failed_auth: dict[str, tuple[float, int]] = {}
+    failed_auth_lock = threading.Lock()
+
+    def remote_auth_rate_limited(request: Request) -> bool:
+        peer = request.client.host if request.client else "unknown"
+        now = time.monotonic()
+        with failed_auth_lock:
+            stale = [key for key, (started, _) in failed_auth.items() if now - started >= 60]
+            for key in stale:
+                failed_auth.pop(key, None)
+            started, count = failed_auth.get(peer, (now, 0))
+            if len(failed_auth) >= 10_000 and peer not in failed_auth:
+                return True
+            count += 1
+            failed_auth[peer] = (started, count)
+            return count > 10
+
+    @app.middleware("http")
+    async def browser_security(request: Request, call_next):
+        if remote_auth_enabled and request.url.path != "/healthz":
+            # The bearer credential must never cross a plaintext network.
+            # Uvicorn changes the ASGI scheme for explicitly trusted reverse
+            # proxies, so a properly terminated HTTPS deployment still works.
+            if request.url.scheme != "https":
+                return JSONResponse(
+                    status_code=426,
+                    content={"detail": "دسترسی راه‌دور Web فقط پشت HTTPS مجاز است"},
+                    headers={"Upgrade": "TLS/1.2", "Cache-Control": "no-store"},
+                )
+            cookie = request.cookies.get("pla_remote_auth", "")
+            cookie_ok = bool(cookie) and hmac.compare_digest(cookie, remote_cookie_value)
+            authorization = request.headers.get("authorization", "")
+            prefix = "Bearer "
+            supplied = authorization[len(prefix) :] if authorization.startswith(prefix) else ""
+            bearer_ok = (
+                _valid_web_access_token(supplied)
+                and len(supplied) == len(remote_access_token)
+                and hmac.compare_digest(supplied, remote_access_token)
+            )
+            request.state.remote_authenticated = cookie_ok or bearer_ok
+            login_page = request.method == "GET" and request.url.path == "/"
+            if not request.state.remote_authenticated and not login_page:
+                limited = bool(supplied) and remote_auth_rate_limited(request)
+                return JSONResponse(
+                    status_code=429 if limited else 401,
+                    content={"detail": "احراز هویت Web نامعتبر است"},
+                    headers={
+                        "Cache-Control": "no-store",
+                        **({"Retry-After": "60"} if limited else {}),
+                    },
+                )
+        else:
+            request.state.remote_authenticated = not remote_auth_enabled
+
+        signed = request.cookies.get("pla_browser_session", "")
+        browser_session = _verified_session(signed, github_web_secret)
+        fresh = not browser_session
+        if fresh:
+            browser_session = secrets.token_urlsafe(32)
+        request.state.github_browser_session = browser_session
+        response = await call_next(request)
+        if fresh:
+            response.set_cookie(
+                "pla_browser_session",
+                _signed_session(browser_session, github_web_secret),
+                httponly=True,
+                secure=_external_origin(request).startswith("https://"),
+                samesite="lax",
+                path="/",
+                max_age=12 * 60 * 60,
+            )
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        return response
+
+    def github_guard(request: Request, *, csrf: bool = True) -> str:
+        origin = _canonical_origin(request.headers.get("origin", ""))
+        active = _server_of(client)
+        github_settings = active.handlers.settings.github if active is not None else settings.github
+        allowed = {
+            value
+            for value in (
+                _external_origin(request),
+                *(_canonical_origin(item) for item in github_settings.allowed_origins),
+            )
+            if value
+        }
+        if not origin or origin not in allowed:
+            raise HTTPException(403, "Origin درخواست GitHub معتبر نیست")
+        session = str(getattr(request.state, "github_browser_session", ""))
+        if not session:
+            raise HTTPException(403, "نشست مرورگر معتبر نیست")
+        if csrf:
+            expected = hmac.new(
+                github_web_secret, session.encode("ascii"), hashlib.sha256
+            ).hexdigest()
+            supplied = request.headers.get("x-csrf-token", "")
+            if not supplied or not hmac.compare_digest(supplied, expected):
+                raise HTTPException(403, "توکن CSRF معتبر نیست")
+        return session
 
     @app.get("/", response_class=HTMLResponse)
-    async def index() -> HTMLResponse:
+    async def index(request: Request) -> HTMLResponse:
+        if remote_auth_enabled and not request.state.remote_authenticated:
+            nonce = secrets.token_urlsafe(18)
+            page = f"""<!doctype html>
+<html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ورود امن دستیار محلی</title><style>body{{font-family:Tahoma,sans-serif;background:#0d1117;color:#e6edf3;display:grid;place-items:center;min-height:100vh;margin:0}}main{{width:min(28rem,calc(100% - 3rem));background:#161b22;border:1px solid #30363d;border-radius:14px;padding:2rem}}input,button{{box-sizing:border-box;width:100%;padding:.8rem;margin-top:.8rem;border-radius:8px}}input{{background:#0d1117;color:#fff;border:1px solid #484f58;direction:ltr}}button{{background:#238636;color:#fff;border:0;cursor:pointer}}p{{line-height:1.8}}#error{{color:#ff7b72}}</style></head>
+<body><main><h1>ورود امن</h1><p>توکن Bridge را وارد کنید. توکن در نشانی یا حافظهٔ مرورگر ذخیره نمی‌شود.</p><form id="login"><input id="token" type="password" autocomplete="off" minlength="32" maxlength="512" required aria-label="توکن Bridge"><button type="submit">ورود</button></form><p id="error" role="alert"></p></main>
+<script nonce="{nonce}">document.getElementById('login').addEventListener('submit',async(e)=>{{e.preventDefault();const t=document.getElementById('token');const m=document.getElementById('error');m.textContent='';try{{const r=await fetch('/api/auth/bootstrap',{{method:'POST',headers:{{Authorization:'Bearer '+t.value}}}});t.value='';if(!r.ok)throw new Error(r.status===429?'تلاش‌های ناموفق بیش از حد است؛ کمی صبر کنید.':'توکن معتبر نیست.');location.replace('/');}}catch(x){{m.textContent=x.message||'ورود انجام نشد.';}}}});</script></body></html>"""
+            return HTMLResponse(
+                page,
+                headers={
+                    "Cache-Control": "no-store",
+                    "Content-Security-Policy": (
+                        "default-src 'none'; "
+                        f"script-src 'nonce-{nonce}'; "
+                        "style-src 'unsafe-inline'; connect-src 'self'; "
+                        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+                    ),
+                },
+            )
         return HTMLResponse((TEMPLATES / "index.html").read_text(encoding="utf-8"))
+
+    @app.post("/api/auth/bootstrap")
+    async def remote_auth_bootstrap(request: Request) -> Response:
+        if not remote_auth_enabled:
+            raise HTTPException(404, "احراز هویت راه‌دور فعال نیست")
+        # Middleware permits this route only after exact bearer validation.
+        if not request.state.remote_authenticated:
+            raise HTTPException(401, "احراز هویت Web نامعتبر است")
+        response = Response(status_code=204, headers={"Cache-Control": "no-store"})
+        response.set_cookie(
+            "pla_remote_auth",
+            remote_cookie_value,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            path="/",
+            max_age=12 * 60 * 60,
+        )
+        return response
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
@@ -488,19 +913,38 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
             }
 
     @app.post("/api/purge")
-    async def purge(req: PurgeRequest) -> dict[str, Any]:
+    async def purge(req: PurgeRequest, request: Request) -> dict[str, Any]:
         """Full wipe of the assistant's on-disk footprint (see core/cleanup).
 
-        Requires explicit ``confirm: true``.  Installed packages, venvs and
-        the pip cache are never touched.  On success the process exits a
-        moment later (``shutdown``), so the UI shows its "fully wiped" state.
+        Requires the signed browser session, an exact allowed Origin, CSRF,
+        and explicit ``confirm: true``. Installed packages, venvs and the pip
+        cache are never touched. On success the process exits a moment later.
         """
+        github_guard(request, csrf=True)
         if not req.confirm:
             raise HTTPException(400, "پاک‌سازی کامل نیازمند تأیید صریح است (confirm)")
         from ..core.cleanup import purge_all
 
         server = _server_of(client)
         active = server.handlers.settings if server is not None else settings
+        revocation_warning: str | None = None
+        if server is not None:
+            github = server.handlers.context.extra.get("github")
+            if github is not None and github.vault.available:
+                try:
+                    # Service.disconnect deletes the local vault item in a
+                    # finally block even if remote revocation fails.
+                    await asyncio.to_thread(github.disconnect)
+                except AssistantError:
+                    revocation_warning = (
+                        "لغو دسترسی GitHub از راه دور ناموفق بود؛ اعتبار محلی حذف شد. "
+                        "در صورت نیاز دسترسی برنامه را در تنظیمات GitHub لغو کنید."
+                    )
+                    logger.warning("could not revoke GitHub credential during purge")
+                    try:
+                        github.vault.delete()
+                    except AssistantError:
+                        logger.warning("could not remove GitHub credential during purge")
         result = await asyncio.to_thread(
             purge_all,
             active,
@@ -509,6 +953,8 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
             # them first so Windows can delete the files we still own.
             close_logging=True,
         )
+        if revocation_warning:
+            result["revocation_warning"] = revocation_warning
         if req.shutdown and result.get("ok"):
             result["shutdown_scheduled"] = True
             _schedule_process_exit()
@@ -524,13 +970,15 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         return {"cleared": True}
 
     @app.post("/api/settings")
-    async def update_settings(req: SettingsRequest) -> dict[str, Any]:
+    async def update_settings(req: SettingsRequest, request: Request) -> dict[str, Any]:
         """Apply + persist every setting the UI can edit.
 
         Everything goes through ``BridgeHandlers._apply_settings`` so the
         runtime, the tool context and ``config.json`` stay in sync, and
         the write is atomic.  Secret values are never echoed back.
         """
+        if req.github is not None:
+            github_guard(request)
         server = _server_of(client)
         if server is None:
             payload: dict[str, Any] = {}
@@ -565,9 +1013,7 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
             llm_dict["openai_api_key"] = req.openai_api_key.strip()
             llm_changed = True
         if llm_changed:
-            new_settings = new_settings.with_overrides(
-                llm=type(new_settings.llm)(**llm_dict)
-            )
+            new_settings = new_settings.with_overrides(llm=type(new_settings.llm)(**llm_dict))
 
         # ---- safety ---------------------------------------------------
         safety_dict = dict(new_settings.safety.__dict__)
@@ -615,11 +1061,56 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                     telegram=new_settings.telegram.updated(tg_changes)
                 )
 
+        # ---- github ----------------------------------------------------
+        if req.github is not None:
+            gh_dict = dict(new_settings.github.__dict__)
+            allowed_keys = {
+                "enabled",
+                "client_id",
+                "broker_url",
+                "callback_url",
+                "api_url",
+                "web_url",
+                "graphql_url",
+                "selected_repositories",
+                "local_clone_root",
+                "allowed_origins",
+            }
+            unknown = set(req.github) - allowed_keys
+            if unknown:
+                raise HTTPException(400, f"تنظیم GitHub ناشناخته است: {', '.join(sorted(unknown))}")
+            for key, raw in req.github.items():
+                if key == "enabled":
+                    if not isinstance(raw, bool):
+                        raise HTTPException(400, "github.enabled باید boolean باشد")
+                    gh_dict[key] = raw
+                elif key in {"selected_repositories", "allowed_origins"}:
+                    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+                        raise HTTPException(400, f"{key} باید فهرست رشته‌ها باشد")
+                    gh_dict[key] = tuple(item.strip() for item in raw if item.strip())
+                else:
+                    if not isinstance(raw, str):
+                        raise HTTPException(400, f"github.{key} باید رشته باشد")
+                    gh_dict[key] = raw.strip()
+            try:
+                github_settings = type(new_settings.github)(**gh_dict)
+                github_settings.validate()
+            except AssistantError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            new_settings = new_settings.with_overrides(github=github_settings)
+
         # ---- gmail -----------------------------------------------------
         if req.gmail:
             gm_dict = dict(new_settings.gmail.__dict__)
             gm_changed = False
-            for key in ("enabled", "credentials_file", "token_file", "username", "app_password", "confirm_send"):
+            for key in (
+                "enabled",
+                "credentials_file",
+                "token_file",
+                "username",
+                "app_password",
+                "confirm_send",
+            ):
                 if key in req.gmail:
                     raw = req.gmail[key]
                     if key == "app_password" and (not raw or not str(raw).strip()):
@@ -631,7 +1122,10 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                     gmail=type(new_settings.gmail)(**gm_dict)
                 )
 
-        handlers._apply_settings(new_settings)
+        try:
+            handlers._apply_settings(new_settings)
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc)) from exc
         llm = new_settings.llm
         model = llm.openai_model if llm.provider != "ollama" else llm.ollama_model
         return {
@@ -643,10 +1137,245 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                 "full_system_access": bool(new_settings.safety.full_system_access),
                 "telegram_enabled": bool(new_settings.telegram.enabled),
                 "gmail_enabled": bool(new_settings.gmail.enabled),
+                "github_enabled": bool(new_settings.github.enabled),
                 # API key is only acknowledged, never returned.
                 "openai_api_key_set": bool(llm.openai_api_key),
             },
         }
+
+    # GitHub routes are intentionally scoped behind signed browser sessions,
+    # strict Origin checks and CSRF. No OAuth token is ever returned here.
+    @app.post("/api/github/security")
+    async def github_security(request: Request) -> dict[str, Any]:
+        session = github_guard(request, csrf=False)
+        csrf_token = hmac.new(
+            github_web_secret, session.encode("ascii"), hashlib.sha256
+        ).hexdigest()
+        return {"csrf_token": csrf_token, "expires_in": 12 * 60 * 60}
+
+    @app.post("/api/github/status")
+    async def github_status(request: Request, verify: bool = True) -> dict[str, Any]:
+        github_guard(request, csrf=False)
+        service = _github_service(client)
+        result = await asyncio.to_thread(service.status, verify=verify)
+        active = _server_of(client)
+        gh = active.handlers.settings.github if active is not None else settings.github
+        result["configuration"] = {
+            "enabled": gh.enabled,
+            "client_id": gh.client_id,
+            "broker_url": gh.broker_url,
+            "callback_url": gh.callback_url,
+            "api_url": gh.api_url,
+            "web_url": gh.web_url,
+            "graphql_url": gh.graphql_url,
+            "selected_repositories": list(gh.selected_repositories),
+            "local_clone_root": gh.local_clone_root,
+            "allowed_origins": list(gh.allowed_origins),
+        }
+        return result
+
+    @app.post("/api/github/oauth/start")
+    async def github_oauth_start(request: Request) -> dict[str, str]:
+        browser_session = github_guard(request)
+        service = _github_service(client)
+        active = _server_of(client)
+        gh = active.handlers.settings.github if active is not None else settings.github
+        redirect_uri = gh.callback_url or f"{_external_origin(request)}/api/github/oauth/callback"
+        try:
+            authorization_url = service.oauth.start(
+                redirect_uri=redirect_uri,
+                browser_session=browser_session,
+                origin=_canonical_origin(request.headers["origin"]),
+            )
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"authorization_url": authorization_url}
+
+    @app.get("/api/github/oauth/callback", response_class=HTMLResponse)
+    async def github_oauth_callback(
+        request: Request,
+        state: str = "",
+        code: str = "",
+        error: str = "",
+        error_description: str = "",
+    ) -> HTMLResponse:
+        nonce = secrets.token_urlsafe(18)
+        headers = {
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "Content-Security-Policy": f"default-src 'none'; style-src 'nonce-{nonce}'; script-src 'nonce-{nonce}'; base-uri 'none'; frame-ancestors 'none'",
+            "X-Content-Type-Options": "nosniff",
+        }
+        if error or not state or not code:
+            message = "مجوز GitHub صادر نشد." if error else "پارامترهای بازگشت GitHub ناقص‌اند."
+            if error_description:
+                message += " پنجره را ببندید و دوباره تلاش کنید."
+            return HTMLResponse(
+                f"<!doctype html><meta charset='utf-8'><style nonce='{nonce}'>body{{font-family:sans-serif;direction:rtl;padding:3rem;background:#0d1117;color:#f0f6fc}}</style><p>{message}</p>",
+                status_code=400,
+                headers=headers,
+            )
+        service = _github_service(client)
+        try:
+            origin = await asyncio.to_thread(
+                service.complete_oauth,
+                state=state,
+                code=code,
+                browser_session=str(getattr(request.state, "github_browser_session", "")),
+            )
+        except AssistantError as exc:
+            logger.warning("GitHub OAuth callback rejected: %s", type(exc).__name__)
+            return HTMLResponse(
+                f"<!doctype html><meta charset='utf-8'><style nonce='{nonce}'>body{{font-family:sans-serif;direction:rtl;padding:3rem;background:#0d1117;color:#f0f6fc}}</style><p>اتصال GitHub کامل نشد. پنجره را ببندید و دوباره تلاش کنید.</p>",
+                status_code=400,
+                headers=headers,
+            )
+        safe_origin = json.dumps(origin, ensure_ascii=True).replace("</", "<\\/")
+        html = f"""<!doctype html><meta charset='utf-8'>
+<style nonce='{nonce}'>body{{font-family:sans-serif;direction:rtl;padding:3rem;background:#0d1117;color:#f0f6fc}}</style>
+<p>حساب GitHub با موفقیت متصل شد. این پنجره بسته می‌شود.</p>
+<script nonce='{nonce}'>if(window.opener){{window.opener.postMessage({{source:'pla-github-oauth',ok:true}},{safe_origin});window.close();}}else{{location.replace({safe_origin}+'/?github=connected');}}</script>"""
+        return HTMLResponse(html, headers=headers)
+
+    @app.post("/api/github/disconnect")
+    async def github_disconnect(request: Request) -> dict[str, bool]:
+        github_guard(request)
+        try:
+            await asyncio.to_thread(_github_service(client).disconnect)
+        except AssistantError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"disconnected": True}
+
+    @app.post("/api/github/read")
+    async def github_read(request: Request, req: GitHubOperationRequest) -> Any:
+        github_guard(request)
+        try:
+            if req.operation.startswith("local_"):
+                return await asyncio.to_thread(
+                    _github_service(client).local_read, req.operation, req.params
+                )
+            return await asyncio.to_thread(_github_service(client).read, req.operation, req.params)
+        except AssistantError as exc:
+            raise HTTPException(getattr(exc, "status", 400), str(exc)) from exc
+
+    @app.post("/api/github/write")
+    async def github_write(request: Request, req: GitHubOperationRequest) -> Any:
+        github_guard(request)
+        if req.operation in _GITHUB_SENSITIVE_OPERATIONS:
+            raise HTTPException(400, "این عملیات فقط از مسیر مستقیم و محافظت‌شدهٔ UI مجاز است")
+        if not req.confirm:
+            raise HTTPException(409, "عملیات تغییردهندهٔ GitHub به تأیید صریح نیاز دارد")
+        try:
+            return await asyncio.to_thread(_github_service(client).write, req.operation, req.params)
+        except AssistantError as exc:
+            raise HTTPException(getattr(exc, "status", 400), str(exc)) from exc
+
+    @app.post("/api/github/sensitive")
+    async def github_sensitive_write(request: Request) -> Response:
+        """Run UI-only writes whose plaintext must never enter agent schemas."""
+        github_guard(request)
+        if request.headers.get("x-github-confirm", "").casefold() != "true":
+            raise HTTPException(409, "عملیات حساس GitHub به تأیید صریح نیاز دارد")
+        if request.headers.get("content-type", "").split(";", 1)[0].strip().casefold() != "application/json":
+            raise HTTPException(415, "بدنهٔ عملیات حساس باید JSON باشد")
+        declared = _github_declared_content_length(
+            request,
+            subject="عملیات حساس",
+            maximum=MAX_GITHUB_SENSITIVE_BODY_BYTES,
+        )
+        raw = bytearray()
+        try:
+            async for chunk in request.stream():
+                raw.extend(chunk)
+                if len(raw) > MAX_GITHUB_SENSITIVE_BODY_BYTES:
+                    raise HTTPException(413, "بدنهٔ عملیات حساس بیش از سقف امن است")
+            if not raw or declared is not None and declared != len(raw):
+                raise HTTPException(400, "بدنهٔ عملیات حساس ناقص یا نامعتبر است")
+            try:
+                payload = json.loads(bytes(raw).decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise HTTPException(400, "بدنهٔ عملیات حساس JSON معتبر نیست") from exc
+        finally:
+            _clear_bytearray(raw, overwrite=True)
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "ساختار عملیات حساس نامعتبر است")
+        operation = payload.get("operation")
+        params = payload.get("params")
+        if operation not in _GITHUB_SENSITIVE_OPERATIONS or not isinstance(params, dict):
+            raise HTTPException(400, "عملیات حساس GitHub مجاز نیست")
+        try:
+            result = await asyncio.to_thread(
+                _github_service(client).write, operation, params
+            )
+        except AssistantError as exc:
+            raise HTTPException(getattr(exc, "status", 400), str(exc)) from exc
+        finally:
+            params.pop("value", None)
+            webhook_config = params.get("config")
+            if isinstance(webhook_config, dict):
+                webhook_config.pop("secret", None)
+            params.pop("secret", None)
+            payload.clear()
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/github/release-asset")
+    async def github_release_asset_upload(request: Request) -> Any:
+        github_guard(request)
+        if request.headers.get("x-github-confirm", "").casefold() != "true":
+            raise HTTPException(409, "آپلود فایل Release به تأیید صریح نیاز دارد")
+        declared = _github_declared_content_length(
+            request,
+            subject="آپلود Release",
+            maximum=MAX_GITHUB_RELEASE_ASSET_BYTES,
+        )
+        data = bytearray()
+        try:
+            async for chunk in request.stream():
+                data.extend(chunk)
+                if len(data) > MAX_GITHUB_RELEASE_ASSET_BYTES:
+                    raise HTTPException(413, "فایل Release از سقف ۲۵۶ مگابایت بزرگ‌تر است")
+            if not data or declared is not None and declared != len(data):
+                raise HTTPException(400, "بدنهٔ فایل Release ناقص یا نامعتبر است")
+            params = {
+                "owner": request.query_params.get("owner", ""),
+                "repo": request.query_params.get("repo", ""),
+                "release_id": request.query_params.get("release_id", ""),
+                "name": request.query_params.get("name", ""),
+                "label": request.query_params.get("label", ""),
+            }
+            try:
+                return await asyncio.to_thread(
+                    _github_service(client).upload_release_asset,
+                    params,
+                    data=bytes(data),
+                    content_type=request.headers.get("content-type", "application/octet-stream"),
+                )
+            except AssistantError as exc:
+                raise HTTPException(getattr(exc, "status", 400), str(exc)) from exc
+        finally:
+            _clear_bytearray(data)
+
+    @app.post("/api/github/download")
+    async def github_download(request: Request, req: GitHubOperationRequest) -> Response:
+        github_guard(request)
+        try:
+            data, filename, media_type = await asyncio.to_thread(
+                _github_service(client).download,
+                req.operation,
+                req.params,
+            )
+        except AssistantError as exc:
+            raise HTTPException(getattr(exc, "status", 400), str(exc)) from exc
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", filename).lstrip(".")
+        safe_name = safe_name or "github-download"
+        return Response(
+            data,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_name}"',
+                "Cache-Control": "no-store",
+            },
+        )
 
     @app.post("/api/telegram/connect")
     async def telegram_connect(req: TelegramConnectRequest | None = None) -> dict[str, Any]:
@@ -716,39 +1445,54 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         if server is None:
             raise HTTPException(503, "telegram needs an in-process bridge")
         try:
-            return server.handlers.set_telegram_account_enabled(
-                str(req.name), bool(req.enabled)
-            )
+            return server.handlers.set_telegram_account_enabled(str(req.name), bool(req.enabled))
         except AssistantError as exc:
             _raise_telegram_http_error(exc)
 
     @app.get("/api/telegram/chats")
     async def telegram_chats(
-        account: str | None = None, kind: str = "all", query: str = "",
-        sort: str = "recent", limit: int = 50, offset: int = 0,
-        archived: bool | None = None, unread_only: bool = False,
+        account: str | None = None,
+        kind: str = "all",
+        query: str = "",
+        sort: str = "recent",
+        limit: int = 50,
+        offset: int = 0,
+        archived: bool | None = None,
+        unread_only: bool = False,
     ) -> dict[str, Any]:
         name, telegram = _connected_telegram_client(client, account)
         page_size = max(1, min(limit, 200))
         page_offset = max(0, offset)
         try:
             items = await asyncio.to_thread(
-                telegram.list_chats, page_size + 1, kind, query, sort,
-                offset=page_offset, archived=archived, unread_only=unread_only,
+                telegram.list_chats,
+                page_size + 1,
+                kind,
+                query,
+                sort,
+                offset=page_offset,
+                archived=archived,
+                unread_only=unread_only,
             )
         except AssistantError as exc:
             _raise_telegram_http_error(exc)
         has_more = len(items) > page_size
         items = items[:page_size]
         return {
-            "account": name, "source": "live", "offset": page_offset,
-            "next_offset": page_offset + len(items), "has_more": has_more,
+            "account": name,
+            "source": "live",
+            "offset": page_offset,
+            "next_offset": page_offset + len(items),
+            "has_more": has_more,
             "items": [item.to_dict() for item in items],
         }
 
     @app.get("/api/telegram/contacts")
     async def telegram_contacts(
-        account: str | None = None, query: str = "", limit: int = 100, offset: int = 0,
+        account: str | None = None,
+        query: str = "",
+        limit: int = 100,
+        offset: int = 0,
     ) -> dict[str, Any]:
         name, telegram = _connected_telegram_client(client, account)
         page_size = max(1, min(limit, 500))
@@ -761,11 +1505,14 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                 all_items = await asyncio.to_thread(telegram.list_contacts, fetch_limit)
         except AssistantError as exc:
             _raise_telegram_http_error(exc)
-        items = all_items[page_offset:page_offset + page_size]
+        items = all_items[page_offset : page_offset + page_size]
         return {
-            "account": name, "source": "live", "offset": page_offset,
+            "account": name,
+            "source": "live",
+            "offset": page_offset,
             "next_offset": page_offset + len(items),
-            "has_more": len(all_items) > page_offset + page_size, "items": items,
+            "has_more": len(all_items) > page_offset + page_size,
+            "items": items,
         }
 
     @app.get("/api/telegram/stats")
@@ -779,19 +1526,26 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
 
     @app.get("/api/telegram/history")
     async def telegram_history(
-        target: str, account: str | None = None, limit: int = 50, offset_id: int = 0,
+        target: str,
+        account: str | None = None,
+        limit: int = 50,
+        offset_id: int = 0,
     ) -> dict[str, Any]:
         name, telegram = _connected_telegram_client(client, account)
         try:
             resolved = await asyncio.to_thread(telegram.resolve_target, target)
             items = await asyncio.to_thread(
-                telegram.get_chat_history, str(resolved["id"]),
-                max(1, min(limit, 200)), max(0, offset_id),
+                telegram.get_chat_history,
+                str(resolved["id"]),
+                max(1, min(limit, 200)),
+                max(0, offset_id),
             )
         except AssistantError as exc:
             _raise_telegram_http_error(exc)
         return {
-            "account": name, "source": "live", "chat": resolved,
+            "account": name,
+            "source": "live",
+            "chat": resolved,
             "items": [item.to_dict() for item in items],
         }
 
@@ -945,6 +1699,37 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
         streamed run events.  Client disconnects exit cleanly (debug-level
         log only) instead of crashing the handler.
         """
+        external_origin = _websocket_external_origin(websocket)
+        supplied_origin = _canonical_origin(websocket.headers.get("origin", ""))
+        active = _server_of(client)
+        github_settings = active.handlers.settings.github if active is not None else settings.github
+        allowed_origins = {
+            value
+            for value in (
+                external_origin,
+                *(_canonical_origin(item) for item in github_settings.allowed_origins),
+            )
+            if value
+        }
+        # Browsers always send Origin on WebSocket handshakes. Non-browser
+        # local clients may omit it; any supplied origin must be exact.
+        if supplied_origin and supplied_origin not in allowed_origins:
+            await websocket.close(code=1008, reason="origin_not_allowed")
+            return
+        if remote_auth_enabled:
+            cookie = websocket.cookies.get("pla_remote_auth", "")
+            authorization = websocket.headers.get("authorization", "")
+            supplied = (
+                authorization[len("Bearer ") :] if authorization.startswith("Bearer ") else ""
+            )
+            authenticated = (bool(cookie) and hmac.compare_digest(cookie, remote_cookie_value)) or (
+                _valid_web_access_token(supplied)
+                and len(supplied) == len(remote_access_token)
+                and hmac.compare_digest(supplied, remote_access_token)
+            )
+            if websocket.url.scheme != "wss" or not authenticated:
+                await websocket.close(code=1008, reason="authentication_required")
+                return
         await websocket.accept()
         server = _server_of(client)
         stop = asyncio.Event()
@@ -1026,13 +1811,15 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                     break  # client disconnected / socket died
                 if "__global" in item:
                     event = item["event"]
-                    ok = await _send({
-                        "type": "event",
-                        "event_type": event.type,
-                        "payload": event.payload,
-                        "run_id": event.run_id,
-                        "seq": event.seq,
-                    })
+                    ok = await _send(
+                        {
+                            "type": "event",
+                            "event_type": event.type,
+                            "payload": event.payload,
+                            "run_id": event.run_id,
+                            "seq": event.seq,
+                        }
+                    )
                     if not ok:
                         break
                     continue
@@ -1044,13 +1831,15 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
                         if server is not None:
                             server.handlers.event_bus.destroy_run_queue(run_id)
                         continue
-                    ok = await _send({
-                        "type": "event",
-                        "event_type": event.type,
-                        "payload": event.payload,
-                        "run_id": event.run_id,
-                        "seq": event.seq,
-                    })
+                    ok = await _send(
+                        {
+                            "type": "event",
+                            "event_type": event.type,
+                            "payload": event.payload,
+                            "run_id": event.run_id,
+                            "seq": event.seq,
+                        }
+                    )
                     if not ok:
                         break
                     if event.type in {"chat_done", "chat_failed"}:
@@ -1117,6 +1906,17 @@ def create_app(client: BridgeClient, settings: AssistantSettings) -> FastAPI:
 # ---------------------------------------------------------------------------
 
 
+def _bridge_access_token(client: BridgeClient) -> str:
+    backend = getattr(client, "_backend", None)
+    server = getattr(backend, "_server", None) if backend is not None else None
+    token = getattr(getattr(server, "config", None), "token", "")
+    if not token and backend is not None:
+        token = getattr(backend, "_token", "")
+    if not _valid_web_access_token(token):
+        raise AssistantError("برای Web راه‌دور، Bridge باید توکن امن ۳۲ تا ۵۱۲ نویسه‌ای داشته باشد")
+    return token
+
+
 class WebServer:
     """Convenience runner for the Web UI."""
 
@@ -1132,7 +1932,8 @@ class WebServer:
         self.client = client
         self.host = host
         self.port = port
-        self._app = create_app(client, settings)
+        remote_access_token = "" if _is_loopback_bind(host) else _bridge_access_token(client)
+        self._app = create_app(client, settings, remote_access_token=remote_access_token)
         self._server: Any = None
         self._thread: threading.Thread | None = None
 
@@ -1184,11 +1985,17 @@ def run_web(argv: list[str] | None = None) -> int:
         prog="persian-local-web",
         description="Serve the web UI for the Local Assistant.",
     )
-    parser.add_argument("--host", default=os.environ.get("LOCAL_AGENT_WEB_HOST", "127.0.0.1"),
-                        help="Bind address (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int,
-                        default=int(os.environ.get("LOCAL_AGENT_WEB_PORT", "7824")),
-                        help="Port (default: 7824)")
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("LOCAL_AGENT_WEB_HOST", "127.0.0.1"),
+        help="Bind address (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("LOCAL_AGENT_WEB_PORT", "7824")),
+        help="Port (default: 7824)",
+    )
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
     settings = load_settings()
@@ -1198,25 +2005,22 @@ def run_web(argv: list[str] | None = None) -> int:
     host = args.host
     port = args.port
 
-    # Security: require a token when binding to a non-loopback address
-    if host not in {"127.0.0.1", "localhost", "::1"}:
-        token_path = settings.data_dir / "bridge.token"
-        if not token_path.is_file():
-            print(
-                "⚠️  هشدار امنیتی: شما در حال اتصال به آدرس غیرمحلی هستید "
-                f"({host}). یک توکن احراز هویت لازم است.\n"
-                "ابتدا یک بار دستیار را به صورت محلی اجرا کنید تا توکن تولید شود، "
-                "یا متغیر LOCAL_AGENT_BRIDGE_TOKEN را تنظیم کنید.\n"
-                f"مسیر توکن: {token_path}",
-                file=sys.stderr,
-            )
-            return 1
-        print(f"⚠️  حالت سرور: رابط در آدرس {host}:{port} قابل دسترسی خواهد بود.")
-        print(f"   توکن احراز هویت: {token_path}")
-        print(f"   برای اتصال: http://{host}:{port}/?token=YOUR_TOKEN")
-
+    remote_access = not _is_loopback_bind(host)
     client = BridgeClient.start_in_process(settings)
-    server = WebServer(settings, client, host=host, port=port)
+    try:
+        server = WebServer(settings, client, host=host, port=port)
+    except AssistantError as exc:
+        print(f"خطای امنیتی Web: {exc}", file=sys.stderr)
+        return 1
+    if remote_access:
+        token_path = settings.data_dir / "bridge.token"
+        print(f"⚠️  حالت سرور: رابط روی {host}:{port} گوش می‌دهد.")
+        print("   دسترسی راه‌دور فقط از طریق reverse proxy امن HTTPS پذیرفته می‌شود.")
+        if os.environ.get("LOCAL_AGENT_BRIDGE_TOKEN", "").strip():
+            print("   توکن ورود از متغیر LOCAL_AGENT_BRIDGE_TOKEN خوانده می‌شود.")
+        else:
+            print(f"   توکن ورود: {token_path}")
+        print("   نشانی HTTPS عمومی را باز کنید و توکن را در فرم ورود وارد کنید.")
     server.start_in_thread()
     server.wait_until_ready()
     print(f"web UI ready at {server.url}")

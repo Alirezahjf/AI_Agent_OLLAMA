@@ -108,8 +108,11 @@ Bridge و سرور وب داخل همون پروسه اجرا می‌شن.
 ```powershell
 python local_agent_setup.py web
 ```
-Web UI روی `http://127.0.0.1:7824` باز می‌شه. از گوشی هم (روی همون
-شبکه، با `LOCAL_AGENT_WEB_HOST=0.0.0.0`) قابل دسترسه.
+Web UI روی `http://127.0.0.1:7824` باز می‌شه. برای دسترسی شبکه‌ای با
+`LOCAL_AGENT_WEB_HOST=0.0.0.0` باید آن را پشت reverse proxy مورد اعتماد HTTPS
+قرار دهید؛ HTTP راه‌دور عمداً رد می‌شود. همهٔ صفحه‌ها، APIها و WebSocket پس از
+ورود با توکن Bridge در فرم امن قابل استفاده‌اند. توکن در URL وارد نمی‌شود و
+نشست در cookie امن HttpOnly نگه‌داری می‌شود. جزئیات در `DESKTOP.md` آمده است.
 
 ### حالت ۴: Telegram Bot + Bridge
 ابتدا Bridge رو در یک ترمینال روی ماشین خودتون start کنید:

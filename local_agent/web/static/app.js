@@ -13,6 +13,53 @@
   const STORAGE_PREFS = "assistant.prefs.v1";
   const STORAGE_CONVERSATIONS = "assistant.conversations.v1";
 
+  // Explicitly mirrors the backend's operation allow-list. Sensitive writes
+  // (secret values and webhook secrets) intentionally have dedicated forms.
+  const GITHUB_CONSOLE_READ_OPERATIONS = Object.freeze([
+    "account", "installations", "installation_repositories", "repositories", "repository", "contents",
+    "file_text", "repository_tree", "commits", "commit", "compare", "languages", "contributors", "branches",
+    "branch_protection", "branch_rules", "rulesets", "ruleset", "ruleset_history", "tags", "issues", "issue",
+    "issue_comments", "pulls", "pull", "pull_files", "pull_reviews", "discussion_categories", "discussions",
+    "discussion", "check_runs", "check_run", "check_run_annotations", "check_suites", "check_suite",
+    "check_suite_runs", "workflows", "workflow", "workflow_runs", "workflow_run", "workflow_run_jobs",
+    "artifacts", "actions_secrets", "actions_variables", "organization_actions_secrets",
+    "organization_actions_variables", "environment_actions_secrets", "environment_actions_variables",
+    "actions_caches", "actions_cache_usage", "self_hosted_runners", "releases", "release", "deployments",
+    "deployment_statuses", "environments", "collaborators", "webhooks", "webhook", "webhook_deliveries",
+    "repository_codespaces", "codespaces", "codespace", "codespace_machines", "codespace_secrets", "packages",
+    "package_versions", "dependabot_alerts", "code_scanning_alerts", "secret_scanning_alerts",
+    "security_advisories", "organizations", "organization_repositories", "organization_members",
+    "organization_runners", "organization_webhooks", "notifications", "notification_thread",
+    "notification_subscription", "search", "projects", "project", "local_repositories", "local_status",
+    "local_branches", "local_log", "local_remotes", "local_diff",
+  ]);
+  const GITHUB_CONSOLE_WRITE_OPERATIONS = Object.freeze([
+    "repository_create", "repository_update", "repository_delete", "repository_transfer", "repository_topics",
+    "fork", "file_upsert", "file_delete", "branch_create", "branch_delete", "branch_protection_update",
+    "branch_protection_delete", "ruleset_create", "ruleset_update", "ruleset_delete", "issue_create",
+    "issue_update", "issue_comment", "issue_lock", "issue_unlock", "pull_create", "pull_update", "pull_review",
+    "pull_merge", "discussion_create", "discussion_update", "discussion_delete", "discussion_comment",
+    "discussion_comment_update", "discussion_comment_delete", "discussion_close", "discussion_reopen",
+    "check_run_create", "check_run_update", "check_run_rerequest", "check_suite_rerequest", "workflow_dispatch",
+    "workflow_run_rerun", "workflow_run_cancel", "workflow_run_delete", "artifact_delete", "actions_secret_delete",
+    "actions_variable_set", "actions_variable_delete", "organization_actions_secret_repositories_set",
+    "organization_actions_secret_delete", "organization_actions_variable_set", "organization_actions_variable_delete",
+    "environment_actions_secret_delete", "environment_actions_variable_set", "environment_actions_variable_delete",
+    "workflow_enable", "workflow_disable", "actions_cache_delete", "runner_remove", "runner_labels_set",
+    "release_create", "release_update", "release_delete", "release_asset_update", "release_asset_delete",
+    "deployment_create", "deployment_status", "environment_update", "environment_delete", "collaborator_add",
+    "collaborator_remove", "organization_membership_set", "organization_membership_remove", "notification_mark",
+    "notification_subscription_set", "notification_subscription_delete", "webhook_delete", "webhook_ping",
+    "webhook_redeliver", "codespace_create", "codespace_update", "codespace_start", "codespace_stop",
+    "codespace_delete", "codespace_secret_repositories_set", "codespace_secret_delete", "package_version_delete",
+    "package_version_restore", "dependabot_alert_update", "code_scanning_alert_update",
+    "secret_scanning_alert_update", "project_create", "project_update", "project_delete", "project_add_item",
+    "project_add_draft_issue", "project_update_draft_issue", "project_archive_item", "project_unarchive_item",
+    "project_delete_item", "project_update_item_field", "project_clear_item_field", "project_update_item_position",
+    "local_clone", "local_pull", "local_push", "local_branch_create", "local_branch_switch",
+    "local_branch_delete", "local_commit", "local_tag",
+  ]);
+
   /* ------------------------------------------------------------ helpers */
 
   const uid = () =>
@@ -30,7 +77,8 @@
     { name: "برنامه‌ها و پنجره‌ها", icon: "🪟", match: /^(open_application|close_application|list_applications|locate_application|focus_window|maximize_window|minimize_window|move_window|list_windows|open_task_manager)/ },
     { name: "فایل و پوشه", icon: "📁", match: /^(read_file|write_file|delete_path|move_path|make_directory|list_directory|search_files|open_path)/ },
     { name: "ماوس و کیبورد", icon: "🖱️", match: /^(mouse_|drag_to|scroll|type_text|key_press|hotkey|get_mouse_position|get_screen_size|find_controls|screen_capture)/ },
-    { name: "تلگرام", icon: "✈️", match: /^send_telegram/ },
+    { name: "تلگرام", icon: "✈️", match: /^(send_telegram|telegram\.)/ },
+    { name: "GitHub", icon: "●", match: /^github\./ },
     { name: "وب", icon: "🌐", match: /^(web_search|web_fetch)/ },
     { name: "سیستم", icon: "⚙️", match: /^(run_shell|system_info|list_processes|kill_process|shutdown_computer|cancel_shutdown|clipboard_)/ },
   ];
@@ -219,6 +267,12 @@
         full_system_access: false,
         autostart: false,
         telegram: { enabled: false, api_id: "", api_hash: "", phone: "", confirm_send: true },
+        github: {
+          enabled: false, client_id: "", broker_url: "", callback_url: "",
+          api_url: "https://api.github.com", web_url: "https://github.com",
+          graphql_url: "https://api.github.com/graphql", selected_repositories: [],
+          local_clone_root: "", allowed_origins: [],
+        },
         gmail: { enabled: false, username: "", credentials_file: "", token_file: "", app_password: "", confirm_send: true },
       },
       fullAccessWanted: false,
@@ -251,6 +305,53 @@
       telegramHistoryLoading: false,
       gmailConnected: false,
       gmailBusy: false,
+      githubConnected: false,
+      githubBusy: false,
+      githubAccount: null,
+      githubRepositories: [],
+      githubInstallations: [],
+      githubError: "",
+      githubCsrfToken: "",
+      githubAllowedOriginsText: "",
+      githubOperationsRepository: "",
+      githubActionsEntry: {
+        kind: "secret", scope: "repository", name: "", value: "", org: "", environment: "",
+        visibility: "private", selected_repository_ids: "",
+      },
+      githubReleaseAsset: { release_id: "", label: "", file: null },
+      githubWebhookDraft: {
+        hook_id: "", url: "", content_type: "json", events: "push", secret: "", active: true,
+      },
+      githubConsoleMode: "read",
+      githubConsoleOperation: "repository",
+      githubConsoleParams: "{}",
+      githubConsoleResult: "",
+      githubConsoleLastRun: null,
+      githubConsoleUseRepository: true,
+      githubWorkspaceRepo: "",
+      githubWorkspacePath: "",
+      githubWorkspaceLoading: false,
+      githubWorkspace: null,
+      githubLocalPath: "",
+      githubLocalResult: "",
+      githubCommitMessage: "",
+      githubCommitPaths: "",
+      githubBranchName: "",
+      githubPullRequest: { title: "", head: "", base: "main", body: "" },
+      githubFileEdit: { path: "", branch: "", content: "", message: "", sha: "" },
+      githubIssueDraft: { title: "", body: "", labels: "" },
+      githubWorkflowDispatch: { workflow_id: "", ref: "main", inputs: "{}" },
+      githubReleaseDraft: { tag_name: "", name: "", body: "", draft: true, prerelease: false },
+      githubProjectOwner: "",
+      githubProjectOwnerType: "user",
+      githubProjectOwnerId: "",
+      githubProjectLoadedOwner: "",
+      githubProjectLoadedOwnerType: "",
+      githubProjects: [],
+      githubProjectId: "",
+      githubProject: null,
+      githubProjectTitle: "",
+      githubNewRepository: { name: "", description: "", private: true, auto_init: true },
 
       status: {},
       warnings: [],
@@ -301,6 +402,14 @@
           this.persistConversation();
         });
         window.addEventListener("beforeunload", () => this.persistConversation());
+        window.addEventListener("message", (event) => {
+          if (event.origin !== location.origin || !event.data || event.data.source !== "pla-github-oauth") return;
+          if (event.data.ok) {
+            this.githubBusy = false;
+            this.refreshGitHubStatus(true);
+            this.toast("ok", "✅", "حساب GitHub متصل شد");
+          }
+        });
       },
 
       /* ------------------------------------------------- offline showcase */
@@ -634,6 +743,771 @@
         return response.json();
       },
 
+      async ensureGitHubSecurity(force) {
+        if (this.githubCsrfToken && !force) return this.githubCsrfToken;
+        const response = await fetch("/api/github/security", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        });
+        if (!response.ok) throw new Error("ایجاد نشست امن GitHub ناموفق بود");
+        const data = await response.json();
+        this.githubCsrfToken = data.csrf_token || "";
+        return this.githubCsrfToken;
+      },
+
+      async githubApi(path, options) {
+        const csrf = await this.ensureGitHubSecurity(false);
+        const opts = options || {};
+        const headers = Object.assign({ "Content-Type": "application/json", "X-CSRF-Token": csrf }, opts.headers || {});
+        return this.api(path, Object.assign({}, opts, { headers }));
+      },
+
+      applyGitHubStatus(state) {
+        if (!state) return;
+        this.githubConnected = Boolean(state.connected);
+        this.githubAccount = state.account || (this.githubConnected ? this.githubAccount : null);
+        if (this.githubAccount && !this.githubProjectOwner) {
+          this.githubProjectOwner = this.githubAccount.login || "";
+          this.githubProjectOwnerId = this.githubAccount.node_id || "";
+          this.githubProjectLoadedOwner = this.githubProjectOwner;
+          this.githubProjectLoadedOwnerType = "user";
+        }
+        if (state.error) this.githubError = String(state.error);
+        if (!this.githubConnected) {
+          this.githubRepositories = [];
+          this.githubInstallations = [];
+          this.githubProjects = [];
+          this.githubProject = null;
+          this.githubProjectOwnerId = "";
+          this.githubProjectLoadedOwner = "";
+          this.githubProjectLoadedOwnerType = "";
+        }
+        if (Array.isArray(state.selected_repositories)) {
+          this.form.github.selected_repositories = state.selected_repositories.slice();
+        }
+      },
+
+      normalizeGitHubSettings(value) {
+        const defaults = {
+          enabled: false, client_id: "", broker_url: "", callback_url: "",
+          api_url: "https://api.github.com", web_url: "https://github.com",
+          graphql_url: "https://api.github.com/graphql", selected_repositories: [],
+          local_clone_root: "", allowed_origins: [],
+        };
+        const result = Object.assign(defaults, value || {});
+        result.enabled = Boolean(result.enabled);
+        result.selected_repositories = Array.isArray(result.selected_repositories) ? result.selected_repositories.slice() : [];
+        result.allowed_origins = Array.isArray(result.allowed_origins) ? result.allowed_origins.slice() : [];
+        return result;
+      },
+
+      async refreshGitHubStatus(verify) {
+        try {
+          const data = await this.githubApi("/api/github/status?verify=" + (verify ? "true" : "false"), {
+            method: "POST", body: "{}",
+          });
+          this.applyGitHubStatus(data);
+          if (data.configuration) {
+            this.form.github = this.normalizeGitHubSettings(data.configuration);
+            this.githubAllowedOriginsText = this.form.github.allowed_origins.join("\n");
+          }
+          this.githubError = data.error || "";
+          if (this.githubConnected && verify) {
+            await Promise.all([this.loadGitHubRepositories(), this.loadGitHubInstallations()]);
+          }
+          return data;
+        } catch (err) {
+          this.githubError = err.message;
+          throw err;
+        }
+      },
+
+      async saveGitHubConfiguration() {
+        this.form.github.allowed_origins = String(this.githubAllowedOriginsText || "")
+          .split(/[\n,]+/).map((item) => item.trim()).filter(Boolean);
+        const saved = await this.saveSettings(false);
+        if (!saved) throw new Error("ذخیرهٔ پیکربندی GitHub ناموفق بود");
+        await this.ensureGitHubSecurity(true);
+      },
+
+      async connectGitHub() {
+        if (this.connection === "offline" || this.githubBusy) return;
+        this.githubBusy = true;
+        this.githubError = "";
+        let popup = null;
+        const desktopWebview = Boolean(window.pywebview && window.pywebview.api);
+        try {
+          // Open synchronously to avoid popup blocking in a normal browser.
+          // Desktop uses an in-webview redirect so its loopback session cookie
+          // returns with the OAuth callback instead of being lost in an external browser.
+          if (!desktopWebview) {
+            try { popup = window.open("about:blank", "pla-github-oauth", "popup,width=720,height=780"); } catch (_) { popup = null; }
+          }
+          this.form.github.enabled = true;
+          await this.saveGitHubConfiguration();
+          const data = await this.githubApi("/api/github/oauth/start", {
+            method: "POST", body: JSON.stringify({ origin: location.origin }),
+          });
+          if (!data.authorization_url) throw new Error("نشانی مجوز GitHub دریافت نشد");
+          if (popup && !popup.closed) {
+            popup.location.replace(data.authorization_url);
+            const started = Date.now();
+            const poll = window.setInterval(async () => {
+              if (!this.githubBusy || Date.now() - started > 120000) {
+                window.clearInterval(poll);
+                this.githubBusy = false;
+                return;
+              }
+              try {
+                const status = await this.refreshGitHubStatus(true);
+                if (status.connected) { window.clearInterval(poll); this.githubBusy = false; }
+              } catch (_) { /* authorization may still be pending */ }
+              if (popup.closed && this.githubBusy) { window.clearInterval(poll); this.githubBusy = false; }
+            }, 1500);
+          } else {
+            location.assign(data.authorization_url);
+          }
+        } catch (err) {
+          if (popup && !popup.closed) popup.close();
+          this.githubBusy = false;
+          this.githubError = err.message;
+          this.toast("bad", "⚠️", "اتصال GitHub ناموفق بود — " + err.message);
+        }
+      },
+
+      async disconnectGitHub() {
+        if (!window.confirm("اتصال GitHub قطع و توکن امن باطل شود؟")) return;
+        this.githubBusy = true;
+        this.githubError = "";
+        try {
+          const data = await this.githubApi("/api/github/disconnect", { method: "POST", body: "{}" });
+          this.applyGitHubStatus(data);
+          this.githubAccount = null;
+          this.githubRepositories = [];
+          this.toast("info", "ℹ️", "اتصال GitHub قطع شد");
+        } catch (err) {
+          this.githubError = err.message;
+        } finally { this.githubBusy = false; }
+      },
+
+      async loadGitHubRepositories() {
+        if (!this.githubConnected) return;
+        this.githubBusy = true;
+        try {
+          const data = await this.githubApi("/api/github/read", {
+            method: "POST", body: JSON.stringify({ operation: "repositories", params: { limit: 500 } }),
+          });
+          const items = data && (data.items || data.repositories || data.result || data);
+          this.githubRepositories = (Array.isArray(items) ? items : []).map((repo) => ({
+            full_name: repo.full_name || ((repo.owner && repo.owner.login ? repo.owner.login + "/" : "") + (repo.name || "")),
+            private: Boolean(repo.private),
+            description: repo.description || "",
+            language: repo.language || "",
+            default_branch: repo.default_branch || "",
+            open_issues_count: Number(repo.open_issues_count || 0),
+            updated_at: repo.updated_at || "",
+          })).filter((repo) => repo.full_name);
+        } catch (err) {
+          this.githubError = err.message;
+        } finally { this.githubBusy = false; }
+      },
+
+      async loadGitHubInstallations() {
+        if (!this.githubConnected) return;
+        try {
+          const data = await this.githubApi("/api/github/read", {
+            method: "POST", body: JSON.stringify({ operation: "installations", params: { limit: 100 } }),
+          });
+          const items = data && (data.items || data.installations || data);
+          this.githubInstallations = (Array.isArray(items) ? items : []).map((installation) => ({
+            id: installation.id,
+            account: installation.account && installation.account.login ? installation.account.login : "—",
+            target_type: installation.target_type || "",
+            repository_selection: installation.repository_selection || "",
+          }));
+        } catch (err) {
+          this.githubError = err.message;
+        }
+      },
+
+      githubRepositoryParams(fullName) {
+        const value = fullName || this.githubWorkspaceRepo;
+        const separator = String(value || "").indexOf("/");
+        if (separator < 1 || separator === String(value).length - 1) {
+          throw new Error("ابتدا یک مخزن انتخاب کنید");
+        }
+        return { owner: value.slice(0, separator), repo: value.slice(separator + 1) };
+      },
+
+      async githubRead(operation, params) {
+        return this.githubApi("/api/github/read", {
+          method: "POST",
+          body: JSON.stringify({ operation, params: params || {} }),
+        });
+      },
+
+      async githubWrite(operation, params, message) {
+        if (!window.confirm(message || "اجرای این عملیات تغییردهنده در GitHub را تأیید می‌کنید؟")) return null;
+        return this.githubApi("/api/github/write", {
+          method: "POST",
+          body: JSON.stringify({ operation, params: params || {}, confirm: true }),
+        });
+      },
+
+      get githubConsoleOperations() {
+        return this.githubConsoleMode === "write"
+          ? GITHUB_CONSOLE_WRITE_OPERATIONS
+          : GITHUB_CONSOLE_READ_OPERATIONS;
+      },
+
+      resetGitHubConsoleOperation() {
+        const available = this.githubConsoleOperations;
+        if (!available.includes(this.githubConsoleOperation)) {
+          this.githubConsoleOperation = available[0] || "";
+        }
+        this.githubConsoleResult = "";
+      },
+
+      async runGitHubConsole(repeat) {
+        const previous = repeat ? this.githubConsoleLastRun : null;
+        const mode = previous ? previous.mode : this.githubConsoleMode;
+        const available = mode === "write" ? GITHUB_CONSOLE_WRITE_OPERATIONS : GITHUB_CONSOLE_READ_OPERATIONS;
+        const operation = previous ? previous.operation : String(this.githubConsoleOperation || "");
+        if (!available.includes(operation)) {
+          this.githubError = "عملیات کنسول در فهرست مجاز نیست";
+          return;
+        }
+        let params;
+        try {
+          params = previous
+            ? Object.assign({}, previous.params)
+            : JSON.parse(String(this.githubConsoleParams || "{}"));
+        } catch (_) { this.githubError = "پارامترهای کنسول باید JSON معتبر باشند"; return; }
+        if (!params || Array.isArray(params) || typeof params !== "object") {
+          this.githubError = "پارامترهای کنسول باید یک شیء JSON باشند";
+          return;
+        }
+        if (this.githubConsoleUseRepository && this.githubOperationsRepository) {
+          let selected;
+          try { selected = this.githubRepositoryParams(this.githubOperationsRepository); }
+          catch (err) { this.githubError = err.message; return; }
+          params.owner = selected.owner;
+          params.repo = selected.repo;
+        }
+        this.githubBusy = true;
+        this.githubError = "";
+        try {
+          const result = mode === "write"
+            ? await this.githubWrite(operation, params, "اجرای عملیات «" + operation + "» با این پارامترها را تأیید می‌کنید؟")
+            : await this.githubRead(operation, params);
+          if (result === null) return;
+          this.githubConsoleResult = JSON.stringify(result, null, 2);
+          this.githubConsoleLastRun = { mode, operation, params: Object.assign({}, params) };
+          if (mode === "write") {
+            await this.refreshGitHubStatus(false);
+            if (params.owner && params.repo && this.githubWorkspaceRepo === params.owner + "/" + params.repo) {
+              await this.inspectGitHubRepository();
+            }
+          }
+          this.toast("ok", "✅", "عملیات GitHub انجام شد");
+        } catch (err) {
+          this.githubError = err.message;
+          this.githubConsoleResult = JSON.stringify({ error: err.message }, null, 2);
+        } finally { this.githubBusy = false; }
+      },
+
+      async inspectGitHubRepository(fullName) {
+        if (fullName) this.githubWorkspaceRepo = fullName;
+        let repo;
+        try { repo = this.githubRepositoryParams(); } catch (err) { this.githubError = err.message; return; }
+        this.githubWorkspaceLoading = true;
+        this.githubError = "";
+        try {
+          const path = String(this.githubWorkspacePath || "").replace(/^\/+|\/+$/g, "");
+          const jobs = {
+            repository: this.githubRead("repository", repo),
+            contents: this.githubRead("contents", Object.assign({}, repo, { path })),
+            commits: this.githubRead("commits", Object.assign({}, repo, { limit: 15 })),
+            branches: this.githubRead("branches", Object.assign({}, repo, { limit: 100 })),
+            issues: this.githubRead("issues", Object.assign({}, repo, { state: "open", limit: 20 })),
+            pulls: this.githubRead("pulls", Object.assign({}, repo, { state: "open", limit: 20 })),
+            languages: this.githubRead("languages", repo),
+            workflows: this.githubRead("workflows", Object.assign({}, repo, { limit: 50 })),
+          };
+          const keys = Object.keys(jobs);
+          const settled = await Promise.allSettled(keys.map((key) => jobs[key]));
+          const workspace = { errors: {} };
+          settled.forEach((result, index) => {
+            const key = keys[index];
+            if (result.status === "fulfilled") workspace[key] = result.value;
+            else workspace.errors[key] = result.reason && result.reason.message ? result.reason.message : "خطای ناشناخته";
+          });
+          if (workspace.contents && workspace.contents.type === "file") {
+            try {
+              workspace.file = await this.githubRead("file_text", Object.assign({}, repo, { path, max_bytes: 524288 }));
+              this.githubFileEdit.path = workspace.file.path || path;
+              this.githubFileEdit.content = workspace.file.text || "";
+              this.githubFileEdit.sha = workspace.file.sha || "";
+            } catch (err) { workspace.errors.file = err.message; }
+          }
+          this.githubWorkspace = workspace;
+        } catch (err) {
+          this.githubError = err.message;
+        } finally { this.githubWorkspaceLoading = false; }
+      },
+
+      async inspectCompleteGitHubTree() {
+        let repo;
+        try { repo = this.githubRepositoryParams(); } catch (err) { this.githubError = err.message; return; }
+        this.githubWorkspaceLoading = true;
+        try {
+          const tree = await this.githubRead("repository_tree", Object.assign({}, repo, { limit: 2000 }));
+          this.githubWorkspace = Object.assign({}, this.githubWorkspace || {}, { tree });
+        } catch (err) { this.githubError = err.message; }
+        finally { this.githubWorkspaceLoading = false; }
+      },
+
+      openGitHubWorkspacePath(path, type) {
+        this.githubWorkspacePath = path || "";
+        if (type === "dir" || type === "file") this.inspectGitHubRepository();
+      },
+
+      async createGitHubRepository() {
+        const draft = this.githubNewRepository;
+        const name = String(draft.name || "").trim();
+        if (!/^[A-Za-z0-9_.-]{1,100}$/.test(name) || name === "." || name === "..") {
+          this.githubError = "نام مخزن نامعتبر است";
+          return;
+        }
+        this.githubBusy = true;
+        this.githubError = "";
+        try {
+          const created = await this.githubWrite(
+            "repository_create",
+            { name, description: String(draft.description || "").trim(), private: Boolean(draft.private), auto_init: Boolean(draft.auto_init) },
+            "ساخت مخزن جدید «" + name + "» در GitHub را تأیید می‌کنید؟",
+          );
+          if (!created) return;
+          const fullName = created.full_name || ((created.owner && created.owner.login ? created.owner.login + "/" : "") + (created.name || name));
+          if (fullName.indexOf("/") > 0) {
+            const selected = new Set(this.form.github.selected_repositories || []);
+            selected.add(fullName);
+            this.form.github.selected_repositories = Array.from(selected);
+            await this.saveGitHubConfiguration();
+            this.githubWorkspaceRepo = fullName;
+          }
+          draft.name = "";
+          draft.description = "";
+          await this.loadGitHubRepositories();
+          if (this.githubWorkspaceRepo) await this.inspectGitHubRepository();
+          this.toast("ok", "✅", "مخزن GitHub ساخته شد");
+        } catch (err) { this.githubError = err.message; }
+        finally { this.githubBusy = false; }
+      },
+
+      async runGitHubLocal(operation) {
+        let repo;
+        try { repo = this.githubRepositoryParams(); } catch (err) { this.githubError = err.message; return; }
+        const path = String(this.githubLocalPath || "").trim();
+        const params = operation === "local_clone" ? Object.assign({}, repo, path ? { destination: path } : {}) : { path };
+        if (operation !== "local_clone" && !path) { this.githubError = "مسیر clone محلی را وارد کنید"; return; }
+        const labels = { local_clone: "Clone", local_pull: "Pull", local_push: "Push" };
+        this.githubBusy = true;
+        this.githubError = "";
+        try {
+          const result = await this.githubWrite(operation, params, labels[operation] + " مخزن را تأیید می‌کنید؟");
+          if (!result) return;
+          if (result.path) this.githubLocalPath = result.path;
+          this.githubLocalResult = JSON.stringify(result, null, 2);
+          this.toast("ok", "✅", labels[operation] + " با موفقیت انجام شد");
+        } catch (err) { this.githubError = err.message; }
+        finally { this.githubBusy = false; }
+      },
+
+      async inspectGitHubLocal(operation) {
+        const allowedOperations = ["local_repositories", "local_status", "local_branches", "local_log", "local_remotes", "local_diff"];
+        const selected = operation || "local_status";
+        if (!allowedOperations.includes(selected)) { this.githubError = "عملیات بررسی محلی نامعتبر است"; return; }
+        const path = String(this.githubLocalPath || "").trim();
+        if (selected !== "local_repositories" && !path) { this.githubError = "مسیر clone محلی را وارد کنید"; return; }
+        this.githubBusy = true;
+        this.githubError = "";
+        try {
+          const params = selected === "local_repositories" ? {} : { path };
+          if (selected === "local_log") params.limit = 50;
+          const result = await this.githubApi("/api/github/read", {
+            method: "POST",
+            body: JSON.stringify({ operation: selected, params }),
+          });
+          this.githubLocalResult = JSON.stringify(result, null, 2);
+        } catch (err) { this.githubError = err.message; }
+        finally { this.githubBusy = false; }
+      },
+
+      async commitGitHubLocal() {
+        const path = String(this.githubLocalPath || "").trim();
+        const message = String(this.githubCommitMessage || "").trim();
+        if (!path || !message) { this.githubError = "مسیر clone و پیام Commit الزامی است"; return; }
+        const paths = String(this.githubCommitPaths || "").split(/[\n,]+/).map((item) => item.trim()).filter(Boolean);
+        const params = { path, message, all_tracked: paths.length === 0 };
+        if (paths.length) params.paths = paths;
+        this.githubBusy = true;
+        try {
+          const result = await this.githubWrite("local_commit", params, "ثبت Commit محلی با پیام «" + message + "» را تأیید می‌کنید؟");
+          if (!result) return;
+          this.githubLocalResult = JSON.stringify(result, null, 2);
+          this.githubCommitMessage = "";
+          this.toast("ok", "✅", "Commit ثبت شد");
+        } catch (err) { this.githubError = err.message; }
+        finally { this.githubBusy = false; }
+      },
+
+      async changeGitHubLocalBranch(operation) {
+        const allowedOperations = ["local_branch_create", "local_branch_switch"];
+        if (!allowedOperations.includes(operation)) { this.githubError = "عملیات Branch نامعتبر است"; return; }
+        const path = String(this.githubLocalPath || "").trim();
+        const branch = String(this.githubBranchName || "").trim();
+        if (!path || !branch) { this.githubError = "مسیر clone و نام Branch الزامی است"; return; }
+        this.githubBusy = true;
+        try {
+          const label = operation === "local_branch_create" ? "ساخت" : "تعویض";
+          const result = await this.githubWrite(operation, { path, branch }, label + " Branch «" + branch + "» را تأیید می‌کنید؟");
+          if (!result) return;
+          this.githubLocalResult = JSON.stringify(result, null, 2);
+          this.toast("ok", "✅", "Branch آماده شد");
+        } catch (err) { this.githubError = err.message; }
+        finally { this.githubBusy = false; }
+      },
+
+      async createGitHubPullRequest() {
+        let repo;
+        try { repo = this.githubRepositoryParams(); } catch (err) { this.githubError = err.message; return; }
+        const draft = this.githubPullRequest;
+        if (!String(draft.title || "").trim() || !String(draft.head || "").trim() || !String(draft.base || "").trim()) {
+          this.githubError = "عنوان، branch مبدأ و branch مقصد Pull Request الزامی است";
+          return;
+        }
+        this.githubBusy = true;
+        try {
+          const params = Object.assign({}, repo, {
+            title: draft.title.trim(), head: draft.head.trim(), base: draft.base.trim(), body: String(draft.body || ""),
+          });
+          const result = await this.githubWrite("pull_create", params, "ساخت Pull Request «" + params.title + "» را تأیید می‌کنید؟");
+          if (!result) return;
+          draft.title = "";
+          draft.body = "";
+          this.githubLocalResult = JSON.stringify(result, null, 2);
+          await this.inspectGitHubRepository();
+          this.toast("ok", "✅", "Pull Request ساخته شد");
+        } catch (err) { this.githubError = err.message; }
+        finally { this.githubBusy = false; }
+      },
+
+      async saveGitHubFile(remove) {
+        let repo;
+        try { repo = this.githubRepositoryParams(); } catch (err) { this.githubError = err.message; return; }
+        const edit = this.githubFileEdit;
+        const path = String(edit.path || "").trim().replace(/^\/+/, "");
+        const message = String(edit.message || "").trim();
+        if (!path || !message || (remove && !edit.sha)) {
+          this.githubError = remove ? "مسیر، SHA فایل و پیام Commit الزامی است" : "مسیر و پیام Commit الزامی است";
+          return;
+        }
+        const params = Object.assign({}, repo, { path, message });
+        if (edit.branch) params.branch = String(edit.branch).trim();
+        if (edit.sha) params.sha = String(edit.sha).trim();
+        if (!remove) params.content = String(edit.content || "");
+        this.githubBusy = true;
+        this.githubError = "";
+        try {
+          const operation = remove ? "file_delete" : "file_upsert";
+          const result = await this.githubWrite(operation, params, (remove ? "حذف" : "ثبت") + " فایل «" + path + "» را تأیید می‌کنید؟");
+          if (!result) return;
+          edit.message = "";
+          if (remove) { edit.content = ""; edit.sha = ""; }
+          this.githubWorkspacePath = path;
+          await this.inspectGitHubRepository();
+          this.toast("ok", "✅", remove ? "فایل حذف شد" : "فایل و Commit ثبت شدند");
+        } catch (err) { this.githubError = err.message; }
+        finally { this.githubBusy = false; }
+      },
+
+      async createGitHubIssue() {
+        let repo;
+        try { repo = this.githubRepositoryParams(); } catch (err) { this.githubError = err.message; return; }
+        const draft = this.githubIssueDraft;
+        const title = String(draft.title || "").trim();
+        if (!title) { this.githubError = "عنوان Issue الزامی است"; return; }
+        const labels = String(draft.labels || "").split(",").map((item) => item.trim()).filter(Boolean);
+        const params = Object.assign({}, repo, { title, body: String(draft.body || "") });
+        if (labels.length) params.labels = labels;
+        this.githubBusy = true;
+        try {
+          const result = await this.githubWrite("issue_create", params, "ساخت Issue «" + title + "» را تأیید می‌کنید؟");
+          if (!result) return;
+          this.githubIssueDraft = { title: "", body: "", labels: "" };
+          await this.inspectGitHubRepository();
+          this.toast("ok", "✅", "Issue ساخته شد");
+        } catch (err) { this.githubError = err.message; }
+        finally { this.githubBusy = false; }
+      },
+
+      async dispatchGitHubWorkflow() {
+        let repo;
+        try { repo = this.githubRepositoryParams(); } catch (err) { this.githubError = err.message; return; }
+        const draft = this.githubWorkflowDispatch;
+        if (!String(draft.workflow_id || "").trim() || !String(draft.ref || "").trim()) {
+          this.githubError = "شناسهٔ Workflow و ref الزامی است"; return;
+        }
+        let inputs;
+        try { inputs = JSON.parse(String(draft.inputs || "{}")); } catch (_) { this.githubError = "ورودی Workflow باید JSON معتبر باشد"; return; }
+        if (!inputs || Array.isArray(inputs) || typeof inputs !== "object") { this.githubError = "ورودی Workflow باید یک شیء JSON باشد"; return; }
+        const params = Object.assign({}, repo, { workflow_id: String(draft.workflow_id).trim(), ref: String(draft.ref).trim(), inputs });
+        this.githubBusy = true;
+        try {
+          const result = await this.githubWrite("workflow_dispatch", params, "اجرای Workflow «" + params.workflow_id + "» روی «" + params.ref + "» را تأیید می‌کنید؟");
+          if (!result) return;
+          this.toast("ok", "✅", "درخواست اجرای Workflow ثبت شد");
+        } catch (err) { this.githubError = err.message; }
+        finally { this.githubBusy = false; }
+      },
+
+      async createGitHubRelease() {
+        let repo;
+        try { repo = this.githubRepositoryParams(); } catch (err) { this.githubError = err.message; return; }
+        const draft = this.githubReleaseDraft;
+        const tagName = String(draft.tag_name || "").trim();
+        if (!tagName) { this.githubError = "Tag انتشار الزامی است"; return; }
+        const params = Object.assign({}, repo, {
+          tag_name: tagName, name: String(draft.name || "").trim(), body: String(draft.body || ""),
+          draft: Boolean(draft.draft), prerelease: Boolean(draft.prerelease), generate_release_notes: true,
+        });
+        this.githubBusy = true;
+        try {
+          const result = await this.githubWrite("release_create", params, "ساخت Release برای tag «" + tagName + "» را تأیید می‌کنید؟");
+          if (!result) return;
+          this.githubReleaseDraft = { tag_name: "", name: "", body: "", draft: true, prerelease: false };
+          this.toast("ok", "✅", "Release ساخته شد");
+        } catch (err) { this.githubError = err.message; }
+        finally { this.githubBusy = false; }
+      },
+
+      selectGitHubReleaseAsset(event) {
+        const files = event && event.target ? event.target.files : null;
+        this.githubReleaseAsset.file = files && files.length ? files[0] : null;
+      },
+
+      async uploadGitHubReleaseAsset() {
+        let repo;
+        try { repo = this.githubRepositoryParams(); } catch (err) { this.githubError = err.message; return; }
+        const draft = this.githubReleaseAsset;
+        const file = draft.file;
+        const releaseId = Number(draft.release_id);
+        if (!Number.isSafeInteger(releaseId) || releaseId < 1) {
+          this.githubError = "شناسهٔ عددی Release الزامی است";
+          return;
+        }
+        if (!file || file.size < 1 || file.size > 256 * 1024 * 1024) {
+          this.githubError = "یک فایل ۱ بایت تا ۲۵۶ مگابایت انتخاب کنید";
+          return;
+        }
+        if (!window.confirm("آپلود فایل «" + file.name + "» در Release شمارهٔ " + releaseId + " را تأیید می‌کنید؟")) return;
+        const query = new URLSearchParams({
+          owner: repo.owner, repo: repo.repo, release_id: String(releaseId), name: file.name,
+        });
+        if (String(draft.label || "").trim()) query.set("label", String(draft.label).trim());
+        this.githubBusy = true;
+        this.githubError = "";
+        try {
+          const result = await this.githubApi("/api/github/release-asset?" + query.toString(), {
+            method: "POST",
+            headers: {
+              "Content-Type": file.type || "application/octet-stream",
+              "X-GitHub-Confirm": "true",
+            },
+            body: file,
+          });
+          this.githubConsoleResult = JSON.stringify(result, null, 2);
+          this.githubReleaseAsset = { release_id: "", label: "", file: null };
+          if (this.$refs.githubReleaseAssetFile) this.$refs.githubReleaseAssetFile.value = "";
+          this.toast("ok", "✅", "فایل Release آپلود شد");
+        } catch (err) { this.githubError = err.message; }
+        finally { this.githubBusy = false; }
+      },
+
+      async loadGitHubProjects() {
+        const owner = String(this.githubProjectOwner || "").trim();
+        if (!owner) { this.githubError = "مالک Projects را وارد کنید"; return; }
+        this.githubBusy = true;
+        this.githubError = "";
+        this.githubProjectOwnerId = "";
+        this.githubProjectLoadedOwner = "";
+        this.githubProjectLoadedOwnerType = "";
+        this.githubProjects = [];
+        try {
+          const result = await this.githubRead("projects", { owner, owner_type: this.githubProjectOwnerType, limit: 100 });
+          const container = result && result.data ? (result.data.user || result.data.organization) : null;
+          this.githubProjectOwnerId = container && container.id ? container.id : (this.githubProjectOwnerType === "user" && this.githubAccount && owner === this.githubAccount.login ? this.githubAccount.node_id || "" : "");
+          this.githubProjectLoadedOwner = this.githubProjectOwnerId ? owner : "";
+          this.githubProjectLoadedOwnerType = this.githubProjectOwnerId ? this.githubProjectOwnerType : "";
+          this.githubProjects = container && container.projectsV2 && Array.isArray(container.projectsV2.nodes) ? container.projectsV2.nodes : [];
+        } catch (err) { this.githubError = err.message; }
+        finally { this.githubBusy = false; }
+      },
+
+      async inspectGitHubProject(projectId) {
+        const selected = String(projectId || this.githubProjectId || "").trim();
+        if (!selected) { this.githubError = "ابتدا یک Project انتخاب کنید"; return; }
+        this.githubBusy = true;
+        try {
+          this.githubProjectId = selected;
+          this.githubProject = await this.githubRead("project", { project_id: selected, limit: 100 });
+        } catch (err) { this.githubError = err.message; }
+        finally { this.githubBusy = false; }
+      },
+
+      async createGitHubProject() {
+        const ownerId = String(this.githubProjectOwnerId || "").trim();
+        const title = String(this.githubProjectTitle || "").trim();
+        const ownerMatches = this.githubProjectLoadedOwner === String(this.githubProjectOwner || "").trim()
+          && this.githubProjectLoadedOwnerType === this.githubProjectOwnerType;
+        if (!ownerId || !ownerMatches || !title) { this.githubError = "ابتدا Projects همین مالک را دریافت کنید و عنوان را وارد کنید"; return; }
+        this.githubBusy = true;
+        try {
+          const result = await this.githubWrite("project_create", { owner_id: ownerId, title }, "ساخت Project «" + title + "» را تأیید می‌کنید؟");
+          if (!result) return;
+          this.githubProjectTitle = "";
+          await this.loadGitHubProjects();
+          this.toast("ok", "✅", "Project ساخته شد");
+        } catch (err) { this.githubError = err.message; }
+        finally { this.githubBusy = false; }
+      },
+
+      async submitGitHubActionsEntry(remove) {
+        const entry = this.githubActionsEntry;
+        const scope = String(entry.scope || "repository");
+        if (scope === "codespace" && entry.kind !== "secret") {
+          this.githubError = "Codespaces فقط Secret را در این API پشتیبانی می‌کند";
+          return;
+        }
+        if (!String(entry.name || "").trim() || (!remove && !entry.value)) {
+          this.githubError = "نام و مقدار را کامل کنید";
+          return;
+        }
+        const operationPrefix = {
+          repository: "actions_",
+          organization: "organization_actions_",
+          environment: "environment_actions_",
+          codespace: "codespace_",
+        }[scope];
+        if (!operationPrefix) { this.githubError = "دامنهٔ Secret/Variable نامعتبر است"; return; }
+        const fullName = this.githubOperationsRepository || (this.form.github.selected_repositories || [])[0];
+        const params = { name: String(entry.name).trim() };
+        let target = scope === "codespace" ? "حساب Codespaces" : "";
+        if (scope === "repository" || scope === "environment") {
+          if (!fullName || fullName.indexOf("/") < 1) {
+            this.githubError = "ابتدا یک مخزن انتخاب و ذخیره کنید";
+            return;
+          }
+          const parts = fullName.split("/");
+          params.owner = parts[0];
+          params.repo = parts[1];
+          target = fullName;
+        }
+        if (scope === "organization") {
+          params.org = String(entry.org || "").trim();
+          params.visibility = String(entry.visibility || "private");
+          target = params.org;
+          if (!params.org) { this.githubError = "نام سازمان الزامی است"; return; }
+        }
+        if (scope === "environment") {
+          params.environment = String(entry.environment || "").trim();
+          target += " / " + params.environment;
+          if (!params.environment) { this.githubError = "نام Environment الزامی است"; return; }
+        }
+        const selectedIds = String(entry.selected_repository_ids || "")
+          .split(/[\s,]+/).filter(Boolean).map((value) => Number(value));
+        if (selectedIds.some((value) => !Number.isSafeInteger(value) || value < 1)) {
+          this.githubError = "شناسه‌های مخزن باید اعداد مثبت باشند";
+          return;
+        }
+        if ((scope === "organization" && params.visibility === "selected") || scope === "codespace") {
+          if (selectedIds.length) params.selected_repository_ids = selectedIds;
+          else if (scope === "organization") { this.githubError = "برای visibility انتخابی، شناسهٔ مخزن لازم است"; return; }
+        }
+        const label = entry.kind === "secret" ? "Secret" : "Variable";
+        const operation = operationPrefix + entry.kind + (remove ? "_delete" : "_set");
+        if (!window.confirm((remove ? "حذف " : "ثبت ") + label + " در " + target + " را تأیید می‌کنید؟")) return;
+        if (!remove) params.value = entry.value;
+        this.githubBusy = true;
+        this.githubError = "";
+        try {
+          const sensitive = entry.kind === "secret" && !remove;
+          await this.githubApi(sensitive ? "/api/github/sensitive" : "/api/github/write", {
+            method: "POST",
+            headers: sensitive ? { "X-GitHub-Confirm": "true" } : {},
+            body: JSON.stringify(sensitive ? { operation, params } : { operation, params, confirm: true }),
+          });
+          entry.name = "";
+          entry.value = "";
+          this.toast("ok", "✅", label + (remove ? " حذف شد" : " ثبت شد"));
+        } catch (err) {
+          entry.value = "";
+          this.githubError = err.message;
+        } finally { this.githubBusy = false; }
+      },
+
+      async submitGitHubWebhook(update) {
+        let repo;
+        try { repo = this.githubRepositoryParams(this.githubOperationsRepository); }
+        catch (err) { this.githubError = err.message; return; }
+        const draft = this.githubWebhookDraft;
+        const params = Object.assign({}, repo, {
+          active: Boolean(draft.active),
+          content_type: String(draft.content_type || "json"),
+          events: String(draft.events || "push").split(/[\s,]+/).map((item) => item.trim()).filter(Boolean),
+        });
+        if (String(draft.url || "").trim()) params.url = String(draft.url).trim();
+        if (draft.secret) params.secret = draft.secret;
+        if (update) {
+          const hookId = Number(draft.hook_id);
+          if (!Number.isSafeInteger(hookId) || hookId < 1) { this.githubError = "شناسهٔ عددی Webhook الزامی است"; return; }
+          params.hook_id = hookId;
+        } else if (!params.url) { this.githubError = "URL امن HTTPS برای Webhook الزامی است"; return; }
+        const operation = update ? "webhook_update" : "webhook_create";
+        if (!window.confirm((update ? "ویرایش" : "ساخت") + " Webhook در " + repo.owner + "/" + repo.repo + " را تأیید می‌کنید؟")) return;
+        this.githubBusy = true;
+        this.githubError = "";
+        try {
+          const result = await this.githubApi("/api/github/sensitive", {
+            method: "POST",
+            headers: { "X-GitHub-Confirm": "true" },
+            body: JSON.stringify({ operation, params }),
+          });
+          this.githubConsoleResult = JSON.stringify(result, null, 2);
+          draft.secret = "";
+          if (!update) draft.hook_id = result && result.id ? String(result.id) : "";
+          this.toast("ok", "✅", "Webhook ثبت شد");
+        } catch (err) {
+          draft.secret = "";
+          this.githubError = err.message;
+        } finally { this.githubBusy = false; }
+      },
+
+      async toggleGitHubRepository(fullName, checked) {
+        const selected = new Set(this.form.github.selected_repositories || []);
+        if (checked) selected.add(fullName); else selected.delete(fullName);
+        this.form.github.selected_repositories = Array.from(selected);
+        if (checked) {
+          if (!this.githubOperationsRepository) this.githubOperationsRepository = fullName;
+          if (!this.githubWorkspaceRepo) this.githubWorkspaceRepo = fullName;
+        }
+        const saved = await this.saveSettings(false);
+        if (!saved) {
+          if (checked) selected.delete(fullName); else selected.add(fullName);
+          this.form.github.selected_repositories = Array.from(selected);
+        }
+      },
+
       async refreshStatus() {
         if (this.connection === "offline") return;
         try {
@@ -665,6 +1539,8 @@
           this.gmailConnected = Boolean(s.gmail_connected);
           this.form.gmail.enabled = Boolean(s.gmail_enabled);
           if (typeof s.gmail_confirm_send === "boolean") this.form.gmail.confirm_send = s.gmail_confirm_send;
+          this.form.github.enabled = Boolean(s.github_enabled);
+          if (data.settings.github) this.applyGitHubStatus(data.settings.github);
         } catch (_) { /* keep previous values */ }
       },
 
@@ -698,6 +1574,12 @@
 
       get gmailStateLabel() {
         return this.gmailConnected ? "✅ متصل" : "وصل نیست";
+      },
+
+      get githubStateLabel() {
+        if (!this.form.github.enabled) return "غیرفعال";
+        if (this.githubBusy) return "در حال بررسی…";
+        return this.githubConnected ? "✅ متصل" : "وصل نیست";
       },
 
       get elevationLabel() {
@@ -1051,6 +1933,9 @@
       openSettings() {
         this.settingsOpen = true;
         if (this.models.length === 0) this.refreshModels();
+        this.ensureGitHubSecurity(false)
+          .then(() => this.refreshGitHubStatus(true))
+          .catch((err) => { this.githubError = err.message; });
       },
 
       /* ------------------------------------------------ billing / tokens */
@@ -1142,8 +2027,10 @@
         }
         this.purging = true;
         try {
+          await this.ensureGithubSecurity();
           const result = await this.api("/api/purge", {
             method: "POST",
+            headers: this.githubHeaders(),
             body: JSON.stringify({ confirm: true, shutdown: true }),
           });
           // Wipe the browser-side traces as well (prefs + conversations).
@@ -1174,22 +2061,31 @@
         }
       },
 
-      async saveSettings() {
+      async saveSettings(closeModal) {
+        const shouldClose = closeModal !== false;
         if (this.connection === "offline") {
-          this.settingsOpen = false;
+          if (shouldClose) this.settingsOpen = false;
           this.toast("info", "ℹ️", "در حالت نمایش آفلاین تنظیمات ذخیره نمی‌شود");
-          return;
+          return null;
         }
         try {
-          const result = await this.api("/api/settings", {
+          this.form.github = this.normalizeGitHubSettings(this.form.github);
+          this.form.github.allowed_origins = String(this.githubAllowedOriginsText || "")
+            .split(/[\n,]+/).map((item) => item.trim()).filter(Boolean);
+          const result = await this.githubApi("/api/settings", {
             method: "POST",
             body: JSON.stringify(this.form),
           });
-          this.settingsOpen = false;
-          this.toast("ok", "✅", "تنظیمات ذخیره شد" + (result && result.model ? " — " + result.model : ""));
+          if (shouldClose) {
+            this.settingsOpen = false;
+            this.toast("ok", "✅", "تنظیمات ذخیره شد" + (result && result.model ? " — " + result.model : ""));
+          }
           this.refreshStatus();
-        } catch (_) {
-          this.toast("bad", "❌", "ذخیرهٔ تنظیمات ناموفق بود");
+          return result;
+        } catch (err) {
+          this.githubError = err.message;
+          this.toast("bad", "❌", "ذخیرهٔ تنظیمات ناموفق بود — " + err.message);
+          return null;
         }
       },
 

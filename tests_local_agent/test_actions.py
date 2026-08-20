@@ -15,7 +15,7 @@ from local_agent.actions.registry import (
     Risk,
     run_action,
 )
-from local_agent.core.config import AssistantSettings, SafetySettings
+from local_agent.core.config import AssistantSettings
 from local_agent.core.context import RuntimeContext
 from local_agent.core.errors import ActionRefused, AssistantError
 
@@ -221,3 +221,24 @@ def test_risk_decorator_attaches_level() -> None:
         return ""
 
     assert my_action.__action_risk__ is Risk.SYSTEM  # type: ignore[attr-defined]
+
+
+def test_force_human_action_rejects_generic_auto_approval(tmp_path: Path) -> None:
+    registry = ActionRegistry()
+    registry.register(
+        Action(
+            name="remote_write",
+            description="credentialed write",
+            function=lambda *, context: "changed",
+            parameters={},
+            risk_level=Risk.DESTRUCTIVE,
+            force_human_confirmation=True,
+        )
+    )
+    ctx = _ctx(tmp_path)
+    ctx.confirmation_gate.auto_approve()
+    with pytest.raises(ActionRefused, match="live human"):
+        run_action(registry, "remote_write", {}, ctx)
+    assert run_action(
+        registry, "remote_write", {}, ctx, human_confirmed=True
+    ) == "changed"
