@@ -395,6 +395,7 @@
         <div><dt>پوشهٔ کاری</dt><dd class="kv__mono" :title="workspace" x-text="workspace"></dd></div>
         <div><dt>حالت تأیید</dt><dd x-text="confirmModeLabel"></dd></div>
         <div><dt>میزبان</dt><dd x-text="hostname"></dd></div>
+        <div><dt><span class="github-inline"><svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.64 0 8.13c0 3.59 2.29 6.64 5.47 7.71.4.08.55-.18.55-.39 0-.19-.01-.83-.01-1.51-2.01.38-2.53-.5-2.69-.96-.09-.23-.48-.96-.82-1.15-.28-.15-.68-.54-.01-.55.63-.01 1.08.59 1.23.83.72 1.23 1.87.88 2.33.67.07-.53.28-.88.51-1.08-1.78-.21-3.64-.91-3.64-4.02 0-.89.31-1.62.82-2.19-.08-.21-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.5 7.5 0 018 3.9c.68 0 1.36.09 2 .27 1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.95.08 2.16.51.57.82 1.3.82 2.19 0 3.12-1.87 3.81-3.65 4.02.29.25.54.74.54 1.5 0 1.08-.01 1.95-.01 2.22 0 .21.15.47.55.39A8.14 8.14 0 0016 8.13C16 3.64 12.42 0 8 0z"/></svg>GitHub</span></dt><dd x-text="githubStateLabel"></dd></div>
       </dl>
       <div class="panel__row">
         <button class="btn btn--ghost btn--sm" @click="runQuickAction('screen_capture', { filename: 'ui-shot.png' })">📸 اسکرین‌شات</button>
@@ -641,6 +642,7 @@
           <input id="set-workdir" x-model="form.work_dir" placeholder="مثلاً C:\Users\you\projects" dir="ltr">
           <p class="field__hint">همهٔ فایل‌ها به‌طور پیش‌فرض داخل همین پوشه ساخته می‌شوند؛ اگر وجود نداشته باشد، ساخته می‌شود.</p>
         </div>
+        <h3 class="panel__title settings-section-title">اتصال‌ها و یکپارچه‌سازی‌ها</h3>
         <div class="field">
           <label>📱 تلگرام شخصی</label>
           <div class="field field--switch">
@@ -712,6 +714,408 @@
             </div>
           </div>
         </div>
+
+        <!-- GitHub is a first-class integration beside Telegram and Gmail. -->
+        <div class="field integration-card integration-card--github">
+          <div class="integration-card__head">
+            <span class="github-mark" aria-hidden="true">
+              <!-- Official GitHub mark geometry; rendered in currentColor for both themes. -->
+              <svg viewBox="0 0 16 16" role="img"><path fill="currentColor" d="M8 0C3.58 0 0 3.64 0 8.13c0 3.59 2.29 6.64 5.47 7.71.4.08.55-.18.55-.39 0-.19-.01-.83-.01-1.51-2.01.38-2.53-.5-2.69-.96-.09-.23-.48-.96-.82-1.15-.28-.15-.68-.54-.01-.55.63-.01 1.08.59 1.23.83.72 1.23 1.87.88 2.33.67.07-.53.28-.88.51-1.08-1.78-.21-3.64-.91-3.64-4.02 0-.89.31-1.62.82-2.19-.08-.21-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.5 7.5 0 018 3.9c.68 0 1.36.09 2 .27 1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.95.08 2.16.51.57.82 1.3.82 2.19 0 3.12-1.87 3.81-3.65 4.02.29.25.54.74.54 1.5 0 1.08-.01 1.95-.01 2.22 0 .21.15.47.55.39A8.14 8.14 0 0016 8.13C16 3.64 12.42 0 8 0z"/></svg>
+            </span>
+            <div>
+              <label for="set-gh-enabled">GitHub</label>
+              <p class="field__hint">GitHub App با دسترسی ریزدانه و انتخاب مخزن</p>
+            </div>
+            <input id="set-gh-enabled" type="checkbox" class="switch" x-model="form.github.enabled" aria-label="فعال‌کردن GitHub">
+          </div>
+
+          <div class="github-account" x-show="githubConnected" x-cloak>
+            <img x-show="githubAccount && githubAccount.avatar_url" :src="githubAccount && githubAccount.avatar_url" alt="" referrerpolicy="no-referrer">
+            <div>
+              <strong dir="ltr" x-text="githubAccount ? '@' + githubAccount.login : 'GitHub'"></strong>
+              <span class="integration-state integration-state--ok">متصل</span>
+            </div>
+          </div>
+
+          <div class="field__row">
+            <input x-model="form.github.client_id" placeholder="GitHub App Client ID" dir="ltr" aria-label="GitHub App Client ID" autocomplete="off">
+            <input x-model="form.github.broker_url" placeholder="https://oauth.example.com" dir="ltr" aria-label="نشانی کارگزار OAuth GitHub">
+          </div>
+          <input x-model="form.github.callback_url" placeholder="Callback URL (خالی = خودکار)" dir="ltr" aria-label="Callback URL GitHub">
+          <input x-model="form.github.local_clone_root" placeholder="پوشهٔ clone محلی (اختیاری)" dir="ltr" aria-label="پوشه clone GitHub">
+          <details class="integration-advanced">
+            <summary>تنظیمات پیشرفتهٔ GitHub Enterprise و Origin</summary>
+            <input x-model="form.github.api_url" placeholder="https://api.github.com" dir="ltr" aria-label="GitHub API URL">
+            <input x-model="form.github.web_url" placeholder="https://github.com" dir="ltr" aria-label="GitHub Web URL">
+            <input x-model="form.github.graphql_url" placeholder="https://api.github.com/graphql" dir="ltr" aria-label="GitHub GraphQL URL">
+            <input x-model="githubAllowedOriginsText" placeholder="Originهای مجاز، جداشده با ویرگول" dir="ltr" aria-label="Originهای مجاز GitHub">
+          </details>
+          <p class="field__hint">
+            Client Secret فقط روی کارگزار OAuth می‌ماند. توکن‌ها در Credential Manager/Keychain/Secret Service
+            سیستم‌عامل ذخیره می‌شوند و به رابط، مدل، فایل تنظیمات یا URL ریموت Git داده نمی‌شوند.
+          </p>
+          <p class="field__error" x-show="githubError" x-text="githubError" x-cloak></p>
+          <div class="field__row">
+            <button class="btn btn--github btn--sm" type="button" @click="connectGitHub()" :disabled="githubBusy || !form.github.enabled" x-show="!githubConnected">
+              <svg viewBox="0 0 16 16" class="github-button-mark" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.64 0 8.13c0 3.59 2.29 6.64 5.47 7.71.4.08.55-.18.55-.39 0-.19-.01-.83-.01-1.51-2.01.38-2.53-.5-2.69-.96-.09-.23-.48-.96-.82-1.15-.28-.15-.68-.54-.01-.55.63-.01 1.08.59 1.23.83.72 1.23 1.87.88 2.33.67.07-.53.28-.88.51-1.08-1.78-.21-3.64-.91-3.64-4.02 0-.89.31-1.62.82-2.19-.08-.21-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.5 7.5 0 018 3.9c.68 0 1.36.09 2 .27 1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.95.08 2.16.51.57.82 1.3.82 2.19 0 3.12-1.87 3.81-3.65 4.02.29.25.54.74.54 1.5 0 1.08-.01 1.95-.01 2.22 0 .21.15.47.55.39A8.14 8.14 0 0016 8.13C16 3.64 12.42 0 8 0z"/></svg>
+              <span x-show="!githubBusy">اتصال به GitHub</span>
+              <span x-show="githubBusy" x-cloak>در حال اتصال…</span>
+            </button>
+            <button class="btn btn--ghost btn--sm" type="button" @click="disconnectGitHub()" :disabled="githubBusy" x-show="githubConnected" x-cloak>قطع اتصال</button>
+            <button class="btn btn--ghost btn--sm" type="button" @click="loadGitHubRepositories()" :disabled="githubBusy" x-show="githubConnected" x-cloak>به‌روزرسانی مخزن‌ها</button>
+            <span class="field__hint" x-text="githubStateLabel"></span>
+          </div>
+
+          <div class="github-repositories" x-show="githubConnected && githubRepositories.length" x-cloak>
+            <label>مخزن‌های در دسترس این App</label>
+            <p class="field__hint">فقط مخزن‌های انتخاب‌شده برای رابط و ابزارهای ایجنت مجازند؛ تا پیش از انتخاب حداقل یک مخزن، عملیات مخزن رد می‌شود.</p>
+            <div class="github-repositories__list">
+              <template x-for="repo in githubRepositories" :key="repo.full_name">
+                <div class="github-repository">
+                  <label class="github-repository__select">
+                    <input type="checkbox" :value="repo.full_name" x-model="form.github.selected_repositories" @change="toggleGitHubRepository(repo.full_name, $event.target.checked)">
+                    <span dir="ltr" x-text="repo.full_name"></span>
+                  </label>
+                  <span class="github-repository__meta" x-text="(repo.private ? 'خصوصی' : 'عمومی') + (repo.language ? ' · ' + repo.language : '') + (repo.default_branch ? ' · ' + repo.default_branch : '') + ' · ' + repo.open_issues_count + ' issue'"></span>
+                  <small x-text="repo.description || (repo.updated_at ? 'به‌روزرسانی: ' + repo.updated_at : '')"></small>
+                  <button class="btn btn--ghost btn--sm" type="button" @click="inspectGitHubRepository(repo.full_name)" :disabled="!form.github.selected_repositories.includes(repo.full_name)">بررسی جزئی</button>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <details class="integration-advanced github-create" x-show="githubConnected" x-cloak>
+            <summary>ساخت مخزن جدید</summary>
+            <div class="field__row">
+              <input x-model.trim="githubNewRepository.name" maxlength="100" placeholder="نام مخزن" dir="ltr" aria-label="نام مخزن جدید GitHub">
+              <input x-model.trim="githubNewRepository.description" maxlength="500" placeholder="توضیح کوتاه" aria-label="توضیح مخزن جدید GitHub">
+            </div>
+            <div class="field__row github-options">
+              <label><input type="checkbox" x-model="githubNewRepository.private"> خصوصی</label>
+              <label><input type="checkbox" x-model="githubNewRepository.auto_init"> ساخت README اولیه</label>
+              <button class="btn btn--primary btn--sm" type="button" @click="createGitHubRepository()" :disabled="githubBusy">ساخت با تأیید</button>
+            </div>
+            <p class="field__hint">مخزن ساخته‌شده خودکار به فهرست مجاز افزوده می‌شود تا بتوانید آن را بررسی، clone، pull و push کنید.</p>
+          </details>
+
+          <details class="integration-advanced github-workspace" x-show="githubConnected && form.github.selected_repositories.length" x-cloak open>
+            <summary>مدیریت و بررسی مخزن‌ها</summary>
+            <div class="field__row">
+              <select x-model="githubWorkspaceRepo" aria-label="مخزن برای بررسی">
+                <option value="">انتخاب مخزن</option>
+                <template x-for="fullName in form.github.selected_repositories" :key="fullName">
+                  <option :value="fullName" x-text="fullName"></option>
+                </template>
+              </select>
+              <input x-model.trim="githubWorkspacePath" placeholder="مسیر فایل/پوشه؛ خالی یعنی ریشه" dir="ltr" aria-label="مسیر داخل مخزن">
+              <button class="btn btn--primary btn--sm" type="button" @click="inspectGitHubRepository()" :disabled="githubWorkspaceLoading">بررسی مخزن</button>
+              <button class="btn btn--ghost btn--sm" type="button" @click="inspectCompleteGitHubTree()" :disabled="githubWorkspaceLoading">درخت کامل</button>
+            </div>
+            <p class="field__hint" x-show="githubWorkspaceLoading">در حال دریافت اطلاعات مخزن…</p>
+
+            <div class="github-workspace__result" x-show="githubWorkspace" x-cloak>
+              <div class="github-repo-summary" x-show="githubWorkspace && githubWorkspace.repository">
+                <strong dir="ltr" x-text="githubWorkspace && githubWorkspace.repository ? githubWorkspace.repository.full_name : ''"></strong>
+                <span x-text="githubWorkspace && githubWorkspace.repository ? (githubWorkspace.repository.description || 'بدون توضیح') : ''"></span>
+                <small x-text="githubWorkspace && githubWorkspace.repository ? ('شاخهٔ اصلی: ' + githubWorkspace.repository.default_branch) : ''"></small>
+              </div>
+
+              <section x-show="githubWorkspace && Array.isArray(githubWorkspace.contents)">
+                <h4>فایل‌ها و پوشه‌ها</h4>
+                <div class="github-file-list">
+                  <button type="button" class="github-file" x-show="githubWorkspacePath" @click="githubWorkspacePath = githubWorkspacePath.split('/').slice(0, -1).join('/'); inspectGitHubRepository()">↩ پوشهٔ بالاتر</button>
+                  <template x-for="entry in (githubWorkspace && Array.isArray(githubWorkspace.contents) ? githubWorkspace.contents : [])" :key="entry.sha + entry.path">
+                    <button type="button" class="github-file" @click="openGitHubWorkspacePath(entry.path, entry.type)">
+                      <span x-text="entry.type === 'dir' ? '📁' : '📄'"></span>
+                      <b dir="ltr" x-text="entry.name"></b>
+                      <small x-text="entry.type === 'file' ? entry.size + ' B' : 'پوشه'"></small>
+                    </button>
+                  </template>
+                </div>
+              </section>
+
+              <section x-show="githubWorkspace && githubWorkspace.file">
+                <h4>محتوای فایل</h4>
+                <pre class="github-code" dir="ltr" x-text="githubWorkspace && githubWorkspace.file ? githubWorkspace.file.text : ''"></pre>
+              </section>
+
+              <section x-show="githubWorkspace && githubWorkspace.tree">
+                <h4>درخت کامل مخزن</h4>
+                <p class="field__hint" x-text="githubWorkspace && githubWorkspace.tree && githubWorkspace.tree.truncated ? 'نمایش به سقف امن محدود شده است.' : ''"></p>
+                <div class="github-tree-list">
+                  <template x-for="entry in (githubWorkspace && githubWorkspace.tree ? githubWorkspace.tree.tree : [])" :key="entry.sha + entry.path">
+                    <button type="button" class="github-file" @click="entry.type === 'blob' && openGitHubWorkspacePath(entry.path, 'file')">
+                      <span x-text="entry.type === 'tree' ? '📁' : '📄'"></span><b dir="ltr" x-text="entry.path"></b><small x-text="entry.size ? entry.size + ' B' : entry.type"></small>
+                    </button>
+                  </template>
+                </div>
+              </section>
+
+              <div class="github-overview-grid">
+                <section>
+                  <h4>Commitهای اخیر</h4>
+                  <template x-for="item in (githubWorkspace && githubWorkspace.commits && githubWorkspace.commits.items ? githubWorkspace.commits.items : [])" :key="item.sha">
+                    <div class="github-overview-item"><b dir="ltr" x-text="item.sha ? item.sha.slice(0, 8) : ''"></b><span x-text="item.commit && item.commit.message ? item.commit.message.split('\n')[0] : ''"></span></div>
+                  </template>
+                </section>
+                <section>
+                  <h4>Issueهای باز</h4>
+                  <template x-for="item in (githubWorkspace && githubWorkspace.issues && githubWorkspace.issues.items ? githubWorkspace.issues.items : [])" :key="item.id">
+                    <div class="github-overview-item"><b x-text="'#' + item.number"></b><span x-text="item.title"></span></div>
+                  </template>
+                </section>
+                <section>
+                  <h4>Pull Requestهای باز</h4>
+                  <template x-for="item in (githubWorkspace && githubWorkspace.pulls && githubWorkspace.pulls.items ? githubWorkspace.pulls.items : [])" :key="item.id">
+                    <div class="github-overview-item"><b x-text="'#' + item.number"></b><span x-text="item.title"></span></div>
+                  </template>
+                </section>
+                <section>
+                  <h4>Branchها</h4>
+                  <div class="github-tags"><template x-for="item in (githubWorkspace && githubWorkspace.branches && githubWorkspace.branches.items ? githubWorkspace.branches.items : [])" :key="item.name"><span dir="ltr" x-text="item.name"></span></template></div>
+                </section>
+                <section>
+                  <h4>زبان‌ها</h4>
+                  <div class="github-tags"><template x-for="entry in Object.entries(githubWorkspace && githubWorkspace.languages ? githubWorkspace.languages : {})" :key="entry[0]"><span dir="ltr" x-text="entry[0] + ': ' + entry[1] + ' B'"></span></template></div>
+                </section>
+                <section>
+                  <h4>Workflowها</h4>
+                  <template x-for="item in (githubWorkspace && githubWorkspace.workflows && githubWorkspace.workflows.items ? githubWorkspace.workflows.items : [])" :key="item.id">
+                    <div class="github-overview-item"><b dir="ltr" x-text="item.name || item.path"></b><span x-text="item.state || ''"></span></div>
+                  </template>
+                </section>
+              </div>
+              <p class="field__error" x-show="githubWorkspace && githubWorkspace.errors && Object.keys(githubWorkspace.errors).length" x-text="githubWorkspace && githubWorkspace.errors ? Object.values(githubWorkspace.errors).join('\n') : ''"></p>
+            </div>
+
+            <section class="github-local">
+              <h4>Clone، Pull و Push محلی</h4>
+              <input x-model.trim="githubLocalPath" placeholder="مسیر نسبی داخل ریشهٔ clone یا مسیر نتیجهٔ Clone" dir="ltr" aria-label="مسیر مخزن محلی GitHub">
+              <div class="field__row">
+                <button class="btn btn--primary btn--sm" type="button" @click="runGitHubLocal('local_clone')" :disabled="githubBusy">Clone</button>
+                <button class="btn btn--ghost btn--sm" type="button" @click="inspectGitHubLocal('local_repositories')" :disabled="githubBusy">کشف Cloneها</button>
+                <button class="btn btn--ghost btn--sm" type="button" @click="inspectGitHubLocal('local_status')" :disabled="githubBusy">Status</button>
+                <button class="btn btn--ghost btn--sm" type="button" @click="inspectGitHubLocal('local_branches')" :disabled="githubBusy">Branchها</button>
+                <button class="btn btn--ghost btn--sm" type="button" @click="inspectGitHubLocal('local_log')" :disabled="githubBusy">Log</button>
+                <button class="btn btn--ghost btn--sm" type="button" @click="inspectGitHubLocal('local_remotes')" :disabled="githubBusy">Remoteها</button>
+                <button class="btn btn--ghost btn--sm" type="button" @click="inspectGitHubLocal('local_diff')" :disabled="githubBusy">Diff</button>
+                <button class="btn btn--ghost btn--sm" type="button" @click="runGitHubLocal('local_pull')" :disabled="githubBusy">Pull</button>
+                <button class="btn btn--danger btn--sm" type="button" @click="runGitHubLocal('local_push')" :disabled="githubBusy">Push</button>
+              </div>
+              <div class="field__row">
+                <input x-model.trim="githubBranchName" placeholder="نام Branch" dir="ltr" aria-label="نام Branch محلی">
+                <button class="btn btn--ghost btn--sm" type="button" @click="changeGitHubLocalBranch('local_branch_create')" :disabled="githubBusy">ساخت Branch</button>
+                <button class="btn btn--ghost btn--sm" type="button" @click="changeGitHubLocalBranch('local_branch_switch')" :disabled="githubBusy">تعویض Branch</button>
+              </div>
+              <input x-model.trim="githubCommitMessage" placeholder="پیام Commit" aria-label="پیام Commit محلی">
+              <input x-model.trim="githubCommitPaths" placeholder="مسیرهای دقیق، جداشده با ویرگول؛ اگر خالی باشد همهٔ تغییرات tracked اضافه می‌شوند" dir="ltr" aria-label="مسیر فایل‌های Commit">
+              <button class="btn btn--primary btn--sm" type="button" @click="commitGitHubLocal()" :disabled="githubBusy">Commit با تأیید</button>
+
+              <h4>ساخت Pull Request</h4>
+              <input x-model.trim="githubPullRequest.title" placeholder="عنوان Pull Request" aria-label="عنوان Pull Request">
+              <div class="field__row">
+                <input x-model.trim="githubPullRequest.head" placeholder="Branch مبدأ" dir="ltr" aria-label="Branch مبدأ Pull Request">
+                <input x-model.trim="githubPullRequest.base" placeholder="Branch مقصد" dir="ltr" aria-label="Branch مقصد Pull Request">
+              </div>
+              <textarea x-model="githubPullRequest.body" maxlength="65536" placeholder="توضیحات Pull Request"></textarea>
+              <button class="btn btn--primary btn--sm" type="button" @click="createGitHubPullRequest()" :disabled="githubBusy">ساخت Pull Request با تأیید</button>
+              <pre class="github-code" dir="ltr" x-show="githubLocalResult" x-text="githubLocalResult" x-cloak></pre>
+            </section>
+
+            <section class="github-local">
+              <h4>ویرایش مستقیم فایل</h4>
+              <div class="field__row">
+                <input x-model.trim="githubFileEdit.path" placeholder="مسیر فایل" dir="ltr" aria-label="مسیر فایل GitHub">
+                <input x-model.trim="githubFileEdit.branch" placeholder="Branch اختیاری" dir="ltr" aria-label="Branch فایل GitHub">
+                <input x-model.trim="githubFileEdit.sha" placeholder="SHA برای ویرایش/حذف؛ هنگام بازکردن فایل خودکار" dir="ltr" aria-label="SHA فایل GitHub">
+              </div>
+              <textarea x-model="githubFileEdit.content" maxlength="5242880" placeholder="محتوای UTF-8 فایل" dir="ltr" aria-label="محتوای فایل GitHub"></textarea>
+              <input x-model.trim="githubFileEdit.message" placeholder="پیام Commit فایل" aria-label="پیام Commit فایل GitHub">
+              <div class="field__row">
+                <button class="btn btn--primary btn--sm" type="button" @click="saveGitHubFile(false)" :disabled="githubBusy">ساخت/ویرایش فایل با تأیید</button>
+                <button class="btn btn--danger btn--sm" type="button" @click="saveGitHubFile(true)" :disabled="githubBusy">حذف فایل با تأیید</button>
+              </div>
+              <p class="field__hint">برای ویرایش یا حذف، فایل را از مرورگر بالا باز کنید تا محتوا و SHA فعلی در فرم قرار گیرد.</p>
+
+              <h4>ساخت Issue</h4>
+              <input x-model.trim="githubIssueDraft.title" placeholder="عنوان Issue" aria-label="عنوان Issue GitHub">
+              <textarea x-model="githubIssueDraft.body" maxlength="65536" placeholder="توضیحات Issue"></textarea>
+              <div class="field__row">
+                <input x-model.trim="githubIssueDraft.labels" placeholder="Labelها، جداشده با ویرگول" aria-label="Labelهای Issue GitHub">
+                <button class="btn btn--primary btn--sm" type="button" @click="createGitHubIssue()" :disabled="githubBusy">ساخت Issue با تأیید</button>
+              </div>
+
+              <h4>اجرای Workflow</h4>
+              <div class="field__row">
+                <input x-model.trim="githubWorkflowDispatch.workflow_id" placeholder="Workflow ID یا نام فایل" dir="ltr" aria-label="شناسه Workflow GitHub">
+                <input x-model.trim="githubWorkflowDispatch.ref" placeholder="ref مانند main" dir="ltr" aria-label="ref اجرای Workflow GitHub">
+              </div>
+              <textarea x-model="githubWorkflowDispatch.inputs" placeholder='ورودی‌ها به‌شکل JSON؛ مانند {"environment":"staging"}' dir="ltr" aria-label="ورودی Workflow GitHub"></textarea>
+              <button class="btn btn--danger btn--sm" type="button" @click="dispatchGitHubWorkflow()" :disabled="githubBusy">اجرای Workflow با تأیید</button>
+
+              <h4>ساخت Release</h4>
+              <div class="field__row">
+                <input x-model.trim="githubReleaseDraft.tag_name" placeholder="Tag مانند v1.0.0" dir="ltr" aria-label="Tag انتشار GitHub">
+                <input x-model.trim="githubReleaseDraft.name" placeholder="نام Release" aria-label="نام Release GitHub">
+              </div>
+              <textarea x-model="githubReleaseDraft.body" maxlength="125000" placeholder="یادداشت‌های Release"></textarea>
+              <div class="field__row github-options">
+                <label><input type="checkbox" x-model="githubReleaseDraft.draft"> پیش‌نویس</label>
+                <label><input type="checkbox" x-model="githubReleaseDraft.prerelease"> پیش‌انتشار</label>
+                <button class="btn btn--primary btn--sm" type="button" @click="createGitHubRelease()" :disabled="githubBusy">ساخت Release با تأیید</button>
+              </div>
+
+              <h4>آپلود فایل Release</h4>
+              <p class="field__hint">شناسهٔ عددی Release را از بررسی Releaseها بگیرید. فایل خام با سقف ۲۵۶ مگابایت و تأیید جداگانه ارسال می‌شود.</p>
+              <div class="field__row">
+                <input x-model.trim="githubReleaseAsset.release_id" inputmode="numeric" placeholder="Release ID" dir="ltr" aria-label="شناسه Release برای آپلود فایل">
+                <input x-model.trim="githubReleaseAsset.label" maxlength="255" placeholder="Label اختیاری" aria-label="برچسب فایل Release">
+              </div>
+              <input x-ref="githubReleaseAssetFile" type="file" @change="selectGitHubReleaseAsset($event)" aria-label="فایل Release" autocomplete="off">
+              <button class="btn btn--danger btn--sm" type="button" @click="uploadGitHubReleaseAsset()" :disabled="githubBusy || !githubReleaseAsset.file">آپلود فایل با تأیید</button>
+            </section>
+          </details>
+
+          <details class="integration-advanced" x-show="githubConnected" x-cloak>
+            <summary>نصب‌های GitHub App</summary>
+            <div class="github-installations" x-show="githubInstallations.length">
+              <template x-for="installation in githubInstallations" :key="installation.id">
+                <div class="github-installation">
+                  <strong x-text="installation.account"></strong>
+                  <span x-text="'شناسه ' + installation.id"></span>
+                  <small x-text="installation.repository_selection === 'all' ? 'همهٔ مخزن‌ها' : 'مخزن‌های انتخابی'"></small>
+                </div>
+              </template>
+            </div>
+            <p class="field__hint" x-show="!githubInstallations.length">نصب فعالی برای این حساب گزارش نشده است.</p>
+          </details>
+
+          <details class="integration-advanced" x-show="githubConnected" x-cloak>
+            <summary>Projects v2 — بررسی جمعی، جزئی و ساخت</summary>
+            <div class="field__row">
+              <input x-model.trim="githubProjectOwner" placeholder="مالک Project" dir="ltr" aria-label="مالک GitHub Projects">
+              <select x-model="githubProjectOwnerType" aria-label="نوع مالک GitHub Projects">
+                <option value="user">کاربر</option>
+                <option value="organization">سازمان</option>
+              </select>
+              <button class="btn btn--ghost btn--sm" type="button" @click="loadGitHubProjects()" :disabled="githubBusy">دریافت همهٔ Projectها</button>
+            </div>
+            <div class="github-file-list" x-show="githubProjects.length" x-cloak>
+              <template x-for="project in githubProjects" :key="project.id">
+                <button type="button" class="github-file" @click="inspectGitHubProject(project.id)">
+                  <b x-text="project.title"></b><small x-text="'#' + project.number + (project.closed ? ' — بسته' : '')"></small>
+                </button>
+              </template>
+            </div>
+            <div class="field__row">
+              <input x-model.trim="githubProjectTitle" placeholder="عنوان Project جدید" aria-label="عنوان GitHub Project جدید">
+              <button class="btn btn--primary btn--sm" type="button" @click="createGitHubProject()" :disabled="githubBusy || !githubProjectOwnerId || githubProjectLoadedOwner !== githubProjectOwner.trim() || githubProjectLoadedOwnerType !== githubProjectOwnerType">ساخت Project با تأیید</button>
+            </div>
+            <pre class="github-code" dir="ltr" x-show="githubProject" x-text="githubProject ? JSON.stringify(githubProject, null, 2) : ''" x-cloak></pre>
+            <p class="field__hint">برای ساخت Project سازمانی، ابتدا Projectهای همان سازمان را دریافت کنید تا شناسهٔ GraphQL مالک به‌صورت امن مشخص شود.</p>
+          </details>
+
+          <details class="integration-advanced" x-show="githubConnected" x-cloak>
+            <summary>Actions Secrets و Variables محافظت‌شده</summary>
+            <p class="field__hint">مقدار Secret از مسیر مستقیم UI به backend می‌رود، با کلید عمومی همان scope رمزگذاری و فوراً از فرم پاک می‌شود؛ هرگز وارد گفتگو، ابزار مدل، URL یا تنظیمات ذخیره‌شده نمی‌شود.</p>
+            <div class="field__row">
+              <select x-model="githubActionsEntry.scope" aria-label="دامنه Secret یا Variable">
+                <option value="repository">Repository Actions</option>
+                <option value="organization">Organization Actions</option>
+                <option value="environment">Environment Actions</option>
+                <option value="codespace">Codespaces account</option>
+              </select>
+              <select x-model="githubActionsEntry.kind" aria-label="نوع مقدار Actions">
+                <option value="secret">Secret</option>
+                <option value="variable" :disabled="githubActionsEntry.scope === 'codespace'">Variable</option>
+              </select>
+            </div>
+            <select x-show="githubActionsEntry.scope === 'repository' || githubActionsEntry.scope === 'environment'" x-model="githubOperationsRepository" aria-label="مخزن Actions">
+              <option value="">انتخاب مخزن مجاز</option>
+              <template x-for="fullName in form.github.selected_repositories" :key="fullName">
+                <option :value="fullName" x-text="fullName"></option>
+              </template>
+            </select>
+            <div class="field__row" x-show="githubActionsEntry.scope === 'organization'" x-cloak>
+              <input x-model.trim="githubActionsEntry.org" maxlength="100" placeholder="نام سازمان" dir="ltr" aria-label="نام سازمان Secret">
+              <select x-model="githubActionsEntry.visibility" aria-label="دسترسی Secret سازمان">
+                <option value="private">مخزن‌های خصوصی</option>
+                <option value="all">همهٔ مخزن‌ها</option>
+                <option value="selected">مخزن‌های انتخابی</option>
+              </select>
+            </div>
+            <input x-show="githubActionsEntry.scope === 'environment'" x-model.trim="githubActionsEntry.environment" maxlength="255" placeholder="نام Environment" dir="ltr" aria-label="نام Environment Secret" x-cloak>
+            <input x-show="githubActionsEntry.scope === 'codespace' || (githubActionsEntry.scope === 'organization' && githubActionsEntry.visibility === 'selected')" x-model.trim="githubActionsEntry.selected_repository_ids" placeholder="Repository IDها، جداشده با ویرگول" dir="ltr" aria-label="شناسه‌های مخزن برای Secret" x-cloak>
+            <div class="field__row">
+              <input x-model.trim="githubActionsEntry.name" maxlength="255" autocomplete="off" placeholder="NAME" dir="ltr" aria-label="نام Secret یا Variable">
+              <input :type="githubActionsEntry.kind === 'secret' ? 'password' : 'text'" x-model="githubActionsEntry.value" autocomplete="new-password" placeholder="مقدار — پس از ارسال پاک می‌شود" dir="ltr" aria-label="مقدار Secret یا Variable">
+            </div>
+            <div class="field__row">
+              <button class="btn btn--sm btn--primary" type="button" :disabled="githubBusy" @click="submitGitHubActionsEntry(false)">ثبت با تأیید</button>
+              <button class="btn btn--sm btn--danger" type="button" :disabled="githubBusy" @click="submitGitHubActionsEntry(true)">حذف با تأیید</button>
+            </div>
+          </details>
+
+          <details class="integration-advanced" x-show="githubConnected && form.github.selected_repositories.length" x-cloak>
+            <summary>Webhook محافظت‌شده</summary>
+            <p class="field__hint">Secret امضای Webhook فقط از مسیر مستقیم UI فرستاده و بلافاصله پاک می‌شود. این برنامه Webhook را در GitHub مدیریت می‌کند؛ دریافت رویداد عمومی به سرور HTTPS جداگانه نیاز دارد.</p>
+            <select x-model="githubOperationsRepository" aria-label="مخزن Webhook">
+              <option value="">انتخاب مخزن مجاز</option>
+              <template x-for="fullName in form.github.selected_repositories" :key="fullName">
+                <option :value="fullName" x-text="fullName"></option>
+              </template>
+            </select>
+            <div class="field__row">
+              <input x-model.trim="githubWebhookDraft.hook_id" inputmode="numeric" placeholder="Hook ID برای ویرایش" dir="ltr" aria-label="شناسه Webhook">
+              <input x-model.trim="githubWebhookDraft.url" maxlength="2048" placeholder="https://example.com/github/events" dir="ltr" aria-label="URL Webhook">
+            </div>
+            <div class="field__row">
+              <select x-model="githubWebhookDraft.content_type" aria-label="نوع محتوای Webhook">
+                <option value="json">application/json</option>
+                <option value="form">form</option>
+              </select>
+              <input x-model.trim="githubWebhookDraft.events" maxlength="4096" placeholder="push, issues, pull_request" dir="ltr" aria-label="رویدادهای Webhook">
+              <label class="github-console__repo-toggle"><input type="checkbox" x-model="githubWebhookDraft.active"> فعال</label>
+            </div>
+            <input type="password" x-model="githubWebhookDraft.secret" maxlength="1024" autocomplete="new-password" placeholder="Secret امضا — پس از ارسال پاک می‌شود" dir="ltr" aria-label="Secret Webhook">
+            <div class="field__row">
+              <button class="btn btn--primary btn--sm" type="button" @click="submitGitHubWebhook(false)" :disabled="githubBusy">ساخت با تأیید</button>
+              <button class="btn btn--danger btn--sm" type="button" @click="submitGitHubWebhook(true)" :disabled="githubBusy">ویرایش با تأیید</button>
+            </div>
+          </details>
+
+          <details class="integration-advanced github-console" x-show="githubConnected" x-cloak>
+            <summary>کنسول پیشرفتهٔ عملیات مجاز GitHub</summary>
+            <p class="field__hint">فقط operationهای ثابت backend اجرا می‌شوند؛ URL، روش HTTP و GraphQL دلخواه پذیرفته نیست. عملیات نوشتنی دوباره تأیید می‌گیرند و Secretهای دارای مقدار عمداً در این فهرست نیستند.</p>
+            <div class="field__row">
+              <select x-model="githubConsoleMode" @change="resetGitHubConsoleOperation()" aria-label="حالت کنسول GitHub">
+                <option value="read">فقط‌خواندنی</option>
+                <option value="write">تغییردهنده</option>
+              </select>
+              <select x-model="githubConsoleOperation" aria-label="عملیات مجاز GitHub" dir="ltr">
+                <template x-for="operation in githubConsoleOperations" :key="operation">
+                  <option :value="operation" x-text="operation"></option>
+                </template>
+              </select>
+            </div>
+            <div class="field__row">
+              <label class="github-console__repo-toggle"><input type="checkbox" x-model="githubConsoleUseRepository"> تزریق مخزن مجاز انتخابی</label>
+              <select x-model="githubOperationsRepository" :disabled="!githubConsoleUseRepository" aria-label="مخزن کنسول GitHub">
+                <option value="">بدون مخزن</option>
+                <template x-for="fullName in form.github.selected_repositories" :key="fullName">
+                  <option :value="fullName" x-text="fullName"></option>
+                </template>
+              </select>
+            </div>
+            <textarea x-model="githubConsoleParams" maxlength="65536" dir="ltr" spellcheck="false" placeholder='{"limit": 50}' aria-label="پارامترهای JSON کنسول GitHub"></textarea>
+            <div class="field__row">
+              <button class="btn btn--sm" :class="githubConsoleMode === 'write' ? 'btn--danger' : 'btn--primary'" type="button" @click="runGitHubConsole(false)" :disabled="githubBusy">اجرا</button>
+              <button class="btn btn--ghost btn--sm" type="button" @click="runGitHubConsole(true)" :disabled="githubBusy || !githubConsoleLastRun">اجرای دوباره / تازه‌سازی زنده</button>
+            </div>
+            <pre class="github-code github-console__result" dir="ltr" x-show="githubConsoleResult" x-text="githubConsoleResult" x-cloak></pre>
+          </details>
+        </div>
+
         <div class="field">
           <label>📧 جیمیل</label>
           <div class="field field--switch">

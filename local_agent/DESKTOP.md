@@ -23,9 +23,13 @@ python local_agent_setup.py desktop --browser
 python local_agent_setup.py web --host 0.0.0.0 --port 7824
 ```
 
-> ⚠️ هشدار امنیتی: اگر آدرس غیرمحلی (مثل `0.0.0.0`) انتخاب کنید،
-> یک توکن احراز هویت لازم است. توکن در `<DATA_DIR>/bridge.token`
-> ذخیره می‌شود.
+> ⚠️ در bind غیرمحلی (مثل `0.0.0.0`) کل Web UI و API و WebSocket محافظت
+> می‌شوند و اتصال مستقیم HTTP رد می‌شود. سرور را پشت reverse proxy معتبر HTTPS
+> قرار دهید (با فهرست proxyهای مورد اعتماد Uvicorn)، نشانی عمومی HTTPS را باز کنید
+> و توکن Bridge را در فرم ورود وارد کنید. توکن در URL یا storage مرورگر ذخیره
+> نمی‌شود؛ نشست ۱۲ ساعته در cookie امن HttpOnly نگه‌داری می‌شود. توکن پیش‌فرض در
+> `<DATA_DIR>/bridge.token` است؛ `LOCAL_AGENT_BRIDGE_TOKEN` نیز پشتیبانی می‌شود و
+> باید ۳۲ تا ۵۱۲ نویسهٔ غیرکنترلی داشته باشد. فایل token و TLS را منتشر نکنید.
 
 ![پنجرهٔ اپ دسکتاپ](../docs/images/desktop-window.png)
 

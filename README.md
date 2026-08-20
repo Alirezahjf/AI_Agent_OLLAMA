@@ -23,6 +23,8 @@
 ![رابط وب دستیار محلی](docs/images/web-dark.png)
 
 برای مستندات کامل ایجنت محلی، فایل [`local_agent/README.md`](local_agent/README.md) را ببینید.
+راهنمای ساخت GitHub App، استقرار کارگزار PKCE، permissionها و مرزهای امنیتی در
+[`docs/GITHUB_INTEGRATION_FA.md`](docs/GITHUB_INTEGRATION_FA.md) آمده است.
 
 ### ✈️ تلگرام شخصی حرفه‌ای در اپ محلی
 

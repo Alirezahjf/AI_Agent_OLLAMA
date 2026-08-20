@@ -81,6 +81,10 @@ class Action:
     # for confirmation, even for a destructive/always policy (used to honour
     # ``confirm_send=False`` per account).  Signature: (safety, arguments).
     confirm_skip: Callable[[Any, Any], bool] | None = None
+    # Stronger than confirm_override: automation, confirm_mode="never", and
+    # caller-controlled auto_confirm may not bypass this confirmation. Used by
+    # credentialed remote writes such as GitHub mutations.
+    force_human_confirmation: bool = False
 
     def to_tool_definition(self):
         from ..llm.client import ToolDefinition
@@ -93,6 +97,8 @@ class Action:
         )
 
     def needs_confirmation(self, safety, arguments: dict[str, Any] | None = None) -> bool:
+        if self.force_human_confirmation:
+            return True
         if self.confirm_skip is not None and self.confirm_skip(safety, arguments):
             return False
         if self.confirm_override is not None and self.confirm_override(safety, arguments):
@@ -132,6 +138,7 @@ class ActionRegistry:
         risk_level: Risk = Risk.SAFE,
         confirm_override: Callable[[Any, Any], bool] | None = None,
         confirm_skip: Callable[[Any, Any], bool] | None = None,
+        force_human_confirmation: bool = False,
     ) -> Callable[[Callable], Callable]:
         def wrap(func: Callable) -> Callable:
             actual_risk = getattr(func, "__action_risk__", risk_level)
@@ -145,6 +152,7 @@ class ActionRegistry:
                     risk_level=actual_risk,
                     confirm_override=confirm_override,
                     confirm_skip=confirm_skip,
+                    force_human_confirmation=force_human_confirmation,
                 )
             )
             return func
@@ -198,6 +206,11 @@ class ConfirmationGate:
             "ConfirmationGate.ask must be replaced by a UI prompt before use"
         )
 
+    @property
+    def auto_approve_enabled(self) -> bool:
+        with self._lock:
+            return self._auto_approve_all
+
     def auto_approve(self) -> None:
         with self._lock:
             self._auto_approve_all = True
@@ -228,8 +241,15 @@ def run_action(
     name: str,
     arguments: dict[str, Any],
     context: ActionContext,
+    *,
+    human_confirmed: bool = False,
 ) -> str:
-    """Validate, confirm if needed, and execute an action."""
+    """Validate, confirm if needed, and execute an action.
+
+    ``human_confirmed`` is a trusted in-process assertion used only after the
+    Bridge has resolved a server-side confirmation request. Generic
+    ``ConfirmationGate.auto_approve()`` can never satisfy a force-human action.
+    """
     action = registry.get(name)
     if action.unavailable:
         raise AssistantError(
@@ -239,10 +259,17 @@ def run_action(
     _validate_arguments(action, arguments)
 
     if action.needs_confirmation(context.runtime.settings.safety, arguments):
-        approved, reason = context.confirmation_gate.ask(action, arguments)
-        if not approved:
-            raise ActionRefused(f"action {name!r} was not approved: {reason}")
-        logger.info("action %s approved (%s)", name, reason)
+        if action.force_human_confirmation and human_confirmed:
+            logger.info("action %s approved by resolved human confirmation", name)
+        else:
+            if action.force_human_confirmation and context.confirmation_gate.auto_approve_enabled:
+                raise ActionRefused(
+                    f"action {name!r} was not approved: a live human confirmation is required"
+                )
+            approved, reason = context.confirmation_gate.ask(action, arguments)
+            if not approved:
+                raise ActionRefused(f"action {name!r} was not approved: {reason}")
+            logger.info("action %s approved (%s)", name, reason)
 
     logger.info("running action %s with %s", name, _summarize_arguments(arguments))
     try:
@@ -309,10 +336,29 @@ def _validate_arguments(action: Action, arguments: dict[str, Any]) -> None:
             raise AssistantError(f"action {action.name} missing required arg: {required}")
 
 
+_SENSITIVE_ARGUMENT_KEYS = {
+    "access_token", "refresh_token", "token", "password", "secret",
+    "api_key", "api_hash", "authorization", "code_verifier", "value",
+}
+
+
+def _redact_argument(value: Any, key: str = "") -> Any:
+    lowered = key.casefold()
+    if lowered in _SENSITIVE_ARGUMENT_KEYS or any(
+        marker in lowered for marker in ("password", "secret", "token", "api_key")
+    ):
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {item_key: _redact_argument(item, str(item_key)) for item_key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_argument(item) for item in value]
+    return value
+
+
 def _summarize_arguments(arguments: dict[str, Any]) -> str:
     parts: list[str] = []
     for key, value in arguments.items():
-        rendered = str(value)
+        rendered = str(_redact_argument(value, key))
         if len(rendered) > 80:
             rendered = rendered[:77] + "..."
         parts.append(f"{key}={rendered!r}")

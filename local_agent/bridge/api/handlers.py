@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 
 from ...actions import build_default_registry, describe_action, run_action
 from ...actions.config_actions import register_config
+from ...actions.github_actions import register_github
 from ...actions.gmail_actions import register_gmail
 from ...actions.registry import ActionContext, ConfirmationGate
 from ...actions.scheduler_actions import register_scheduler
@@ -39,6 +40,7 @@ from ...core.errors import ActionRefused, AssistantError, DependencyMissing
 from ...core.logging_setup import get_logger
 from ...core.notify import notify_desktop
 from ...core.scheduler import ScheduledJob, Scheduler
+from ...github import GitHubService
 from ...gmail import GmailClient
 from ...gmail.client import GmailError
 from ...llm import create_client
@@ -179,6 +181,11 @@ class BridgeHandlers:
         register_config(registry, context)
         register_gmail(registry, context)
         register_scheduler(registry, context)
+        github = GitHubService(
+            settings.github, default_clone_root=settings.work_dir / "github",
+        )
+        context.extra["github"] = github
+        register_github(registry, context)
         context.extra["telegram"] = None
         context.extra["registry"] = registry
         gmail = _build_gmail_client(settings)
@@ -194,6 +201,7 @@ class BridgeHandlers:
         # ``config_set`` (used when the user says «به تلگرامم وصل شو») needs
         # a way to persist + apply settings from inside the action layer.
         context.extra["settings_owner"] = handlers
+        github.set_repository_created_callback(handlers._select_created_github_repository)
         handlers._sync_telegram_accounts()
         handlers._start_telegram_auto_connect()
         # Scheduled reminders/tasks: persisted in data_dir/scheduled.json,
@@ -313,7 +321,9 @@ class BridgeHandlers:
                     self.settings.telegram.account(None).confirm_send
                 ),
                 "gmail_confirm_send": bool(self.settings.gmail.confirm_send),
+                "github_enabled": bool(self.settings.github.enabled),
             },
+            "github": self.github_status(),
             "warnings": self._warnings(),
             "actions": [a.name for a in self.registry.all()],
             "history": self.runtime.stats(),
@@ -323,6 +333,12 @@ class BridgeHandlers:
     def gmail_connected(self) -> bool:
         client = self.context.extra.get("gmail")
         return bool(client and client.is_connected)
+
+    def github_status(self, *, verify: bool = False) -> dict[str, Any]:
+        service = self.context.extra.get("github")
+        return service.status(verify=verify) if service is not None else {
+            "enabled": False, "configured": False, "connected": False,
+        }
 
     def _warnings(self) -> list[str]:
         """Human-readable (Persian) warnings shown as a banner in the UI."""
@@ -347,6 +363,11 @@ class BridgeHandlers:
                 "App Password (یا credentials.json) را در تنظیمات ست کنید و دکمهٔ "
                 "«اتصال جیمیل» را بزنید."
             )
+        github = self.github_status()
+        if github.get("enabled") and not github.get("configured"):
+            out.append("GitHub فعال است ولی Client ID یا نشانی کارگزار OAuth تنظیم نشده است.")
+        elif github.get("enabled") and not github.get("vault_available"):
+            out.append(str(github.get("vault_error") or "صندوق امن توکن GitHub در دسترس نیست."))
         return out
 
     def _set_model(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -361,13 +382,16 @@ class BridgeHandlers:
             llm_dict["ollama_model"] = str(model)
             llm_dict["openai_model"] = str(model)
         new_llm = type(self.settings.llm)(**llm_dict)
-        self.settings = self.settings.with_overrides(llm=new_llm)
-        self._persist_settings()
+        candidate = self.settings.with_overrides(llm=new_llm)
         client = create_client(new_llm)
+        if not self._persist_settings(candidate):
+            raise AssistantError("ذخیرهٔ تنظیمات ناموفق بود؛ تنظیمات زنده تغییر نکرد")
+        self.settings = candidate
+        self.runtime.settings = candidate
         return {"provider": new_llm.provider, "model": client.model_name}
 
-    def _persist_settings(self) -> bool:
-        """Write the current settings back to ``config.json``.
+    def _persist_settings(self, settings: AssistantSettings | None = None) -> bool:
+        """Atomically write settings to ``config.json``.
 
         Without this, provider/model/API-key changes made from the web UI
         are lost on the next restart.  Failures are logged, never raised:
@@ -376,19 +400,23 @@ class BridgeHandlers:
         The write is atomic (tmp + ``os.replace``) so a crash mid-write
         can never corrupt the file the next start reads.
         """
-        path = self.settings.effective_config_path()
+        candidate = settings or self.settings
+        path = candidate.effective_config_path()
+        tmp = path.with_suffix(path.suffix + ".tmp")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(path.suffix + ".tmp")
             tmp.write_text(
-                json.dumps(self.settings.to_dict(), indent=2, ensure_ascii=False),
+                json.dumps(candidate.to_dict(), indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
             os.replace(tmp, path)
-            self.runtime.settings = self.settings
             return True
-        except OSError as exc:
+        except (OSError, TypeError, ValueError) as exc:
             logger.warning("could not persist settings to %s: %s", path, exc)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("could not remove temporary settings file %s", tmp)
             return False
 
     # ------------------------------------------------- config_set support
@@ -403,6 +431,8 @@ class BridgeHandlers:
         """
         if path.startswith("telegram."):
             return self._apply_telegram_config_set(path, value)
+        if path.startswith("github."):
+            raise AssistantError("تنظیمات امنیتی GitHub فقط از رابط محافظت‌شدهٔ تنظیمات قابل تغییرند")
         payload = self.settings.to_dict()
         parts = path.split(".")
         cursor = payload
@@ -455,17 +485,96 @@ class BridgeHandlers:
             raise AssistantError(f"تنظیم ناشناخته: {path}")
         return self._apply_settings(self.settings.with_overrides(telegram=new_tg))
 
+    def _select_created_github_repository(self, full_name: str) -> None:
+        """Atomically authorize a repository immediately after creating it."""
+        selected = list(self.settings.github.selected_repositories)
+        if full_name.casefold() in {item.casefold() for item in selected}:
+            return
+        selected.append(full_name)
+        github = replace(self.settings.github, selected_repositories=tuple(selected))
+        github.validate()
+        self._apply_settings(replace(self.settings, github=github))
+
     def _apply_settings(self, new_settings: AssistantSettings) -> AssistantSettings:
         """Swap in new settings and keep every dependent object in sync."""
         old = self.settings
-        self.settings = new_settings
-        self.runtime.settings = new_settings
-        self.gate = ConfirmationGate(new_settings.safety)
-        self.context.confirmation_gate = self.gate
-        self.context.work_dir = new_settings.work_dir
-        self._persist_settings()
-        self._sync_telegram_accounts()
-        self._sync_gmail_client(old)
+        github = self.context.extra.get("github")
+        if github is not None:
+            # Validate this security boundary before either disk or live state
+            # changes. A connected credential cannot be rebound to new hosts.
+            github.validate_settings_update(new_settings.github)
+        if not self._persist_settings(new_settings):
+            raise AssistantError("ذخیرهٔ تنظیمات ناموفق بود؛ تنظیمات زنده تغییر نکرد")
+
+        # Keep enough live state to roll the transaction back if rebuilding any
+        # dependent integration fails after the atomic settings-file replace.
+        old_gate = self.gate
+        old_work_dir = self.context.work_dir
+        old_telegram_accounts = dict(self._telegram_accounts)
+        old_telegram = self.telegram
+        old_context_telegram = self.context.extra.get("telegram")
+        old_gmail = self.context.extra.get("gmail")
+        try:
+            if github is not None:
+                github.update_settings(
+                    new_settings.github,
+                    default_clone_root=new_settings.work_dir / "github",
+                )
+            self.settings = new_settings
+            self.runtime.settings = new_settings
+            self.gate = ConfirmationGate(new_settings.safety)
+            self.context.confirmation_gate = self.gate
+            self.context.work_dir = new_settings.work_dir
+            self._sync_telegram_accounts()
+            self._sync_gmail_client(old)
+        except Exception as exc:
+            # Restore disk first, then all shared references. Newly-created
+            # clients are torn down best-effort; the original clients remain
+            # authoritative even if their replacement partially initialized.
+            restored = self._persist_settings(old)
+            if github is not None:
+                try:
+                    github.update_settings(
+                        old.github,
+                        default_clone_root=old.work_dir / "github",
+                    )
+                except Exception as rollback_exc:  # noqa: BLE001
+                    logger.error(
+                        "GitHub settings rollback failed: %s",
+                        type(rollback_exc).__name__,
+                    )
+                    restored = False
+            for name, client in list(self._telegram_accounts.items()):
+                if name not in old_telegram_accounts or old_telegram_accounts[name] is not client:
+                    try:
+                        client.disconnect()
+                    except Exception as teardown_exc:  # noqa: BLE001
+                        logger.debug(
+                            "Telegram rollback teardown failed: %s",
+                            type(teardown_exc).__name__,
+                        )
+            current_gmail = self.context.extra.get("gmail")
+            if current_gmail is not None and current_gmail is not old_gmail:
+                try:
+                    current_gmail.disconnect()
+                except Exception as teardown_exc:  # noqa: BLE001
+                    logger.debug(
+                        "Gmail rollback teardown failed: %s",
+                        type(teardown_exc).__name__,
+                    )
+            self.settings = old
+            self.runtime.settings = old
+            self.gate = old_gate
+            self.context.confirmation_gate = old_gate
+            self.context.work_dir = old_work_dir
+            self._telegram_accounts = old_telegram_accounts
+            self.telegram = old_telegram
+            self.context.extra["telegram"] = old_context_telegram
+            self.context.extra["gmail"] = old_gmail
+            message = "اعمال تنظیمات ناموفق بود؛ تنظیمات قبلی بازیابی شد"
+            if not restored:
+                message = "اعمال تنظیمات ناموفق بود و بازیابی فایل تنظیمات نیز شکست خورد"
+            raise AssistantError(message) from exc
         return new_settings
 
     def _start_telegram_auto_connect(self) -> None:
@@ -906,14 +1015,33 @@ class BridgeHandlers:
 
     # ---------------------------------------------------------------- actions
 
-    def _invoke_action_sync(self, inv: ActionInvocation) -> ActionResult:
+    def _invoke_action_sync(
+        self, inv: ActionInvocation, *, human_confirmed: bool = False,
+    ) -> ActionResult:
         with self._lock:
+            action = self.registry.get(inv.name)
+            # ``auto_confirm`` is part of the public Bridge protocol. It may
+            # never authorize force-human actions; only a resolved, server-side
+            # pending confirmation can set ``human_confirmed``.
+            if action.force_human_confirmation and inv.auto_confirm and not human_confirmed:
+                return ActionResult(
+                    name=inv.name,
+                    text="این عملیات به تأیید زندهٔ کاربر نیاز دارد و auto_confirm مجاز نیست",
+                    success=False,
+                    refused=True,
+                )
             # Install a temporary auto-approve gate for this call
             previous = self.gate._auto_approve_all  # type: ignore[attr-defined]
             if inv.auto_confirm:
                 self.gate.auto_approve()
             try:
-                result_text = run_action(self.registry, inv.name, inv.arguments, self.context)
+                result_text = run_action(
+                    self.registry,
+                    inv.name,
+                    inv.arguments,
+                    self.context,
+                    human_confirmed=human_confirmed,
+                )
                 return ActionResult(
                     name=inv.name,
                     text=result_text,
@@ -1194,7 +1322,7 @@ class BridgeHandlers:
         if not action.needs_confirmation(self.settings.safety, arguments):
             return self._invoke_action_sync(ActionInvocation(name=name, arguments=arguments))
 
-        if self.gate._auto_approve_all:  # type: ignore[attr-defined]
+        if self.gate._auto_approve_all and not action.force_human_confirmation:  # type: ignore[attr-defined]
             return self._invoke_action_sync(ActionInvocation(name=name, arguments=arguments))
 
         request_id = uuid.uuid4().hex[:12]
@@ -1221,7 +1349,8 @@ class BridgeHandlers:
                 self._pending_confirms.pop(request_id, None)
             if pending.approved:
                 return self._invoke_action_sync(
-                    ActionInvocation(name=name, arguments=arguments, auto_confirm=True)
+                    ActionInvocation(name=name, arguments=arguments, auto_confirm=True),
+                    human_confirmed=True,
                 )
             return ActionResult(
                 name=name, text="user declined via bridge", success=False, refused=True

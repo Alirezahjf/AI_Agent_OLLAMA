@@ -16,6 +16,9 @@ dependencies = [
 
 [project.optional-dependencies]
 browser = ["playwright>=1.45,<2"]
+# Secure OS credential-vault storage and libsodium sealed boxes for GitHub
+# Actions secrets.  Tokens never fall back to plaintext files.
+github = ["keyring>=25.0", "PyNaCl>=1.5"]
 
 # Everything the FastAPI web UI needs.  Kept separate from `desktop` so
 # `pip install -e ".[web]"` gives a working browser UI without pulling in
@@ -57,7 +60,7 @@ build = ["pyinstaller>=6.0"]
 dev = ["pytest>=8.0", "ruff>=0.5"]
 
 # One-shot install for a normal Windows user.
-all = ["persian-ollama-coding-agent[web,desktop,app]"]
+all = ["persian-ollama-coding-agent[web,desktop,app,github]"]
 
 [project.scripts]
 persian-agent-telegram = "agent.bot:main"
@@ -68,6 +71,7 @@ persian-bridge-telegram = "local_agent.bridge.telegram_bot:run_telegram"
 persian-bridge-bale = "local_agent.bridge.telegram_bot:run_bale"
 persian-local-desktop = "local_agent.desktop:run"
 persian-local-installer = "local_agent.desktop.build:main"
+persian-github-oauth-broker = "local_agent.github.broker:main"
 
 # Without this, setuptools' flat-layout auto-discovery sees `agent`,
 # `local_agent` *and* `tests_local_agent` at the top level and refuses to

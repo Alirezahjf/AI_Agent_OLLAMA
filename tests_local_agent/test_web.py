@@ -375,13 +375,28 @@ def purge_server(tmp_path: Path) -> WebServer:
     server.stop()
 
 
+def _purge_security(server: WebServer) -> tuple[requests.Session, str, dict[str, str]]:
+    """Create the signed browser session and CSRF headers required by purge."""
+    session = requests.Session()
+    origin = f"http://127.0.0.1:{server.port}"
+    session.get(f"{origin}/", timeout=5)
+    response = session.post(
+        f"{origin}/api/github/security", headers={"Origin": origin}, json={}, timeout=5,
+    )
+    assert response.status_code == 200
+    headers = {"Origin": origin, "X-CSRF-Token": response.json()["csrf_token"]}
+    return session, origin, headers
+
+
 def test_api_purge_requires_explicit_confirm(purge_server: WebServer) -> None:
-    r = requests.post(f"http://127.0.0.1:{purge_server.port}/api/purge", json={}, timeout=5)
+    session, origin, headers = _purge_security(purge_server)
+    r = session.post(f"{origin}/api/purge", headers=headers, json={}, timeout=5)
     assert r.status_code == 400
     assert "تأیید" in r.json()["detail"]
     # confirmed=false must not delete anything
-    r2 = requests.post(
-        f"http://127.0.0.1:{purge_server.port}/api/purge",
+    r2 = session.post(
+        f"{origin}/api/purge",
+        headers=headers,
         json={"confirm": False, "shutdown": False},
         timeout=5,
     )
@@ -393,8 +408,10 @@ def test_api_purge_wipes_data_dir(purge_server: WebServer, tmp_path: Path) -> No
     data_dir = purge_server.settings.data_dir
     keep = tmp_path / "outside.txt"
     keep.write_text("نباید پاک شود", encoding="utf-8")
-    r = requests.post(
-        f"http://127.0.0.1:{purge_server.port}/api/purge",
+    session, origin, headers = _purge_security(purge_server)
+    r = session.post(
+        f"{origin}/api/purge",
+        headers=headers,
         json={"confirm": True, "shutdown": False, "include_repo_caches": False},
         timeout=10,
     )

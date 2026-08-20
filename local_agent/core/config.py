@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -53,8 +54,15 @@ def _looks_like_assistant_config(payload: dict) -> bool:
     """
     return any(
         key in payload
-        for key in ("llm", "telegram", "gmail", "safety",
-                    "allowed_user_ids", "telegram_token", "bale_token")
+        for key in (
+            "llm",
+            "telegram",
+            "gmail",
+            "safety",
+            "allowed_user_ids",
+            "telegram_token",
+            "bale_token",
+        )
     )
 
 
@@ -68,8 +76,15 @@ def _has_real_settings(payload: dict) -> bool:
     if not isinstance(payload, dict) or not payload:
         return False
     if _looks_like_assistant_config(payload):
-        for key in ("llm", "telegram", "gmail", "safety",
-                    "allowed_user_ids", "telegram_token", "bale_token"):
+        for key in (
+            "llm",
+            "telegram",
+            "gmail",
+            "safety",
+            "allowed_user_ids",
+            "telegram_token",
+            "bale_token",
+        ):
             value = payload.get(key)
             if value not in (None, "", False, 0, [], {}, ()):
                 return True
@@ -223,12 +238,11 @@ class TelegramSettings:
         enabled = changes.get("enabled", self.enabled)
         active = changes.get("active_account", self.active_account)
         if "accounts" in changes:
-            accounts = tuple(
-                _telegram_account_from_dict(a) for a in (changes["accounts"] or [])
-            )
+            accounts = tuple(_telegram_account_from_dict(a) for a in (changes["accounts"] or []))
         else:
             fields = {
-                k: v for k, v in changes.items()
+                k: v
+                for k, v in changes.items()
                 if k in ("api_id", "api_hash", "phone", "session_name", "confirm_send")
             }
             current = list(self.accounts)
@@ -237,8 +251,7 @@ class TelegramSettings:
                 # the active one so legacy fields have somewhere to land.
                 current = [TelegramAccount(name=active, enabled=enabled)]
             accounts = tuple(
-                replace(acc, **fields) if acc.name == active else acc
-                for acc in current
+                replace(acc, **fields) if acc.name == active else acc for acc in current
             )
         return TelegramSettings(enabled=enabled, active_account=active, accounts=accounts)
 
@@ -291,6 +304,159 @@ class SafetySettings:
 
 
 @dataclass(frozen=True)
+class GitHubSettings:
+    """GitHub App integration settings (credentials are never stored here).
+
+    ``client_id`` is public.  The GitHub App client secret belongs only on
+    the separately deployed OAuth broker.  User/refresh tokens are kept in
+    the operating-system credential vault by :mod:`local_agent.github`.
+    """
+
+    enabled: bool = False
+    client_id: str = ""
+    broker_url: str = ""
+    callback_url: str = ""
+    api_url: str = "https://api.github.com"
+    web_url: str = "https://github.com"
+    graphql_url: str = "https://api.github.com/graphql"
+    selected_repositories: tuple[str, ...] = ()
+    local_clone_root: str = ""
+    allowed_origins: tuple[str, ...] = ()
+
+    def validate(self) -> None:
+        from urllib.parse import urlparse
+
+        if not isinstance(self.enabled, bool):
+            raise ConfigError("github.enabled must be a boolean")
+        if not isinstance(self.client_id, str):
+            raise ConfigError("github.client_id must be a string")
+        client_id = self.client_id
+        if self.enabled and (not client_id or not self.broker_url):
+            raise ConfigError(
+                "github.client_id and github.broker_url are required when GitHub is enabled"
+            )
+        if client_id and (
+            client_id != client_id.strip()
+            or len(client_id) > 255
+            or not re.fullmatch(r"[A-Za-z0-9._-]+", client_id)
+        ):
+            raise ConfigError("github.client_id is invalid")
+        for field_name in ("broker_url", "callback_url", "api_url", "web_url", "graphql_url"):
+            raw = getattr(self, field_name)
+            if not isinstance(raw, str):
+                raise ConfigError(f"github.{field_name} must be a string")
+            original = raw
+            value = original.strip()
+            if not value:
+                continue
+            if len(value) > 2048:
+                raise ConfigError(f"github.{field_name} is too long")
+            if original != value:
+                raise ConfigError(f"github.{field_name} must not have surrounding whitespace")
+            try:
+                parsed = urlparse(value)
+                hostname = parsed.hostname
+                _port = parsed.port  # Reject malformed and out-of-range ports.
+            except ValueError as exc:
+                raise ConfigError(f"github.{field_name} contains an invalid host or port") from exc
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc or not hostname:
+                raise ConfigError(f"github.{field_name} must be an absolute HTTP(S) URL")
+            if (
+                parsed.username
+                or parsed.password
+                or parsed.params
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ConfigError(
+                    f"github.{field_name} must not contain credentials, parameters, a query, or a fragment"
+                )
+            is_loopback = hostname in {"127.0.0.1", "localhost", "::1"}
+            if parsed.scheme != "https" and not is_loopback:
+                raise ConfigError(
+                    f"github.{field_name} must use HTTPS (except loopback development)"
+                )
+        if not isinstance(self.allowed_origins, tuple) or len(self.allowed_origins) > 100:
+            raise ConfigError("github.allowed_origins must contain at most 100 origins")
+        if len(
+            {origin.casefold() for origin in self.allowed_origins if isinstance(origin, str)}
+        ) != len(self.allowed_origins):
+            raise ConfigError("github.allowed_origins contains duplicates or non-string entries")
+        for origin in self.allowed_origins:
+            if not isinstance(origin, str) or len(origin) > 2048:
+                raise ConfigError("github.allowed_origins contains an invalid entry")
+            raw_value = origin.strip()
+            value = raw_value.rstrip("/")
+            try:
+                parsed = urlparse(value)
+                hostname = parsed.hostname
+                port = parsed.port
+            except ValueError as exc:
+                raise ConfigError(
+                    "github.allowed_origins contains an invalid host or port"
+                ) from exc
+            is_loopback = hostname in {"127.0.0.1", "localhost", "::1"}
+            canonical_host = (hostname or "").lower()
+            if ":" in canonical_host:
+                canonical_host = f"[{canonical_host}]"
+            if port and port != (443 if parsed.scheme == "https" else 80):
+                canonical_host = f"{canonical_host}:{port}"
+            canonical = f"{parsed.scheme}://{canonical_host}"
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.netloc
+                or parsed.username
+                or parsed.password
+                or parsed.path
+                or parsed.params
+                or parsed.query
+                or parsed.fragment
+                or (parsed.scheme != "https" and not is_loopback)
+                or value != canonical
+                or raw_value not in {canonical, f"{canonical}/"}
+            ):
+                raise ConfigError(
+                    "github.allowed_origins entries must be canonical HTTPS origins without a path "
+                    "(HTTP is allowed only for loopback development)"
+                )
+        if (
+            not isinstance(self.selected_repositories, tuple)
+            or len(self.selected_repositories) > 1_000
+        ):
+            raise ConfigError("github.selected_repositories must contain at most 1000 entries")
+        if len(
+            {
+                repository.casefold()
+                for repository in self.selected_repositories
+                if isinstance(repository, str)
+            }
+        ) != len(self.selected_repositories):
+            raise ConfigError(
+                "github.selected_repositories contains duplicates or non-string entries"
+            )
+        if (
+            not isinstance(self.local_clone_root, str)
+            or len(self.local_clone_root) > 4096
+            or any(
+                ord(character) < 0x20 or ord(character) == 0x7F
+                for character in self.local_clone_root
+            )
+        ):
+            raise ConfigError("github.local_clone_root is invalid")
+        owner_pattern = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
+        repository_pattern = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
+        for full_name in self.selected_repositories:
+            parts = full_name.split("/")
+            if (
+                len(parts) != 2
+                or not owner_pattern.fullmatch(parts[0])
+                or not repository_pattern.fullmatch(parts[1])
+                or parts[1] in {".", ".."}
+            ):
+                raise ConfigError(f"invalid GitHub repository name: {full_name!r}")
+
+
+@dataclass(frozen=True)
 class GmailSettings:
     """Gmail integration (OAuth2 installed-app, IMAP/SMTP fallback).
 
@@ -316,6 +482,7 @@ class AssistantSettings:
     work_dir: Path = field(default_factory=Path.cwd)
     llm: LLMSettings = field(default_factory=LLMSettings)
     telegram: TelegramSettings = field(default_factory=TelegramSettings)
+    github: GitHubSettings = field(default_factory=GitHubSettings)
     gmail: GmailSettings = field(default_factory=GmailSettings)
     safety: SafetySettings = field(default_factory=SafetySettings)
     # The exact file :func:`load_settings` read from.  This is the *single
@@ -411,6 +578,11 @@ class AssistantSettings:
                 )
             safety = SafetySettings(**(payload.get("safety") or {}))
             tg = _telegram_from_payload(tg_payload)
+            github_payload = dict(payload.get("github") or {})
+            for sequence_key in ("selected_repositories", "allowed_origins"):
+                github_payload[sequence_key] = tuple(github_payload.get(sequence_key) or ())
+            github = GitHubSettings(**github_payload)
+            github.validate()
             gmail = GmailSettings(**(payload.get("gmail") or {}))
             data_dir = Path(payload.get("data_dir", _default_data_dir())).expanduser()
             work_dir = Path(payload.get("work_dir", str(Path.cwd()))).expanduser()
@@ -426,6 +598,7 @@ class AssistantSettings:
                 work_dir=work_dir,
                 llm=llm,
                 telegram=tg,
+                github=github,
                 gmail=gmail,
                 safety=safety,
                 telegram_token=telegram_token,
@@ -458,28 +631,32 @@ def _telegram_from_payload(tg_payload: dict) -> TelegramSettings:
     active = str(tg_payload.get("active_account", "اصلی") or "اصلی")
     raw_accounts = tg_payload.get("accounts") or []
     if not raw_accounts:
-        raw_accounts = [{
-            "name": "اصلی",
-            "enabled": enabled,
-            "api_id": tg_payload.get("api_id", 0),
-            "api_hash": tg_payload.get("api_hash", ""),
-            "phone": tg_payload.get("phone", ""),
-            "session_name": tg_payload.get("session_name", "assistant"),
-            "confirm_send": tg_payload.get("confirm_send", True),
-        }]
+        raw_accounts = [
+            {
+                "name": "اصلی",
+                "enabled": enabled,
+                "api_id": tg_payload.get("api_id", 0),
+                "api_hash": tg_payload.get("api_hash", ""),
+                "phone": tg_payload.get("phone", ""),
+                "session_name": tg_payload.get("session_name", "assistant"),
+                "confirm_send": tg_payload.get("confirm_send", True),
+            }
+        ]
     accounts: list[TelegramAccount] = []
     for raw in raw_accounts:
         if not isinstance(raw, dict):
             continue
-        accounts.append(TelegramAccount(
-            name=str(raw.get("name", "اصلی") or "اصلی"),
-            enabled=bool(raw.get("enabled", True)),
-            api_id=int(raw.get("api_id", 0) or 0),
-            api_hash=str(raw.get("api_hash", "")),
-            phone=str(raw.get("phone", "")),
-            session_name=str(raw.get("session_name", "assistant") or "assistant"),
-            confirm_send=bool(raw.get("confirm_send", True)),
-        ))
+        accounts.append(
+            TelegramAccount(
+                name=str(raw.get("name", "اصلی") or "اصلی"),
+                enabled=bool(raw.get("enabled", True)),
+                api_id=int(raw.get("api_id", 0) or 0),
+                api_hash=str(raw.get("api_hash", "")),
+                phone=str(raw.get("phone", "")),
+                session_name=str(raw.get("session_name", "assistant") or "assistant"),
+                confirm_send=bool(raw.get("confirm_send", True)),
+            )
+        )
     if not accounts:
         accounts = [TelegramAccount(name="اصلی", enabled=enabled)]
     names = {a.name for a in accounts}
@@ -541,7 +718,7 @@ def _apply_env_overrides(payload: dict) -> dict:
     for env_key, env_value in os.environ.items():
         if not env_key.startswith(prefix):
             continue
-        path = env_key[len(prefix):].lower().split("__")
+        path = env_key[len(prefix) :].lower().split("__")
         cursor = out
         for step in path[:-1]:
             cursor = cursor.setdefault(step, {})
@@ -553,11 +730,20 @@ def _apply_env_overrides(payload: dict) -> dict:
 
 def _coerce_env_value(raw: str) -> object:
     """Best-effort coercion of string env values into JSON-ish types."""
-    lowered = raw.strip().lower()
+    stripped = raw.strip()
+    lowered = stripped.lower()
     if lowered in {"true", "yes", "on"}:
         return True
     if lowered in {"false", "no", "off"}:
         return False
+    # Structured settings such as GitHub repository/origin allow-lists can
+    # be supplied as JSON arrays. Keep malformed JSON as a string so normal
+    # config validation reports the field that is wrong.
+    if stripped.startswith(("[", "{")):
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            pass
     try:
         return int(raw)
     except ValueError:
@@ -706,7 +892,8 @@ def _migrate_one_config(target_path: Path, legacy_path: Path) -> None:
             return
         logger.info(
             "تنظیمات قدیمی از %s به %s منتقل شد تا پس از ری‌استارت از بین نروند.",
-            legacy_path, target_path,
+            legacy_path,
+            target_path,
         )
 
 

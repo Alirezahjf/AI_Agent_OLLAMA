@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from .registry import Action, ActionContext, ActionRegistry, run_action as _run
+from .registry import Action, ActionContext, ActionRegistry
+from .registry import run_action as _run
 
 # Re-export the most common names so the CLI can import them with one line.
 __all__ = [
     "Action",
     "ActionContext",
     "ActionRegistry",
-    "run_action",
-    "list_actions",
     "describe_action",
+    "list_actions",
+    "run_action",
 ]
 
 
@@ -20,8 +21,16 @@ def run_action(
     name: str,
     arguments: dict,
     context: ActionContext,
+    *,
+    human_confirmed: bool = False,
 ) -> str:
-    return _run(registry, name, arguments, context)
+    return _run(
+        registry,
+        name,
+        arguments,
+        context,
+        human_confirmed=human_confirmed,
+    )
 
 
 def list_actions(registry: ActionRegistry) -> list[Action]:
